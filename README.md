@@ -2,8 +2,8 @@
 
 Windows 用デスクトップマスコット「しめじ」を Rust で再実装するプロジェクトです。
 Java 版（Shimeji-ee / Shimeji-Desktop 系）と同等の挙動（歩く・落ちる・ジャンプ・
-ドラッグ・スロー・増殖・変身・ウィンドウ運び）を、tao + softbuffer + windows-rs による
-軽量実装で目指します。
+ドラッグ・スロー・増殖・変身・ウィンドウ運び）を、tao + windows-rs による
+軽量実装で目指します（透過描画は CreateDIBSection + UpdateLayeredWindow。
 
 - 挙動: Java 版と同等（アクションの式・定数を Java ソースから逐語移植）
 - 軽量化: メモリ 5〜20MB / アイドル CPU ほぼ 0（tick 駆動・変化時のみ描画）
