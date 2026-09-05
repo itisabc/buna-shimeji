@@ -28,7 +28,7 @@ use tao::window::{Window, WindowBuilder};
 use thiserror::Error;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HWND, POINT,
+    CloseHandle, GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HWND, POINT, RECT, SIZE,
 };
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
@@ -37,8 +37,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetWindowLongPtrW, UpdateLayeredWindow, GWL_EXSTYLE, ULW_ALPHA,
-    WS_EX_LAYERED,
+    GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, SetWindowPos, UpdateLayeredWindow,
+    GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, ULW_ALPHA,
+    WS_CAPTION, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_GROUP, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
+    WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
 };
 
 #[derive(Error, Debug)]
@@ -100,6 +102,12 @@ pub fn build_layered_tao_window<T: 'static>(
 ) -> Result<Window, WindowError> {
     let window = WindowBuilder::new()
         .with_decorations(false)
+        // tao 0.37 は既定で非装飾窓にも DWM 影を残す(decoration_shadow=true):
+        // WS_CAPTION がスタイルに残り WM_NCCALCSIZE が client を枠分だけ縮めるため、
+        // 窓矩形 ≠ client 矩形となり UpdateLayeredWindow の per-pixel α が
+        // 窓全体に適用されない(スパイク検証で白い client として表示される不具合)。
+        // 影を無効化し client = 窓全体 = 要求サイズにする。
+        .with_undecorated_shadow(false)
         .with_transparent(false)
         .with_always_on_top(true)
         .with_resizable(false)
@@ -112,8 +120,36 @@ pub fn build_layered_tao_window<T: 'static>(
 
     let hwnd = hwnd_from_isize(window.hwnd());
     unsafe {
-        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
+        // 既存の exstyle に WS_EX_LAYERED を追加する。
+        let exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle | WS_EX_LAYERED.0 as isize);
+
+        // tao 0.37 は with_decorations(false) でも WS_CAPTION|WS_SYSMENU|WS_MAX(MIN)IMIZEBOX
+        // を無条件に残す(to_window_styles)。UpdateLayeredWindow の per-pixel α 合成は
+        // 真の枠なし窓(WS_POPUP)を前提とするため、装飾系スタイルを剥がして
+        // WS_POPUP に矯正する。これがないと ULW が TRUE を返しても内容が
+        // スクリーンに合成されない(スパイク検証 2026-09-05)。
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let popup_style = (style
+            & !(WS_CAPTION.0
+                | WS_SYSMENU.0
+                | WS_MAXIMIZEBOX.0
+                | WS_MINIMIZEBOX.0
+                | WS_THICKFRAME.0
+                | WS_GROUP.0) as isize)
+            | (WS_POPUP.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0) as isize;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, popup_style);
+        // スタイル変更を非クライアント領域に反映し、outer = client = 要求サイズに矯正する
+        // (CreateWindowEx 時に AdjustWindowRect 相当で幅が膨張するための是正)。
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            width as i32,
+            height as i32,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
     }
     Ok(window)
 }
@@ -259,9 +295,12 @@ impl LayeredWindow {
     /// `UpdateLayeredWindow(ULW_ALPHA)` でウィンドウに転送する。
     ///
     /// `pixels` の長さはバッファ（resize で設定した width × height）と一致すること。
-    /// 位置・サイズはこの関数では変更しない（ULW に pptDst/psize を渡さない）。
-    /// 位置変更は tao の `Window::set_outer_position`、サイズ変更は
-    /// [`LayeredWindow::resize`] で行う（#5 の描画層が管理）。
+    ///
+    /// ULW には**現在のウィンドウ位置とバッファサイズを毎回明示的に渡す**
+    /// （Java 版 `NativeFactory` の updateWindow と同じ呼び方）。
+    /// pptDst/psize を NULL にした「内容のみ更新」形式は、この検証環境
+    /// （Windows 11 / スパイク検証 2026-09-05）では TRUE を返しながら
+    /// 画面に一切合成されないため、明示渡しが必須。
     pub fn present(&mut self, pixels: &[u32]) -> Result<(), WindowError> {
         let buffer = self.buffer.as_mut().ok_or(WindowError::NoBuffer)?;
         if pixels.len() != buffer.len() {
@@ -280,12 +319,24 @@ impl LayeredWindow {
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         let src_point = POINT { x: 0, y: 0 };
+        let size = SIZE {
+            cx: buffer.width as i32,
+            cy: buffer.height as i32,
+        };
         unsafe {
+            // 位置は現在値をそのまま渡す（ULW は pptDst で位置も設定するため、
+            // 同一座標の再設定 = 実質位置不変）。
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(self.hwnd, &mut rect);
+            let dst_point = POINT {
+                x: rect.left,
+                y: rect.top,
+            };
             UpdateLayeredWindow(
                 self.hwnd,
-                None, // hdcDst: 位置変更なし
-                None, // pptDst: 位置変更なし
-                None, // psize: サイズ変更なし（tao 側で管理）
+                None, // hdcDst: 既定のスクリーン DC を使用
+                Some(&dst_point),
+                Some(&size),
                 Some(buffer.dc),
                 Some(&src_point),
                 COLORREF(0), // ULW_ALPHA では不使用
