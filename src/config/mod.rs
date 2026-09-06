@@ -101,7 +101,10 @@ pub struct Animation {
 }
 
 /// ポーズ（画像パス・アンカー・速度・フレーム数。Java `Pose` 相当）。
-/// scale 適用（画像 + アンカー dx/dy へのプリスケール）は画像セット側（タスク #4）で行うため生値を保持する。
+/// 画像側のプリスケールは画像セット側（タスク #4）で行うため、本構造体は生値を保持する。
+/// アンカー / velocity の scale 変換はアクション構築時（タスク #7）に
+/// `imageset::scale_pose` / `scale_anchor` / `scale_velocity` で行う
+/// （Java は `AnimationBuilder.loadPose` L206-211 がロード時に適用するのと同じ位置）。
 #[derive(Debug, Clone)]
 pub struct Pose {
     pub image: String,
