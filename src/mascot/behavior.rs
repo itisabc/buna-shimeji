@@ -11,6 +11,8 @@
 //!
 //! rng 注入の全面徹底: Java の `Math.random()` 呼び出し 1 回 = 注入 rng の
 //! [`Rng::unit`] 1 回。隠れ既定乱数は作らない（頻度選択 1 回 + 再配置 1 回のみ）。
+//! #7b より Action trait の全メソッドが rng を受け取り、BehaviorRunner は保持
+//! 純度のある rng をそのまま渡す（design §1.8(e)）。
 //!
 //! Phase 1 の意図的な範囲外（doc 開示）:
 //! - (B) 参照存在検証（Java validate()）は行わない。存在しない名前の構築は
@@ -18,7 +20,7 @@
 //! - (C) Toggleable（Allowed Behaviours トグル）は #9。Phase 1 では全 Behavior が
 //!   常時有効（[`BehaviorTable::is_behavior_enabled`]）
 //! - (C) Hotspot の contains 判定と hotspot 用 isBehaviorEnabled は資産 hotspot
-//!   0 件のため placeholder（常に一致・常に有効）。実装は #7/#9
+//!   0 件のため placeholder（常に一致・常に有効）
 //! - isHidden フィルタは buildNextBehavior には存在しない（Java 正本確認済み）
 
 use super::{EnvironmentView, Mascot, MascotContext, Rng};
@@ -39,6 +41,12 @@ pub enum ActionError {
     Eval(EvalError),
     #[error("地面を失いました（LostGround）")]
     LostGround,
+}
+
+impl From<crate::config::script::EvalError> for ActionError {
+    fn from(e: crate::config::script::EvalError) -> Self {
+        ActionError::Eval(e)
+    }
 }
 
 /// Behavior 実行のエラー（Java `BehaviorExecutionException` /
@@ -64,19 +72,36 @@ pub enum HotspotState {
 
 /// 短期アクション（Java `action.Action` インターフェイス相当）。
 /// 実装は #7（ActionKind enum + match）が提供する。
+///
+/// rng 注入（design §1.8(e)）: Java `Math.random()` 呼び出し 1 回 =
+/// [`Rng::unit`] 1 回。Dragged（抵抗延長）と Regist（終了時の向き択一）が消費し、
+/// 短絡評価のため条件成立時のみ消費される。BehaviorRunner は保持している
+/// rng をそのまま action へ渡す。
 pub trait Action {
-    fn init(&mut self, mascot: &mut Mascot, env: &dyn EnvironmentView) -> Result<(), ActionError>;
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError>;
     fn has_next(
         &mut self,
         mascot: &mut Mascot,
         env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
     ) -> Result<bool, ActionError>;
-    fn next(&mut self, mascot: &mut Mascot, env: &dyn EnvironmentView) -> Result<(), ActionError>;
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError>;
     /// ドラッグ可否（Java ActionBase.isDraggable 相当）。
     fn is_draggable(
         &mut self,
         _mascot: &mut Mascot,
         _env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
     ) -> Result<bool, ActionError> {
         Ok(true)
     }
@@ -183,11 +208,11 @@ impl BehaviorRunner {
         rng: &mut dyn Rng,
     ) -> Result<(), BehaviorError> {
         self.action
-            .init(mascot, env)
+            .init(mascot, env, rng)
             .map_err(action_error_to_behavior)?;
         if !self
             .action
-            .has_next(mascot, env)
+            .has_next(mascot, env, rng)
             .map_err(action_error_to_behavior)?
         {
             let next =
@@ -233,8 +258,12 @@ impl BehaviorRunner {
         rng: &mut dyn Rng,
     ) -> Result<(), NextFlow> {
         // Java: if (action.hasNext()) { action.next(); }
-        if self.action.has_next(mascot, env).map_err(NextFlow::from)? {
-            self.action.next(mascot, env).map_err(NextFlow::from)?;
+        if self
+            .action
+            .has_next(mascot, env, rng)
+            .map_err(NextFlow::from)?
+        {
+            self.action.next(mascot, env, rng).map_err(NextFlow::from)?;
         }
 
         // Java L156-181: hotspot 走査（クリック中のときのみ）
@@ -262,7 +291,11 @@ impl BehaviorRunner {
 
         // Java L183-214
         if hotspot_state != HotspotState::Active {
-            if self.action.has_next(mascot, env).map_err(NextFlow::from)? {
+            if self
+                .action
+                .has_next(mascot, env, rng)
+                .map_err(NextFlow::from)?
+            {
                 // off-screen 判定（Java L185-191）。image 無しは Java の 0 サイズ
                 // 矩形相当として anchor を使う。
                 let (bounds_x, bounds_y, bounds_width) = match mascot.get_bounds() {
@@ -326,7 +359,7 @@ impl BehaviorRunner {
         if !handled {
             handled = !self
                 .action
-                .is_draggable(mascot, env)
+                .is_draggable(mascot, env, rng)
                 .map_err(action_error_to_behavior)?;
         }
 

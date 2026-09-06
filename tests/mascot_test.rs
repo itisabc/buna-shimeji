@@ -155,6 +155,7 @@ impl Action for MockAction {
         &mut self,
         _mascot: &mut Mascot,
         _env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
     ) -> Result<(), ActionError> {
         self.log.borrow_mut().push(Call::Init);
         self.script.init.result()
@@ -164,6 +165,7 @@ impl Action for MockAction {
         &mut self,
         _mascot: &mut Mascot,
         _env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
     ) -> Result<bool, ActionError> {
         self.has_next_calls += 1;
         self.log.borrow_mut().push(Call::HasNext);
@@ -174,6 +176,7 @@ impl Action for MockAction {
         &mut self,
         _mascot: &mut Mascot,
         _env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
     ) -> Result<(), ActionError> {
         self.log.borrow_mut().push(Call::Next);
         self.script.next.result()
@@ -183,6 +186,7 @@ impl Action for MockAction {
         &mut self,
         _mascot: &mut Mascot,
         _env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
     ) -> Result<bool, ActionError> {
         self.log.borrow_mut().push(Call::IsDraggable);
         if self.script.draggable_err {
@@ -419,6 +423,7 @@ fn anim(poses: Vec<Pose>) -> Animation {
     Animation {
         condition: None,
         poses,
+        is_turn: false,
     }
 }
 
@@ -426,6 +431,7 @@ fn anim_with(condition: Variable, poses: Vec<Pose>) -> Animation {
     Animation {
         condition: Some(condition),
         poses,
+        is_turn: false,
     }
 }
 

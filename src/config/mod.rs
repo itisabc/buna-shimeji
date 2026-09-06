@@ -39,7 +39,10 @@ pub struct ActionsConfig {
     pub actions: BTreeMap<String, ActionDef>,
 }
 
-/// 境界種別（Action の BorderType 属性。省略時は Floor）。
+/// 境界種別（Action の BorderType 属性）。
+/// Java `BorderedAction.java` L24/L40-48 逐語: 属性省略時は `None`（border 無効）。
+/// 既知値（Floor / Wall / Ceiling）のみ `Some`。未知値はパースエラー（設計上の
+/// fail-fast 強化・Java は未知値を黙って無視するが #3 で据え置き決定済み）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderType {
     Floor,
@@ -49,38 +52,44 @@ pub enum BorderType {
 
 /// アクション定義（Java `ActionBuilder` 相当）。
 /// 全バリアントが animations を持つ（Java buildAction が全型で animations を受け取るため）。
+/// `border` は BorderType 属性の有無を保持する（省略 = None = Java では border 取得なし・
+/// design §1.8(g)。Java は明示時に境界解決の結果（NotOnBorder 含む）をトークン保持する）。
 #[derive(Debug, Clone)]
 pub enum ActionDef {
     Embedded {
         class: String,
-        border: BorderType,
+        border: Option<BorderType>,
         attrs: VarMap,
         animations: Vec<Animation>,
     },
     Stay {
-        border: BorderType,
+        border: Option<BorderType>,
         attrs: VarMap,
         animations: Vec<Animation>,
     },
     Move {
-        border: BorderType,
+        border: Option<BorderType>,
         attrs: VarMap,
         animations: Vec<Animation>,
     },
     Animate {
-        border: BorderType,
+        border: Option<BorderType>,
         attrs: VarMap,
         animations: Vec<Animation>,
     },
+    /// `is_loop` は Loop 属性（既定 false・Java Sequence.java L19-20。Rust 予約語
+    /// `loop` のため `is_loop`）。資産 55 箇所使用・Dragged は Loop="true"。
     Sequence {
-        border: BorderType,
+        border: Option<BorderType>,
         attrs: VarMap,
+        is_loop: bool,
         animations: Vec<Animation>,
         children: Vec<SequenceChild>,
     },
     Select {
-        border: BorderType,
+        border: Option<BorderType>,
         attrs: VarMap,
+        is_loop: bool,
         animations: Vec<Animation>,
         children: Vec<SequenceChild>,
     },
@@ -94,10 +103,13 @@ pub enum SequenceChild {
 }
 
 /// アニメーション（Java `AnimationBuilder` 相当）。
+/// `is_turn` は IsTurn 属性（既定 false・Java AnimationBuilder L89-90 契約・
+/// 方向転換アニメ。資産使用 0 件）。
 #[derive(Debug, Clone)]
 pub struct Animation {
     pub condition: Option<Variable>,
     pub poses: Vec<Pose>,
+    pub is_turn: bool,
 }
 
 /// ポーズ（画像パス・アンカー・速度・フレーム数。Java `Pose` 相当）。
@@ -364,13 +376,22 @@ fn parse_action_def(
         _ => None,
     };
 
-    // BorderType（省略時 Floor）
+    // BorderType（Java BorderedAction.java L24/L40-48 逐語: 省略時は None（border 無効）。
+    // 既知値はそのまま Some。未知値はエラー（#3 で据え置きの fail-fast 強化））
     let border = match node.attribute("BorderType") {
-        None | Some("Floor") => BorderType::Floor,
-        Some("Wall") => BorderType::Wall,
-        Some("Ceiling") => BorderType::Ceiling,
+        None => None,
+        Some("Floor") => Some(BorderType::Floor),
+        Some("Wall") => Some(BorderType::Wall),
+        Some("Ceiling") => Some(BorderType::Ceiling),
         Some(other) => return cx.error(node, format!("BorderType の値が不正です: {other}")),
     };
+
+    // Loop（Sequence / Select のみ使用される・Java Sequence.java L19-20。
+    // Boolean.parseBoolean 相当 = "true" のみ true・省略 = false）
+    let mut is_loop = false;
+    if let Some(loop_text) = node.attribute("Loop") {
+        is_loop = loop_text.eq_ignore_ascii_case("true");
+    }
 
     // attrs: パーサが消費した属性（Type / Class / BorderType / トップレベルの Name）以外を
     // 全て Variable 化する（Java は全属性を params に入れるが、Name/Type/Class/Border は
@@ -450,12 +471,14 @@ fn parse_action_def(
         ActionKind::Sequence => ActionDef::Sequence {
             border,
             attrs,
+            is_loop,
             animations,
             children,
         },
         ActionKind::Select => ActionDef::Select {
             border,
             attrs,
+            is_loop,
             animations,
             children,
         },
@@ -480,9 +503,14 @@ fn parse_action_ref(cx: &Cx, node: Node) -> Result<SequenceChild, ConfigError> {
 }
 
 /// Animation ノードをパースする（Java: config/AnimationBuilder.java#new）。
-/// Condition 属性は任意。Pose が 1 つも無い場合は Err（Java: NoPosesInAnimationErrorMessage 相当）。
+/// Condition / IsTurn 属性は任意（IsTurn は "true" のみ true・Boolean.parseBoolean 相当）。
+/// Pose が 1 つも無い場合は Err（Java: NoPosesInAnimationErrorMessage 相当）。
 fn parse_animation(cx: &Cx, node: Node) -> Result<Animation, ConfigError> {
     let condition = node.attribute("Condition").map(Variable::parse);
+    // Java AnimationBuilder L89-90: hasAttribute && Boolean.parseBoolean(attribute)
+    let is_turn = node
+        .attribute("IsTurn")
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
     let mut poses = Vec::new();
     for child in element_children(node, "Pose") {
         poses.push(parse_pose(cx, child)?);
@@ -490,7 +518,11 @@ fn parse_animation(cx: &Cx, node: Node) -> Result<Animation, ConfigError> {
     if poses.is_empty() {
         return cx.error(node, "Animation に Pose が 1 つもありません");
     }
-    Ok(Animation { condition, poses })
+    Ok(Animation {
+        condition,
+        poses,
+        is_turn,
+    })
 }
 
 /// Pose ノードをパースする（Java: config/AnimationBuilder.java#loadPose）。

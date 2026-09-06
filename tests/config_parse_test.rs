@@ -160,7 +160,7 @@ fn all_poses(cfg: &ActionsConfig) -> Vec<&Pose> {
     anims.iter().flat_map(|a| a.poses.iter()).collect()
 }
 
-fn border_of(def: &ActionDef) -> &BorderType {
+fn border_of(def: &ActionDef) -> &Option<BorderType> {
     match def {
         ActionDef::Embedded { border, .. }
         | ActionDef::Stay { border, .. }
@@ -281,39 +281,54 @@ fn real_actions_type_distribution() {
 
 #[test]
 fn real_actions_border_types() {
-    // asset-report §3-2: 明示 BorderType 23 定義（Floor 19 / Wall 2 / Ceiling 2）、省略時は Floor
+    // asset-report §3-2: 明示 BorderType 23 定義（Floor 19 / Wall 2 / Ceiling 2）。
+    // 設計補正 design §1.8(g)（Java BorderedAction.java L24/L40-48 逐語）:
+    // 属性省略 = None（border 無効）で、省略時 Floor への折り畳みは廃止。
+    // 省略 69 定義（Fall/Jump/Dragged 等の床スナップ不要アクション）は None にパースされる。
     let cfg = real_actions();
-    let (mut floor, mut wall, mut ceiling) = (0usize, 0usize, 0usize);
+    let (mut floor, mut wall, mut ceiling, mut none) = (0usize, 0usize, 0usize, 0usize);
     for def in cfg.actions.values() {
         match border_of(def) {
-            BorderType::Floor => floor += 1,
-            BorderType::Wall => wall += 1,
-            BorderType::Ceiling => ceiling += 1,
+            Some(BorderType::Floor) => floor += 1,
+            Some(BorderType::Wall) => wall += 1,
+            Some(BorderType::Ceiling) => ceiling += 1,
+            None => none += 1,
         }
     }
-    assert_eq!(floor, 19 + 69); // 明示 19 + 省略 69
-    assert_eq!(wall, 2);
-    assert_eq!(ceiling, 2);
-    // 明示指定の実例
+    // 明示 Floor 19 箇所: conf/actions.xml L11 Stand / L17 Walk / L26 Run / L35 Dash /
+    // L46 Sit / L52 SitAndLookUp / L58 SitAndLookAtMouse / L67 SitAndSpinHeadAction /
+    // L80 SitWithLegsUp / L86 SitWithLegsDown / L92 SitAndDangleLegs / L103 Sprawl /
+    // L109 Creep / L180 WalkWithIe / L189 RunWithIe / L198 ThrowIe /
+    // L221 Bouncing / L228 Tripping / L718 HitGround
+    assert_eq!(floor, 19, "明示 BorderType=\"Floor\" の定義数");
+    // L142 GrabWall / L148 ClimbWall
+    assert_eq!(wall, 2, "明示 BorderType=\"Wall\" の定義数");
+    // L121 GrabCeiling / L127 ClimbCeiling
+    assert_eq!(ceiling, 2, "明示 BorderType=\"Ceiling\" の定義数");
+    assert_eq!(
+        none, 69,
+        "BorderType 省略の定義数（= None・Floor 折り畳みなし）"
+    );
+    // 明示指定の実例（行番号は conf/actions.xml）
     assert!(matches!(
         border_of(find_action(&cfg, "GrabWall")),
-        BorderType::Wall
+        Some(BorderType::Wall)
     ));
     assert!(matches!(
         border_of(find_action(&cfg, "ClimbWall")),
-        BorderType::Wall
+        Some(BorderType::Wall)
     ));
     assert!(matches!(
         border_of(find_action(&cfg, "GrabCeiling")),
-        BorderType::Ceiling
+        Some(BorderType::Ceiling)
     ));
     assert!(matches!(
         border_of(find_action(&cfg, "ClimbCeiling")),
-        BorderType::Ceiling
+        Some(BorderType::Ceiling)
     ));
     assert!(matches!(
         border_of(find_action(&cfg, "Stand")),
-        BorderType::Floor
+        Some(BorderType::Floor)
     ));
 }
 
@@ -1127,13 +1142,16 @@ fn synthetic_bom_and_crlf_actions_parse() {
     let cfg = result.expect("BOM + CRLF の actions.xml をパースできる");
     assert_eq!(cfg.actions.len(), 1);
     match cfg.actions.get("A").unwrap() {
-        ActionDef::Stay { border, .. } => assert!(matches!(border, BorderType::Floor)),
+        ActionDef::Stay { border, .. } => assert!(
+            border.is_none(),
+            "BorderType 省略 = None（border 無効・Java BorderedAction.java L24）"
+        ),
         _ => panic!("A は Stay"),
     }
 }
 
 #[test]
-fn synthetic_explicit_wall_border_and_default_floor() {
+fn synthetic_explicit_wall_and_omission_means_none() {
     let xml = format!(
         "{}\
          <Action Name=\"A\" Type=\"Stay\"><Animation><Pose Image=\"/x.png\" ImageAnchor=\"0,0\" Velocity=\"0,0\" Duration=\"1\"/></Animation></Action>\n\
@@ -1145,13 +1163,12 @@ fn synthetic_explicit_wall_border_and_default_floor() {
     let result = parse_actions(&path);
     let _ = std::fs::remove_file(&path);
     let cfg = result.expect("Border 属性付き actions.xml をパースできる");
-    assert!(matches!(
-        border_of(cfg.actions.get("A").unwrap()),
-        BorderType::Floor
-    ));
+    // A = BorderType 省略 → None（省略時 Floor 折り畳み廃止・design §1.8(g)）
+    assert!(matches!(border_of(cfg.actions.get("A").unwrap()), None));
+    // B = 明示 BorderType="Wall" → Some(Wall)（未知値はエラーのまま・別契約）
     assert!(matches!(
         border_of(cfg.actions.get("B").unwrap()),
-        BorderType::Wall
+        Some(BorderType::Wall)
     ));
 }
 
@@ -1382,5 +1399,96 @@ fn parsed_expressions_are_evaluable_via_public_api() {
     match eval_ok(&ctx, jumping.get("TargetX").unwrap()) {
         EvalValue::Number(n) => assert_eq!(n, 206.0),
         _ => panic!("TargetX は数値のはずが別の型"),
+    }
+}
+
+// =====================================================================
+// タスク #7b: Loop 属性（Sequence/Select）と IsTurn 属性（Animation）のパース
+// =====================================================================
+
+/// 資産 actions.xml の Loop 属性 55 箇所が ActionDef::{Sequence,Select}.is_loop に
+/// パースされる。Dragged は Loop="true"・Fall は "false"（資産 L315/L303）。
+#[test]
+fn real_actions_loop_parsed_55_total_with_dragged_true_fall_false() {
+    // ファイル内の Loop= 総数（asset-report §3-2・55 箇所）
+    let text = std::fs::read_to_string(conf_path("actions.xml")).unwrap();
+    assert_eq!(
+        text.matches("Loop=").count(),
+        55,
+        "資産の Loop 属性は 55 箇所"
+    );
+
+    let cfg = real_actions();
+    let mut loop_total = 0usize;
+    for def in cfg.actions.values() {
+        let is_loop = match def {
+            ActionDef::Sequence { is_loop, .. } => *is_loop,
+            ActionDef::Select { is_loop, .. } => *is_loop,
+            _ => continue,
+        };
+        let _ = is_loop;
+        loop_total += 1;
+    }
+    assert_eq!(
+        loop_total, 59,
+        "全 Sequence/Select 定義が Loop（明示 55 + 省略 4）と無関係なく is_loop を持つ"
+    );
+
+    match find_action(&cfg, "Dragged") {
+        ActionDef::Sequence { is_loop, .. } => assert!(*is_loop, "Dragged は Loop true"),
+        _ => panic!("Dragged は Sequence"),
+    }
+    match find_action(&cfg, "Fall") {
+        ActionDef::Sequence { is_loop, .. } => assert!(!*is_loop, "Fall は Loop false"),
+        _ => panic!("Fall は Sequence"),
+    }
+}
+
+/// 合成 XML: Sequence/Select の Loop 属性と Animation の IsTurn 属性
+/// （Animation.java L89-90 契約相当・資産使用 0 件のため合成で pin）。
+#[test]
+fn synthetic_loop_and_is_turn_parse_sequence_select() {
+    let xml = format!(
+        "{}\
+         <Action Name=\"S\" Type=\"Sequence\" Loop=\"true\">\
+         <Action Name=\"I\" Type=\"Animate\" Loop=\"false\">\
+         <Animation IsTurn=\"true\"><Pose Image=\"/x.png\" ImageAnchor=\"0,0\" Velocity=\"0,0\" Duration=\"1\"/></Animation>\
+         </Action>\
+         <ActionReference Name=\"I\"/>\
+         </Action>\
+         <Action Name=\"Q\" Type=\"Select\"><Animation><Pose Image=\"/y.png\" ImageAnchor=\"0,0\" Velocity=\"0,0\" Duration=\"1\"/></Animation><ActionReference Name=\"I\"/></Action>\
+         </ActionList>\n</Mascot>\n",
+        ACTIONS_XML_HEAD
+    );
+    let path = temp_conf("loop_isturn", &xml);
+    let result = parse_actions(&path);
+    let _ = std::fs::remove_file(&path);
+    let cfg = result.expect("Loop / IsTurn 属性でパースできる");
+    match cfg.actions.get("S").unwrap() {
+        ActionDef::Sequence { is_loop, .. } => assert!(
+            *is_loop,
+            "Sequence の Loop 属性は ActionDef.is_loop に保持される"
+        ),
+        _ => panic!("S は Sequence"),
+    }
+    match cfg.actions.get("Q").unwrap() {
+        ActionDef::Select { is_loop, .. } => {
+            assert!(!*is_loop, "Loop 属性が無い Select は既定 false");
+        }
+        _ => panic!("Q は Select"),
+    }
+    // Inline Action（匿名 Action）の Animation.is_turn: IsTurn="true" → true
+    match cfg.actions.get("S").unwrap() {
+        ActionDef::Sequence { children, .. } => match &children[0] {
+            SequenceChild::Inline(inner) => match inner.as_ref() {
+                ActionDef::Animate { animations, .. } => assert!(
+                    animations[0].is_turn,
+                    "Animation の IsTurn 属性は is_turn へ（AnimationBuilder.java L89-90 契約）"
+                ),
+                _ => panic!("Inline は Animate"),
+            },
+            _ => panic!("S[0] は Inline"),
+        },
+        _ => panic!(),
     }
 }

@@ -20,6 +20,7 @@
 //! - needs_repaint のクリア（Java apply 相当）とウィンドウ描画は #8 renderer glue
 //! - 効果音実体・DebugWindow・setPaused のトレイ通知は #9
 
+pub mod action;
 pub mod animation;
 pub mod behavior;
 pub mod env;
@@ -131,6 +132,31 @@ pub trait EnvironmentView {
 
     /// 投げ（ThrowIE）許可設定（settings.throwing の供給経路）。
     fn throwing_allowed(&self) -> bool {
+        todo!("app impl at #8")
+    }
+
+    /// 増殖許可設定（settings.breeding の供給経路・design §1.8(f)）。
+    fn breeding_allowed(&self) -> bool {
+        todo!("app impl at #8")
+    }
+
+    /// Transients（Breed の BornTransient 経路）許可設定
+    /// （settings.transients の供給経路）。
+    fn transients_enabled(&self) -> bool {
+        todo!("app impl at #8")
+    }
+
+    /// 変身許可設定（settings.transformation の供給経路。Transform は stub のため
+    /// Phase 1 の実行経路では未使用・#9 の Toggleable 供給と合わせる）。
+    fn transformation_allowed(&self) -> bool {
+        todo!("app impl at #8")
+    }
+
+    /// Breed 用の追加マスコット要求をキューへ積む
+    /// （Java は manager.add() 即時。Rust は次 tick 一括反映 = AGENTS.md §5-6 追加/
+    /// 削除キューイング踏襲 → 意図的差異・design §1.8(f)。キューの所有と反映は
+    /// Manager（#8）。anchor は出生計算済みの値、look_right は親の向き）。
+    fn queue_spawn(&self, image_set_name: &str, anchor: (i32, i32), look_right: bool) {
         todo!("app impl at #8")
     }
 }
@@ -499,6 +525,22 @@ impl Mascot {
 
     pub fn affordances(&self) -> &[String] {
         &self.affordances
+    }
+
+    /// affordances を丸ごと設定する（design §1.8(b) の next() 毎 affordances 更新の
+    /// 検証用 setter。実運用の更新は action がクリア / 追加で行う）。
+    pub fn set_affordances(&mut self, affordances: Vec<String>) {
+        self.affordances = affordances;
+    }
+
+    /// affordances を全消去する（Java ActionBase.next L108-110 相当）。
+    pub(crate) fn clear_affordances(&mut self) {
+        self.affordances.clear();
+    }
+
+    /// affordances に 1 件追加する（Java ActionBase.next L112 相当）。
+    pub(crate) fn add_affordance(&mut self, affordance: String) {
+        self.affordances.push(affordance);
     }
 
     /// スクリプト用カスタム変数マップ（Java getVariables L1339-1344）。
