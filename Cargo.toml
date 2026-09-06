@@ -8,9 +8,6 @@ description = "Shimeji desktop mascot reimplementation in Rust (tao + windows-rs
 [dependencies]
 # ウィンドウ / イベントループ（tao 0.37: WaitUntil 対応、Phase 0 ビルド実績あり）
 tao = "0.37"
-# 描画（WS_EX_LAYERED）用。スパイク検証の対照実験のみで使用（design §6）。
-# 結論: softbuffer は UpdateLayeredWindow を呼ばないため不採用 → #5 で依存ごと削除予定
-softbuffer = "0.4"
 # Win32（tao 0.37 と共通依存になるバージョン。Phase 0 実績: windows 0.62.2）
 windows = { version = "0.62", features = [
     "Win32_Foundation",
