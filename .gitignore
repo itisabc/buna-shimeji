@@ -1,2 +1,5 @@
 # Rust build artifacts
 /target
+
+# AI agent working files (handoff, Java reference sources)
+/.tmp
