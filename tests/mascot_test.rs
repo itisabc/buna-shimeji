@@ -15,7 +15,9 @@
 //!   再配置 + Fall フォールバック。条件の評価エラーは Err にせず候補をスキップ
 //! - build_next_behavior の分岐: previous が None または next.add == true なら全
 //!   top-level が候補、next.add == false なら next リストの参照のみ。条件評価の
-//!   コンテキストは mascot.eval_snapshot() + env.eval_context() の合成（MascotContext）
+//!   コンテキストは mascot.eval_snapshot() + env.eval_context() の合成（MascotContext）。
+//!   #7a（design §1.7(f)）から mascot.environment.* は MascotContext が自前解決し、
+//!   eval_context 委譲は非 env パスのみに残る（env パスの値検証は tests/env_test.rs）
 //! - build_behavior / build_behavior_direct: 不存在 → Err(UnknownBehavior)
 //! - mouse_pressed（L242-288）/ mouse_released（L298-319）: is_draggable と
 //!   Dragged/Thrown 遷移、hotspot クリック中の cursor クリア
@@ -235,6 +237,14 @@ impl BehaviorFactory for MockFactory {
 
 /// env.eval_context() が返す評価コンテキスト。既知パスのみ値を返し、
 /// 不明パスは None（= 評価器が未知パスを要求したら Err になる検出器）。
+///
+/// [契約変更 #7a・design §1.7(d)] 旧契約ではこのモックが mascot.environment.* の
+/// 委譲先として env パス（workArea.left=42.0 / activeIE.visible / floor isOn）に
+/// 応答していたが、#7a から mascot.environment.* は MascotContext が自前解決するため
+/// eval_context は env パスに応答しなくてよい（platform primitives のみでよい）。
+/// これに従いモックは非 env パス（mascot.custom.*）のみに応答する。
+/// env パスの自前解決値の検証は tests/env_test.rs（拡張 10 メソッドを実装する
+/// SynthEnv + Java 期待値の焼き込み）が担う。
 struct MockEvalCtx {
     is_on_calls: RefCell<Vec<(String, f64, f64)>>,
 }
@@ -242,14 +252,14 @@ struct MockEvalCtx {
 impl EvalContext for MockEvalCtx {
     fn number(&self, path: &str) -> Option<f64> {
         match path {
-            "mascot.environment.workArea.left" => Some(42.0),
+            "mascot.custom.probe" => Some(777.0),
             _ => None,
         }
     }
 
     fn boolean(&self, path: &str) -> Option<bool> {
         match path {
-            "mascot.environment.activeIE.visible" => Some(true),
+            "mascot.custom.flag" => Some(true),
             _ => None,
         }
     }
@@ -258,7 +268,7 @@ impl EvalContext for MockEvalCtx {
         self.is_on_calls
             .borrow_mut()
             .push((target.to_string(), x, y));
-        target == "mascot.environment.floor"
+        target == "mascot.custom.border"
     }
 }
 
@@ -567,7 +577,18 @@ fn animation_init_and_reset_condition_control_reevaluation() {
 // =====================================================================
 
 #[test]
-fn mascot_context_resolves_snapshot_vars_and_delegates_rest() {
+fn mascot_context_resolves_snapshot_vars_and_delegates_non_env_paths() {
+    // [契約変更 #7a・design §1.7(d)/(f)] 旧契約: snapshot 外の全パス（mascot.environment.*
+    // を含む）を env.eval_context() へ委譲し、本テストは env パスの委譲値
+    // （workArea.left == Some(42.0) / activeIE.visible == Some(true) /
+    // floor isOn == true）を pin していた。
+    // 新契約: mascot.environment.* は MascotContext が自前解決
+    // （snapshot.anchor/look_right + env primitives・Java MascotEnvironment の式と同一）
+    // し、eval_context への委譲は非 env パスのみに残る。
+    //  - env パスの自前解決値（29 パス）の検証は tests/env_test.rs へ移管
+    //    （SynthEnv は拡張 10 メソッドを実装する。MockEnv は拡張メソッドの default 実装
+    //    todo!("app impl at #8") に依存するため、ここで env パスを評価しない）
+    //  - ここで pin するのは差分契約の後半: snapshot 変数の解決と非 env パスの委譲維持
     let env = MockEnv::new();
     let snapshot = EvalSnapshot {
         anchor: (123, 456),
@@ -579,20 +600,18 @@ fn mascot_context_resolves_snapshot_vars_and_delegates_rest() {
         env: &env,
     };
 
-    // スナップショット由来の mascot 変数
+    // スナップショット由来の mascot 変数（変更なし）
     assert_eq!(ctx.number("mascot.anchor.x"), Some(123.0));
     assert_eq!(ctx.number("mascot.anchor.y"), Some(456.0));
     assert_eq!(ctx.number("mascot.totalCount"), Some(7.0));
     assert_eq!(ctx.boolean("mascot.lookRight"), Some(true));
 
-    // スナップショット外のパスは env.eval_context() へ同一パスで委譲される
-    assert_eq!(ctx.number("mascot.environment.workArea.left"), Some(42.0));
-    assert_eq!(
-        ctx.boolean("mascot.environment.activeIE.visible"),
-        Some(true)
-    );
-    assert!(ctx.is_on("mascot.environment.floor", 1.0, 2.0));
-    assert_eq!(env.ctx.is_on_calls.borrow().len(), 1); // is_on も委譲
+    // 非 env パスは env.eval_context() へ同一パスで委譲される（変更なし・対象が非 env のみに縮小）
+    assert_eq!(ctx.number("mascot.custom.probe"), Some(777.0));
+    assert_eq!(ctx.boolean("mascot.custom.flag"), Some(true));
+    assert!(ctx.is_on("mascot.custom.border", 1.0, 2.0));
+    assert!(!ctx.is_on("mascot.custom.other", 1.0, 2.0)); // 未登録ターゲットは false
+    assert_eq!(env.ctx.is_on_calls.borrow().len(), 2); // is_on も委譲
 }
 
 #[test]

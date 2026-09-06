@@ -22,12 +22,16 @@
 
 pub mod animation;
 pub mod behavior;
+pub mod env;
 
 use std::sync::Arc;
 
 use crate::config::script::{EvalContext, Variables};
 use crate::render::imageset::ImageSet;
 use behavior::{BehaviorError, BehaviorFactory, BehaviorRunner, BehaviorTable};
+use env::{
+    is_env_path, resolve_env_is_on, resolve_env_path, AreaSlot, AreaState, CursorState, EnvValue,
+};
 
 /// 矩形（Java `Area` / `Rectangle` 相当の最小セット。right/bottom は含まない）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,15 +49,90 @@ impl Rect {
     }
 }
 
-/// マスコットから見たデスクトップ環境の抽象（Java `MascotEnvironment` 相当）。
-/// #8 の Environment が実装する。
+/// マスコットから見たデスクトップ環境の抽象（Java `MascotEnvironment` / `Environment`
+/// 相当）。#8 の Environment が実装する。
+///
+/// 既存 4 メソッド（work_area / screen / multiscreen / eval_context）のシグネチャは
+/// #6 で確定済み。#7a（design §1.7(d)）で**同一 trait へ 10 メソッドを追加**した
+/// （Action trait が `&dyn EnvironmentView` 固定のため別 trait 化は downcast 必須と
+/// なり契約違反）。追加メソッドは OS 依存のため app 側（#8）が実装する。既存の
+/// 実装者（テストダブル等）を compile 可能に保つため default 実装は `todo!` であり、
+/// 呼ばれると panic する。純関数側（env.rs）はこれらの primitive からスナップショットを
+/// 取って評価する。
+// default 実装は todo! スタブ（引数を消費しない）のため、trait 配下のみ
+// 未使用引数警告を抑止する（実装者側の impl には影響しない）。
+#[allow(unused_variables)]
 pub trait EnvironmentView {
     fn work_area(&self) -> Rect;
     fn screen(&self) -> Rect;
     fn multiscreen(&self) -> bool;
-    /// 条件式評価用の環境コンテキスト（mascot.environment.* 変数と isOn を
-    /// mascot.environment プレフィックス込みで解釈する契約）。
+    /// 条件式評価用の環境コンテキスト。
+    ///
+    /// **platform primitives のみ返せばよい**: `mascot.environment.*` パスは
+    /// [`MascotContext`] が `env` モジュールの純関数（design §1.7(f)）で自前解決する
+    /// ため、実装側は非 env パス（mascot.custom.* 等のカスタム変数）にのみ応答すればよい。
     fn eval_context(&self) -> &dyn EvalContext;
+
+    /// 画面全体（全モニタ矩形の union・Java `Environment.getScreen()` /
+    /// `AbstractEnvironment.screen` 相当）。
+    fn screen_area(&self) -> AreaState {
+        todo!("app impl at #8")
+    }
+
+    /// 全モニタ矩形の列挙（monitor index 順・Java `Environment.getScreens()` /
+    /// `AbstractEnvironment.complexScreen` 相当）。
+    /// [`AreaSlot::WorkArea(i)`] / [`AreaSlot::Screen(i)`] の `i` は同一モニタ順序を
+    /// 共有する（work_area_state の契約参照）。
+    fn screens(&self) -> Vec<AreaState> {
+        todo!("app impl at #8")
+    }
+
+    /// 点を含む work area のスロット（Java `Environment.getWorkAreaAt(int, int)` /
+    /// `AbstractEnvironment.getWorkAreaAt` L186-193 相当）。見つからなければ
+    /// [`AreaSlot::Invisible`] を返す。
+    fn work_area_at(&self, x: i32, y: i32) -> AreaSlot {
+        todo!("app impl at #8")
+    }
+
+    /// スロットの現在値（Java `Area` への live 参照値のスナップショット相当）。
+    /// [`AreaSlot::Invisible`] は invisibleScreen（全 0・visible=false・
+    /// AbstractEnvironment L93-98）を返す。スロット index は `screens()` と同じ
+    /// monitor index 順で 1:1 対応する。
+    fn work_area_state(&self, slot: AreaSlot) -> AreaState {
+        todo!("app impl at #8")
+    }
+
+    /// アクティブウィンドウの矩形（Java `Environment.getActiveWindow()` 相当・
+    /// gating 前の生値。gating は env.rs `active_ie_effective` が行う）。
+    fn active_window(&self) -> AreaState {
+        todo!("app impl at #8")
+    }
+
+    /// アクティブウィンドウ ID。無ければ 0（Java `Environment.getActiveWindowId()` 相当）。
+    fn active_window_id(&self) -> i64 {
+        todo!("app impl at #8")
+    }
+
+    /// アクティブウィンドウの左上を (x, y) へ移動する
+    /// （Java `Environment.moveActiveWindow(int, int)` 相当・内部で SetWindowPos）。
+    fn move_active_window(&self, x: i32, y: i32) {
+        todo!("app impl at #8")
+    }
+
+    /// カーソル位置と移動量（Java `Environment.getCursor()` / `Location` 相当）。
+    fn cursor(&self) -> CursorState {
+        todo!("app impl at #8")
+    }
+
+    /// 画像スケーリング倍率（settings.scale の供給経路）。
+    fn scaling(&self) -> f64 {
+        todo!("app impl at #8")
+    }
+
+    /// 投げ（ThrowIE）許可設定（settings.throwing の供給経路）。
+    fn throwing_allowed(&self) -> bool {
+        todo!("app impl at #8")
+    }
 }
 
 /// Java `Math.random()` 相当の [0,1) 一様乱数の抽象。
@@ -96,8 +175,12 @@ pub struct EvalSnapshot {
 ///
 /// - `mascot.anchor.x` / `mascot.anchor.y` / `mascot.totalCount` / `mascot.lookRight`
 ///   はスナップショットから返す
-/// - それ以外のパス（`mascot.environment.workArea.left` 等を含む）は
+/// - `mascot.environment.*`（値 18 パス + isOn ターゲット 11 パス = 29 パス）は
+///   `env` モジュールの純関数で**自前解決**する（design §1.7(f)。snapshot.anchor /
+///   look_right + env primitives。eval_context の実装が env パスを知らなくてもよい）
+/// - それ以外のパス（`mascot.custom.*` 等のカスタム変数）は
 ///   [`EnvironmentView::eval_context`] へ同一パス文字列で委譲する
+///   （#7a で env パスが委譲対象から除外された）
 pub struct MascotContext<'a> {
     pub snapshot: &'a EvalSnapshot,
     pub env: &'a dyn EnvironmentView,
@@ -109,6 +192,12 @@ impl EvalContext for MascotContext<'_> {
             "mascot.anchor.x" => Some(f64::from(self.snapshot.anchor.0)),
             "mascot.anchor.y" => Some(f64::from(self.snapshot.anchor.1)),
             "mascot.totalCount" => Some(f64::from(self.snapshot.total_count)),
+            _ if is_env_path(path) => {
+                match resolve_env_path(self.env, self.snapshot.anchor, path) {
+                    Some(EnvValue::Number(n)) => Some(n),
+                    _ => None,
+                }
+            }
             _ => self.env.eval_context().number(path),
         }
     }
@@ -116,11 +205,20 @@ impl EvalContext for MascotContext<'_> {
     fn boolean(&self, path: &str) -> Option<bool> {
         match path {
             "mascot.lookRight" => Some(self.snapshot.look_right),
+            _ if is_env_path(path) => {
+                match resolve_env_path(self.env, self.snapshot.anchor, path) {
+                    Some(EnvValue::Boolean(b)) => Some(b),
+                    _ => None,
+                }
+            }
             _ => self.env.eval_context().boolean(path),
         }
     }
 
     fn is_on(&self, target: &str, x: f64, y: f64) -> bool {
+        if is_env_path(target) {
+            return resolve_env_is_on(self.env, self.snapshot.look_right, target, x, y);
+        }
         self.env.eval_context().is_on(target, x, y)
     }
 }
