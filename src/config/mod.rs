@@ -89,10 +89,7 @@ pub enum ActionDef {
 /// Sequence / Select の子。ActionReference 参照 or 匿名 Action のインライン定義。
 #[derive(Debug, Clone)]
 pub enum SequenceChild {
-    Ref {
-        name: String,
-        attrs: VarMap,
-    },
+    Ref { name: String, attrs: VarMap },
     Inline(Box<ActionDef>),
 }
 
@@ -166,7 +163,10 @@ pub fn parse_actions(path: &Path) -> Result<ActionsConfig, ConfigError> {
     let root = doc.root_element();
     if root.tag_name().name() != "Mascot" {
         // Java: UnrecognizedRootTagNameErrorMessage 相当
-        return cx.error(root, format!("未知のルートタグ: {}", root.tag_name().name()));
+        return cx.error(
+            root,
+            format!("未知のルートタグ: {}", root.tag_name().name()),
+        );
     }
 
     let mut actions = BTreeMap::new();
@@ -191,15 +191,17 @@ pub fn parse_behaviors(path: &Path) -> Result<BehaviorsConfig, ConfigError> {
     let cx = Cx::new(&doc, path);
     let root = doc.root_element();
     if root.tag_name().name() != "Mascot" {
-        return cx.error(root, format!("未知のルートタグ: {}", root.tag_name().name()));
+        return cx.error(
+            root,
+            format!("未知のルートタグ: {}", root.tag_name().name()),
+        );
     }
 
     let mut entries = Vec::new();
     let mut seen_names = HashSet::new();
-    for list in root
-        .children()
-        .filter(|n| n.is_element() && matches!(n.tag_name().name(), "BehaviorList" | "BehaviourList"))
-    {
+    for list in root.children().filter(|n| {
+        n.is_element() && matches!(n.tag_name().name(), "BehaviorList" | "BehaviourList")
+    }) {
         parse_behavior_list(&cx, list, &[], &mut entries, &mut seen_names)?;
     }
     Ok(BehaviorsConfig { entries })
@@ -213,9 +215,10 @@ pub fn validate_required_behaviors(config: &BehaviorsConfig) -> Result<(), Confi
         .entries
         .iter()
         .flat_map(|entry| match entry {
-            BehaviorEntry::Group { behaviors, .. } => {
-                behaviors.iter().map(|b| b.name.as_str()).collect::<Vec<_>>()
-            }
+            BehaviorEntry::Group { behaviors, .. } => behaviors
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
             BehaviorEntry::Single(b) => vec![b.name.as_str()],
         })
         .collect();
@@ -292,7 +295,11 @@ impl<'doc, 'input> Cx<'doc, 'input> {
         }
     }
 
-    fn error<T>(&self, node: Node<'doc, 'input>, reason: impl Into<String>) -> Result<T, ConfigError> {
+    fn error<T>(
+        &self,
+        node: Node<'doc, 'input>,
+        reason: impl Into<String>,
+    ) -> Result<T, ConfigError> {
         Err(self.error_value(node, reason))
     }
 }
@@ -602,9 +609,12 @@ fn parse_behavior_def(
         // Java: DuplicateBehaviourErrorMessage 相当（グループをまたいで一意である必要がある）
         return cx.error(node, format!("Behavior `{name}` が重複定義されています"));
     }
-    let frequency_text = node
-        .attribute("Frequency")
-        .ok_or_else(|| cx.error_value(node, format!("Behavior `{name}` に Frequency 属性がありません")))?;
+    let frequency_text = node.attribute("Frequency").ok_or_else(|| {
+        cx.error_value(
+            node,
+            format!("Behavior `{name}` に Frequency 属性がありません"),
+        )
+    })?;
     let frequency = frequency_text.parse::<i32>().map_err(|_| {
         cx.error_value(
             node,
@@ -702,16 +712,16 @@ fn parse_next_list_children(
             "BehaviorReference" | "BehaviourReference" => {
                 let name = node
                     .attribute("Name")
-                    .ok_or_else(|| cx.error_value(node, "BehaviorReference に Name 属性がありません"))?
-                    .to_string();
-                let frequency_text = node
-                    .attribute("Frequency")
                     .ok_or_else(|| {
-                        cx.error_value(
-                            node,
-                            format!("BehaviorReference `{name}` に Frequency 属性がありません"),
-                        )
-                    })?;
+                        cx.error_value(node, "BehaviorReference に Name 属性がありません")
+                    })?
+                    .to_string();
+                let frequency_text = node.attribute("Frequency").ok_or_else(|| {
+                    cx.error_value(
+                        node,
+                        format!("BehaviorReference `{name}` に Frequency 属性がありません"),
+                    )
+                })?;
                 let frequency = frequency_text.parse::<i32>().map_err(|_| {
                     cx.error_value(
                         node,
@@ -734,7 +744,9 @@ fn parse_next_list_children(
                             .map(|(source, _)| format!("({source})"))
                             .collect::<Vec<_>>()
                             .join(" && ");
-                        let allow = conditions.iter().any(|(_, allow_value_reset)| *allow_value_reset);
+                        let allow = conditions
+                            .iter()
+                            .any(|(_, allow_value_reset)| *allow_value_reset);
                         Some(Variable::Script {
                             source: joined,
                             allow_value_reset: allow,

@@ -16,18 +16,20 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{eval_ok, norm_ws, source_of, MockCtx};
+use simeji::config::script::{ConstantValue, EvalValue, Variable, Variables};
 use simeji::config::{
     parse_actions, parse_behaviors, validate_required_behaviors, ActionDef, ActionsConfig,
     Animation, BehaviorDef, BehaviorEntry, BehaviorsConfig, BorderType, Pose, SequenceChild,
 };
-use simeji::config::script::{ConstantValue, EvalValue, Variable, Variables};
 
 // =====================================================================
 // 共通ヘルパ
 // =====================================================================
 
 fn conf_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("conf").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("conf")
+        .join(name)
 }
 
 fn real_actions() -> ActionsConfig {
@@ -98,20 +100,14 @@ fn eval_parsed(ctx: &MockCtx, var: &Variable, injected: &[(&str, f64)]) -> EvalV
 fn eval_parsed_num(ctx: &MockCtx, var: &Variable, injected: &[(&str, f64)]) -> f64 {
     match eval_parsed(ctx, var, injected) {
         EvalValue::Number(n) => n,
-        _ => panic!(
-            "パース済み式 {:?} は数値のはずが別の型",
-            source_of(var)
-        ),
+        _ => panic!("パース済み式 {:?} は数値のはずが別の型", source_of(var)),
     }
 }
 
 fn eval_parsed_bool(ctx: &MockCtx, var: &Variable, injected: &[(&str, f64)]) -> bool {
     match eval_parsed(ctx, var, injected) {
         EvalValue::Bool(b) => b,
-        _ => panic!(
-            "パース済み式 {:?} はブールのはずが別の型",
-            source_of(var)
-        ),
+        _ => panic!("パース済み式 {:?} はブールのはずが別の型", source_of(var)),
     }
 }
 
@@ -187,13 +183,14 @@ fn cond_source(v: &Variable) -> String {
 
 /// 全 Behavior を (所属条件群の参照, BehaviorDef) に展開。
 /// Single は条件なし、Group はその conditions スライスを共有して返す。
-fn walk_behaviors<'a>(
-    cfg: &'a BehaviorsConfig,
-) -> Vec<(Option<&'a [Variable]>, &'a BehaviorDef)> {
+fn walk_behaviors<'a>(cfg: &'a BehaviorsConfig) -> Vec<(Option<&'a [Variable]>, &'a BehaviorDef)> {
     let mut out = Vec::new();
     for entry in &cfg.entries {
         match entry {
-            BehaviorEntry::Group { conditions, behaviors } => {
+            BehaviorEntry::Group {
+                conditions,
+                behaviors,
+            } => {
                 for b in behaviors {
                     out.push((Some(conditions.as_slice()), b));
                 }
@@ -227,12 +224,32 @@ const ACTIONS_XML_HEAD: &str = concat!(
 #[test]
 fn real_actions_load_with_92_unique_actions() {
     let cfg = real_actions();
-    assert_eq!(cfg.actions.len(), 92, "Action 定義数（2 つの ActionList 合計）");
+    assert_eq!(
+        cfg.actions.len(),
+        92,
+        "Action 定義数（2 つの ActionList 合計）"
+    );
     // 重複名があると BTreeMap に潰れて件数が合わない（パーサは重複で Err になる別テストあり）
     for name in [
-        "Look", "Offset", "Stand", "Walk", "Run", "Dash", "Sit", "Sprawl", "GrabWall",
-        "GrabCeiling", "ClimbWall", "ClimbCeiling", "Fall", "Dragged", "Thrown", "ChaseMouse",
-        "SplitIntoTwo", "PullUpShimeji", "Divided",
+        "Look",
+        "Offset",
+        "Stand",
+        "Walk",
+        "Run",
+        "Dash",
+        "Sit",
+        "Sprawl",
+        "GrabWall",
+        "GrabCeiling",
+        "ClimbWall",
+        "ClimbCeiling",
+        "Fall",
+        "Dragged",
+        "Thrown",
+        "ChaseMouse",
+        "SplitIntoTwo",
+        "PullUpShimeji",
+        "Divided",
     ] {
         assert!(cfg.actions.contains_key(name), "Action {name} が存在する");
     }
@@ -278,11 +295,26 @@ fn real_actions_border_types() {
     assert_eq!(wall, 2);
     assert_eq!(ceiling, 2);
     // 明示指定の実例
-    assert!(matches!(border_of(find_action(&cfg, "GrabWall")), BorderType::Wall));
-    assert!(matches!(border_of(find_action(&cfg, "ClimbWall")), BorderType::Wall));
-    assert!(matches!(border_of(find_action(&cfg, "GrabCeiling")), BorderType::Ceiling));
-    assert!(matches!(border_of(find_action(&cfg, "ClimbCeiling")), BorderType::Ceiling));
-    assert!(matches!(border_of(find_action(&cfg, "Stand")), BorderType::Floor));
+    assert!(matches!(
+        border_of(find_action(&cfg, "GrabWall")),
+        BorderType::Wall
+    ));
+    assert!(matches!(
+        border_of(find_action(&cfg, "ClimbWall")),
+        BorderType::Wall
+    ));
+    assert!(matches!(
+        border_of(find_action(&cfg, "GrabCeiling")),
+        BorderType::Ceiling
+    ));
+    assert!(matches!(
+        border_of(find_action(&cfg, "ClimbCeiling")),
+        BorderType::Ceiling
+    ));
+    assert!(matches!(
+        border_of(find_action(&cfg, "Stand")),
+        BorderType::Floor
+    ));
 }
 
 #[test]
@@ -293,13 +325,25 @@ fn real_actions_animations_39_and_poses_133() {
         collect_animations(def, &mut anims);
     }
     assert_eq!(anims.len(), 39, "Animation 総数");
-    assert_eq!(anims.iter().filter(|a| a.condition.is_some()).count(), 10, "Condition 付き Animation 数");
+    assert_eq!(
+        anims.iter().filter(|a| a.condition.is_some()).count(),
+        10,
+        "Condition 付き Animation 数"
+    );
     let poses = all_poses(&cfg);
     assert_eq!(poses.len(), 133, "Pose 総数");
     // 全 Pose が必須属性（Image/ImageAnchor/Velocity/Duration）を持ってパース済み
     for pose in &poses {
-        assert!(pose.image.starts_with("/shime"), "Pose の Image: {}", pose.image);
-        assert!(pose.duration > 0, "Pose の Duration は正: {}", pose.duration);
+        assert!(
+            pose.image.starts_with("/shime"),
+            "Pose の Image: {}",
+            pose.image
+        );
+        assert!(
+            pose.duration > 0,
+            "Pose の Duration は正: {}",
+            pose.duration
+        );
     }
 }
 
@@ -395,52 +439,85 @@ fn real_actions_attr_constants_bool_number_text() {
     // Fall（Sequence, Loop="false"）→ Constant(Bool(false))
     match find_action(&cfg, "Fall") {
         ActionDef::Sequence { attrs, .. } => {
-            assert_eq!(
-                expect_const_bool(attrs.get("Loop"), "Fall@Loop"),
-                false
-            );
+            assert_eq!(expect_const_bool(attrs.get("Loop"), "Fall@Loop"), false);
         }
         _ => panic!("Fall は Sequence"),
     }
     // ThrowIe: InitialVX="32" InitialVY="-10" Gravity="0.5"
     match find_action(&cfg, "ThrowIe") {
         ActionDef::Embedded { attrs, .. } => {
-            assert_eq!(expect_const_num(attrs.get("InitialVX"), "ThrowIe@InitialVX"), 32.0);
-            assert_eq!(expect_const_num(attrs.get("InitialVY"), "ThrowIe@InitialVY"), -10.0);
-            assert_eq!(expect_const_num(attrs.get("Gravity"), "ThrowIe@Gravity"), 0.5);
+            assert_eq!(
+                expect_const_num(attrs.get("InitialVX"), "ThrowIe@InitialVX"),
+                32.0
+            );
+            assert_eq!(
+                expect_const_num(attrs.get("InitialVY"), "ThrowIe@InitialVY"),
+                -10.0
+            );
+            assert_eq!(
+                expect_const_num(attrs.get("Gravity"), "ThrowIe@Gravity"),
+                0.5
+            );
         }
         _ => panic!("ThrowIe は Embedded"),
     }
     // Falling: RegistanceX="0.05" RegistanceY="0.1" Gravity="2"
     match find_action(&cfg, "Falling") {
         ActionDef::Embedded { attrs, .. } => {
-            assert_eq!(expect_const_num(attrs.get("RegistanceX"), "Falling@RegistanceX"), 0.05);
-            assert_eq!(expect_const_num(attrs.get("RegistanceY"), "Falling@RegistanceY"), 0.1);
-            assert_eq!(expect_const_num(attrs.get("Gravity"), "Falling@Gravity"), 2.0);
+            assert_eq!(
+                expect_const_num(attrs.get("RegistanceX"), "Falling@RegistanceX"),
+                0.05
+            );
+            assert_eq!(
+                expect_const_num(attrs.get("RegistanceY"), "Falling@RegistanceY"),
+                0.1
+            );
+            assert_eq!(
+                expect_const_num(attrs.get("Gravity"), "Falling@Gravity"),
+                2.0
+            );
         }
         _ => panic!("Falling は Embedded"),
     }
     // Jumping: VelocityParam="20"
     match find_action(&cfg, "Jumping") {
         ActionDef::Embedded { attrs, .. } => {
-            assert_eq!(expect_const_num(attrs.get("VelocityParam"), "Jumping@VelocityParam"), 20.0);
+            assert_eq!(
+                expect_const_num(attrs.get("VelocityParam"), "Jumping@VelocityParam"),
+                20.0
+            );
         }
         _ => panic!("Jumping は Embedded"),
     }
     // FallWithIe: IeOffsetX="6" IeOffsetY="-58"
     match find_action(&cfg, "FallWithIe") {
         ActionDef::Embedded { attrs, .. } => {
-            assert_eq!(expect_const_num(attrs.get("IeOffsetX"), "FallWithIe@IeOffsetX"), 6.0);
-            assert_eq!(expect_const_num(attrs.get("IeOffsetY"), "FallWithIe@IeOffsetY"), -58.0);
+            assert_eq!(
+                expect_const_num(attrs.get("IeOffsetX"), "FallWithIe@IeOffsetX"),
+                6.0
+            );
+            assert_eq!(
+                expect_const_num(attrs.get("IeOffsetY"), "FallWithIe@IeOffsetY"),
+                -58.0
+            );
         }
         _ => panic!("FallWithIe は Embedded"),
     }
     // PullUpShimeji1: BornX="-32" BornY="96" BornBehavior="PullUp"（数値にパース不能 → Text）
     match find_action(&cfg, "PullUpShimeji1") {
         ActionDef::Embedded { attrs, .. } => {
-            assert_eq!(expect_const_num(attrs.get("BornX"), "PullUpShimeji1@BornX"), -32.0);
-            assert_eq!(expect_const_num(attrs.get("BornY"), "PullUpShimeji1@BornY"), 96.0);
-            assert_eq!(expect_const_text(attrs.get("BornBehavior"), "PullUpShimeji1@BornBehavior"), "PullUp");
+            assert_eq!(
+                expect_const_num(attrs.get("BornX"), "PullUpShimeji1@BornX"),
+                -32.0
+            );
+            assert_eq!(
+                expect_const_num(attrs.get("BornY"), "PullUpShimeji1@BornY"),
+                96.0
+            );
+            assert_eq!(
+                expect_const_text(attrs.get("BornBehavior"), "PullUpShimeji1@BornBehavior"),
+                "PullUp"
+            );
         }
         _ => panic!("PullUpShimeji1 は Embedded"),
     }
@@ -453,7 +530,10 @@ fn real_actions_attr_constants_bool_number_text() {
             _ => None,
         })
         .expect("WalkLeftAlongFloorAndSit の Look 参照");
-    assert_eq!(expect_const_bool(look_ref.get("LookRight"), "Look@LookRight"), true);
+    assert_eq!(
+        expect_const_bool(look_ref.get("LookRight"), "Look@LookRight"),
+        true
+    );
 }
 
 #[test]
@@ -487,7 +567,10 @@ fn real_actions_ref_duration_script_evaluates() {
     let ctx = MockCtx::new();
     for _ in 0..50 {
         let v = eval_parsed_num(&ctx, stand_ref.get("Duration").unwrap(), &[]);
-        assert!((100.0..200.0).contains(&v), "Duration 値 = {v} が [100,200) 外");
+        assert!(
+            (100.0..200.0).contains(&v),
+            "Duration 値 = {v} が [100,200) 外"
+        );
     }
 
     // Select 直下の Ref(GrabWall) の Duration は数値定数
@@ -559,7 +642,8 @@ fn real_actions_fall_nested_sequence_select() {
     };
     match inline_seq.as_ref() {
         ActionDef::Sequence { attrs, .. } => {
-            let (source, allow) = expect_script(attrs.get("Condition"), "Inline Sequence@Condition");
+            let (source, allow) =
+                expect_script(attrs.get("Condition"), "Inline Sequence@Condition");
             assert_eq!(
                 norm_ws(source),
                 norm_ws("mascot.environment.floor.isOn(mascot.anchor)")
@@ -604,15 +688,17 @@ fn real_actions_chasemouse_structure_and_gap() {
         .iter()
         .filter_map(|c| match c {
             SequenceChild::Inline(inner) => match inner.as_ref() {
-                ActionDef::Sequence { attrs, .. } => attrs.get("Condition").map(|v| norm_ws(&expect_script(Some(v), "ChaseMouse 条件").0.clone())),
+                ActionDef::Sequence { attrs, .. } => attrs
+                    .get("Condition")
+                    .map(|v| norm_ws(&expect_script(Some(v), "ChaseMouse 条件").0.clone())),
                 _ => None,
             },
             _ => None,
         })
         .collect();
-    assert!(cond_sources_in_chase.contains(&norm_ws(
-        "mascot.environment.ceiling.isOn(mascot.anchor)"
-    )));
+    assert!(
+        cond_sources_in_chase.contains(&norm_ws("mascot.environment.ceiling.isOn(mascot.anchor)"))
+    );
     assert!(cond_sources_in_chase.contains(&norm_ws(
         "mascot.environment.workArea.leftBorder.isOn(mascot.anchor) || mascot.environment.activeIE.rightBorder.isOn(mascot.anchor)"
     )));
@@ -655,8 +741,15 @@ fn real_actions_chasemouse_structure_and_gap() {
         .next()
         .expect("Look 参照");
     let (lr_src, _) = expect_script(look_ref.get("LookRight"), "Look@LookRight");
-    assert_eq!(norm_ws(lr_src), "mascot.anchor.x < mascot.environment.cursor.x");
-    assert!(eval_parsed_bool(&ctx, look_ref.get("LookRight").unwrap(), &[]));
+    assert_eq!(
+        norm_ws(lr_src),
+        "mascot.anchor.x < mascot.environment.cursor.x"
+    );
+    assert!(eval_parsed_bool(
+        &ctx,
+        look_ref.get("LookRight").unwrap(),
+        &[]
+    ));
 }
 
 #[test]
@@ -669,10 +762,18 @@ fn real_actions_animation_conditions_evaluate() {
     assert_eq!(sit_anims.len(), 2);
     assert!(sit_anims[0].condition.is_some());
     assert!(sit_anims[1].condition.is_none());
-    assert!(eval_parsed_bool(&ctx, sit_anims[0].condition.as_ref().unwrap(), &[]));
+    assert!(eval_parsed_bool(
+        &ctx,
+        sit_anims[0].condition.as_ref().unwrap(),
+        &[]
+    ));
     let mut ctx_low = MockCtx::new();
     ctx_low.cursor_y = 900.0;
-    assert!(!eval_parsed_bool(&ctx_low, sit_anims[0].condition.as_ref().unwrap(), &[]));
+    assert!(!eval_parsed_bool(
+        &ctx_low,
+        sit_anims[0].condition.as_ref().unwrap(),
+        &[]
+    ));
 
     // Pinched: アニメ 7 件すべて Condition あり（FootX 注入）
     let mut pinched_anims = Vec::new();
@@ -805,10 +906,7 @@ fn real_behaviors_ten_condition_groups() {
         .collect();
     assert!(groups.len() >= 10, "Condition グループは 10 以上");
 
-    let all_group_conds: Vec<String> = groups
-        .iter()
-        .flat_map(|cs| cond_sources(cs))
-        .collect();
+    let all_group_conds: Vec<String> = groups.iter().flat_map(|cs| cond_sources(cs)).collect();
     const GROUP_CONDITIONS: [&str; 10] = [
         "mascot.environment.floor.isOn(mascot.anchor)",
         "mascot.environment.wall.isOn(mascot.anchor)",
@@ -831,7 +929,9 @@ fn real_behaviors_ten_condition_groups() {
     for cs in &groups {
         for c in cs.iter() {
             match c {
-                Variable::Script { allow_value_reset, .. } => {
+                Variable::Script {
+                    allow_value_reset, ..
+                } => {
                     assert!(*allow_value_reset, "グループ条件はハッシュ記法");
                 }
                 Variable::Constant(ConstantValue::Bool(_)) => {}
@@ -843,9 +943,8 @@ fn real_behaviors_ten_condition_groups() {
     let floor_cond = groups
         .iter()
         .find_map(|cs| {
-            cs.iter().find(|v| {
-                cond_source(v) == "mascot.environment.floor.isOn(mascot.anchor)"
-            })
+            cs.iter()
+                .find(|v| cond_source(v) == "mascot.environment.floor.isOn(mascot.anchor)")
         })
         .expect("床グループ条件");
     let ctx = MockCtx::new();
@@ -960,7 +1059,10 @@ fn real_behaviors_next_lists_and_references() {
         .1;
     assert_eq!(sitdown.frequency, 200);
     assert!(!sitdown.hidden);
-    let next = sitdown.next.as_ref().expect("SitDown は NextBehaviorList を持つ");
+    let next = sitdown
+        .next
+        .as_ref()
+        .expect("SitDown は NextBehaviorList を持つ");
     assert!(next.add);
     assert_eq!(next.references.len(), 2);
     assert_eq!(next.references[0].name, "SitWhileDanglingLegs");
@@ -975,20 +1077,31 @@ fn real_behaviors_next_lists_and_references() {
         .find(|(_, b)| b.name == "LieDown")
         .expect("LieDown")
         .1;
-    let next = liedown.next.as_ref().expect("LieDown は NextBehaviorList を持つ");
+    let next = liedown
+        .next
+        .as_ref()
+        .expect("LieDown は NextBehaviorList を持つ");
     assert!(!next.add);
     assert_eq!(next.references.len(), 3);
     assert!(next.references[0].condition.is_none());
-    let cond = next.references[1].condition.as_ref().expect("CrawlAlongIECeiling 参照は条件付き");
+    let cond = next.references[1]
+        .condition
+        .as_ref()
+        .expect("CrawlAlongIECeiling 参照は条件付き");
     // 資産: ${mascot.environment.activeIE.topBorder.isOn(mascot.anchor)} → ${} 記法
     match cond {
-        Variable::Script { allow_value_reset, .. } => assert!(!allow_value_reset),
+        Variable::Script {
+            allow_value_reset, ..
+        } => assert!(!allow_value_reset),
         _ => panic!("参照条件は Script"),
     }
     let ctx = MockCtx::new(); // all_on=true
     assert!(eval_parsed_bool(&ctx, cond, &[]));
     // 3 件目: ${mascot.environment.workArea.bottomBorder.isOn(mascot.anchor)}
-    let cond2 = next.references[2].condition.as_ref().expect("CrawlAlongWorkAreaFloor 参照は条件付き");
+    let cond2 = next.references[2]
+        .condition
+        .as_ref()
+        .expect("CrawlAlongWorkAreaFloor 参照は条件付き");
     assert!(eval_parsed_bool(&ctx, cond2, &[]));
     let mut ctx_off = MockCtx::new();
     ctx_off.all_on = false;
@@ -1054,7 +1167,10 @@ fn synthetic_duplicate_action_names_error() {
     let path = temp_conf("dup_action", &xml);
     let result = parse_actions(&path);
     let _ = std::fs::remove_file(&path);
-    assert!(result.is_err(), "同名 Action は Err（ConfigError にソース位置を含む）");
+    assert!(
+        result.is_err(),
+        "同名 Action は Err（ConfigError にソース位置を含む）"
+    );
 }
 
 #[test]
@@ -1091,7 +1207,10 @@ fn synthetic_unknown_action_type_error() {
     let path = temp_conf("bad_type", &xml);
     let result = parse_actions(&path);
     let _ = std::fs::remove_file(&path);
-    assert!(result.is_err(), "未知の Type は Err（Java UnknownActionType 相当）");
+    assert!(
+        result.is_err(),
+        "未知の Type は Err（Java UnknownActionType 相当）"
+    );
 }
 
 #[test]
@@ -1189,9 +1308,15 @@ fn synthetic_nested_condition_groups_accumulate() {
         ]
     );
     // 外側のみ
-    assert_eq!(conds_of("Outer"), vec!["mascot.totalCount < 50".to_string()]);
+    assert_eq!(
+        conds_of("Outer"),
+        vec!["mascot.totalCount < 50".to_string()]
+    );
     // 内側 Condition が閉じた後の Behavior は外側の条件のみ
-    assert_eq!(conds_of("AfterInner"), vec!["mascot.totalCount < 50".to_string()]);
+    assert_eq!(
+        conds_of("AfterInner"),
+        vec!["mascot.totalCount < 50".to_string()]
+    );
 }
 
 #[test]

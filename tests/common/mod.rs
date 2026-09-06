@@ -183,7 +183,11 @@ pub fn eval_num(ctx: &MockCtx, source: &str) -> f64 {
 pub fn eval_bool(ctx: &MockCtx, source: &str) -> bool {
     match eval_ok(ctx, &script_var(source, true)) {
         EvalValue::Bool(b) => b,
-        other => panic!("式 {:?} はブールのはずが {}", source, describe_value(&other)),
+        other => panic!(
+            "式 {:?} はブールのはずが {}",
+            source,
+            describe_value(&other)
+        ),
     }
 }
 
@@ -220,7 +224,9 @@ pub fn eval_bool_injected(ctx: &MockCtx, source: &str, injected: &[(&str, f64)])
 }
 
 /// Result 版の値説明（Err も型名だけで表す。EvalError の Debug に依存しない）。
-pub fn describe_value_from(r: Result<EvalValue, simeji::config::script::EvalError>) -> &'static str {
+pub fn describe_value_from(
+    r: Result<EvalValue, simeji::config::script::EvalError>,
+) -> &'static str {
     match r {
         Ok(v) => describe_value(&v),
         Err(_) => "Err(_)",

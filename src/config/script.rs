@@ -318,7 +318,9 @@ fn lex(source: &str) -> Result<Vec<Tok>, String> {
         // 識別子（mascot / FootX / Math / _x / $x 等）
         if c.is_ascii_alphabetic() || c == '_' || c == '$' {
             let start = i;
-            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '$')
+            {
                 i += 1;
             }
             toks.push(Tok::Ident(chars[start..i].iter().collect()));
@@ -626,7 +628,9 @@ impl<'a> Interp<'a> {
             EvalValue::Number(_) => "数値",
             EvalValue::Bool(_) => "ブール",
         };
-        self.err(format!("{what} には{expected}が必要ですが {got_name} でした"))
+        self.err(format!(
+            "{what} には{expected}が必要ですが {got_name} でした"
+        ))
     }
 
     fn eval(&self, expr: &Expr) -> Result<EvalValue, EvalError> {

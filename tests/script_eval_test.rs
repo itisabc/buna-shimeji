@@ -17,7 +17,9 @@ use common::{
     describe_value, describe_value_from, eval_bool, eval_bool_injected, eval_num,
     eval_num_injected, eval_ok, norm_ws, script_var, standard_vars, MockCtx,
 };
-use simeji::config::script::{to_java_int, ConstantValue, EvalContext, EvalValue, Variable, Variables};
+use simeji::config::script::{
+    to_java_int, ConstantValue, EvalContext, EvalValue, Variable, Variables,
+};
 
 // =====================================================================
 // to_java_int（Java (int) キャスト準拠 / JLS 5.1.3）
@@ -287,7 +289,10 @@ fn climb_along_wall_targetx_nan_branch() {
     // 真側は正常値: workArea.left + random*100 = r*100 ∈ [0, 100)
     for _ in 0..100 {
         let v = eval_num(&ctx, source);
-        assert!((0.0..100.0).contains(&v), "ClimbAlongWall TargetX(真側) = {v}");
+        assert!(
+            (0.0..100.0).contains(&v),
+            "ClimbAlongWall TargetX(真側) = {v}"
+        );
     }
 }
 
@@ -309,7 +314,10 @@ fn climb_ie_wall_targetx_nan_branch() {
 fn is_on_floor_receives_target_and_anchor_point() {
     // 資産 Fall / Thrown 内の条件式と同形
     let ctx = MockCtx::new();
-    assert!(eval_bool(&ctx, "mascot.environment.floor.isOn(mascot.anchor)"));
+    assert!(eval_bool(
+        &ctx,
+        "mascot.environment.floor.isOn(mascot.anchor)"
+    ));
     // target パスと引数点（mascot.anchor → anchor.x, anchor.y）が EvalContext に渡ること
     assert_eq!(
         ctx.is_on_calls.borrow().as_slice(),
@@ -602,7 +610,10 @@ fn eval_errors_are_returned_not_panicked() {
     // エラー後も Variables は再利用できる（panic も破壊もない）
     match vars.eval(&script_var("1+1", true), &ctx) {
         Ok(EvalValue::Number(n)) => assert_eq!(n, 2.0),
-        other => panic!("エラー後に正常評価できるはずが {}", describe_value_from(other)),
+        other => panic!(
+            "エラー後に正常評価できるはずが {}",
+            describe_value_from(other)
+        ),
     }
 }
 
