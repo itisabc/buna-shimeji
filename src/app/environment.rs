@@ -34,26 +34,32 @@
 //!    委譲する。active_window() は「選別済みの単一窓」を受け取る
 //! 5. WindowsEnvironment.moveActiveWindow の DPI 補正（L279-283）・
 //!    SetWindowPos 呼び出し（L285-288）は [`OsSource::move_window`] へ委譲
-//! 6. WindowsEnvironment.restoreWindows / refreshCache / interactiveCache
-//!    （L291-346）は #9/#10 の管轄（tray 経路）
+//! 6. WindowsEnvironment.restoreWindows（L292-347）は #9b で [`EnvironmentView::restore_windows`]
+//!    として実装（窓選別の INVALID / IGNORED 詳細は [`OsSource::windows`] の契約に
+//!    委譲・#10）。refreshCache / interactiveCache（L291-346 の残部）は #10 の管轄
 //! 7. activeWindowTitle（L84）は #8 の観測経路が無いため保持しない
 //!    （Phase 1 未使用・asset-report.md §2）
 //! 8. tick の可変状態は `RefCell` 内包で管理し `&self` 更新にする
 //!    （tests/app_test.rs 契約・tao 単一スレッド前提のため Mutex は使わない）
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use crate::config::script::EvalContext;
 use crate::mascot::env::{AreaSlot, AreaState, CursorState};
 use crate::mascot::{EnvironmentView, Rect};
 
 /// spawn キューの 1 件（Breed 出生要求・Java Breed.java L73-101 相当）。
-/// `behavior_name` は BornBehaviour 属性の評価結果（省略時 ""・#8 で 4 引数化）。
+/// `behavior_name`:
+/// - `None` = createMascot 経路（Main.java L497: buildNextBehavior(null, mascot) で
+///   構築する・[`Manager::request_spawn`] 経由・#9b）
+/// - `Some(name)` = buildBehavior(name) 経路（Breed.java L93: getBornBehavior()。
+///   BornBehaviour 省略時は Some("") であり、Java 同様構築 Err → スキップ）
 pub struct SpawnRequest {
     pub image_set_name: String,
     pub anchor: (i32, i32),
     pub look_right: bool,
-    pub behavior_name: String,
+    pub behavior_name: Option<String>,
 }
 
 /// OS 供給の抽象（実 Win32 供給は #10）。
@@ -74,6 +80,14 @@ pub trait OsSource {
 
     /// 窓移動（`moveActiveWindow` L274-289 相当・SetWindowPos SWP_NOSIZE）。
     fn move_window(&self, id: i64, x: i32, y: i32);
+
+    /// interactive 窓列挙（#9b・`restoreWindows` L292-347 の EnumWindows 相当）。
+    /// 可視・非アイコン化・非最大化の interactive 窓 = OUT_OF_BOUNDS 判定前の集合
+    /// （INVALID / IGNORED 選別の詳細は #10 の管轄・doc 差異 4 延長）。
+    fn windows(&self) -> Vec<(i64, Rect)>;
+
+    /// 窓を最前面へ（#9b・`BringWindowToTop` 相当）。
+    fn raise_window(&self, id: i64);
 }
 
 /// Environment から参照する eval context（`mascot.environment.*` は MascotContext が
@@ -93,6 +107,11 @@ impl EvalContext for NullEnvCtx {
     fn is_on(&self, _target: &str, _x: f64, _y: f64) -> bool {
         false
     }
+}
+
+/// 空でない交差（Java `Rectangle.intersects` 相当・境界接触のみは false）。
+fn rects_intersect(a: &Rect, b: &Rect) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
 /// 恒常 invisibleScreen（AbstractEnvironment L93-98: 全 0・visible=false）。
@@ -152,6 +171,10 @@ pub struct Environment {
     /// design §1.8(f)）。`&self` から push できるよう RefCell（tao 単一スレッド前提・
     /// Mutex は増やさない）。
     spawns: RefCell<Vec<SpawnRequest>>,
+    /// `Settings.disabledBehaviors` 相当（set → 無効 Behavior 名リスト・Main
+    /// L526-544 の put/remove 逐語対象・#9b）。空リスト = エントリ削除の契約のため
+    /// 値が空のエントリは存在しない。
+    disabled_behaviors: RefCell<HashMap<String, Vec<String>>>,
     null_ctx: NullEnvCtx,
     /// Settings.java L32-37 / L45 既定値（settings.properties 無しのため既定適用）。
     breeding: bool,
@@ -196,6 +219,7 @@ impl Environment {
                 },
             }),
             spawns: RefCell::new(Vec::new()),
+            disabled_behaviors: RefCell::new(HashMap::new()),
             null_ctx: NullEnvCtx,
             breeding: true,
             transients: true,
@@ -325,6 +349,64 @@ impl Environment {
 
     pub fn set_scaling(&mut self, scaling: f64) {
         self.scaling = scaling;
+    }
+
+    /// Main.setMascotBehaviorEnabled L526-544 逐語のリスト変異（Allowed Behaviours
+    /// トグル・true = 無効リストへ追加 = トグル OFF）。永続化 (#9c) は
+    /// [`Environment::disabled_behaviors`] getter 経由。
+    pub fn set_behavior_enabled(&mut self, image_set: &str, name: &str, enabled: bool) {
+        let mut map = self.disabled_behaviors.borrow_mut();
+        // L525-531: containsKey ? get : new ArrayList<>()
+        let mut list = map.get(image_set).cloned().unwrap_or_default();
+        let contains = list.iter().any(|behavior| behavior == name);
+        if contains && enabled {
+            // L533-535: list.contains(name) && enabled → remove
+            list.retain(|behavior| behavior != name);
+        } else if !contains && !enabled {
+            // L536-538: !list.contains(name) && !enabled → add
+            list.push(name.to_string());
+        }
+        // L539-543: 空リスト → エントリ削除 / else put
+        if list.is_empty() {
+            map.remove(image_set);
+        } else {
+            map.insert(image_set.to_string(), list);
+        }
+    }
+
+    /// 無効リストのスナップショット（set → 無効 Behavior 名リスト群・
+    /// #9c 永続化用の読み出し・順序不問）。
+    pub fn disabled_behaviors(&self) -> Vec<(String, Vec<String>)> {
+        self.disabled_behaviors
+            .borrow()
+            .iter()
+            .map(|(set, list)| (set.clone(), list.clone()))
+            .collect()
+    }
+
+    /// WindowsEnvironment.restoreWindows L292-347 逐語。窓選別の INVALID / IGNORED
+    /// 詳細は [`OsSource::windows`] の契約に委譲（doc 差異 4 延長）。
+    /// DPI 逆スケールは不適用（offset = 25 固定・ユーザー承認 (X)）。
+    pub fn restore_windows(&self) {
+        // L294: int offset = 25（ローカル変数・呼び出しごとに 25 に戻る）
+        let mut offset = 25;
+        // L310-313: getWorkAreaRect(false) = (0,0) を含む monitor（プライマリ相当・
+        // 無ければ先頭）の work area。base-4 `work_area` の解決規則と同一（doc 差異 3）
+        let work_area = EnvironmentView::work_area(self);
+        let screen = EnvironmentView::screen(self);
+        for (id, rect) in self.source.windows() {
+            // getWindowStatus L144-176 の OUT_OF_BOUNDS 相当: screen と
+            // intersects しない窓のみ処理（境界内 / 部分交差の窓は無傷）
+            if rects_intersect(&rect, &screen) {
+                continue;
+            }
+            // L330-336: MoveWindow（サイズ維持は #10 実装側）+ BringWindowToTop
+            self.source
+                .move_window(id, work_area.left + offset, work_area.top + offset);
+            self.source.raise_window(id);
+            // 移動 1 回ごとに offset + 25
+            offset += 25;
+        }
     }
 }
 
@@ -472,6 +554,8 @@ impl EnvironmentView for Environment {
 
     /// Breed 出生を spawn キューへ積む（&self から push 可 = RefCell・
     /// Mutex は増やさない。反映は [`Manager::tick`]・意図的差異 design §1.8(f)）。
+    /// `behavior_name` は Some 化して格納する（#9b・Breed.java L93 経路・
+    /// BornBehaviour 省略時は Some("") で構築時に Err → スキップ）。
     fn queue_spawn(
         &self,
         image_set_name: &str,
@@ -483,7 +567,32 @@ impl EnvironmentView for Environment {
             image_set_name: image_set_name.to_string(),
             anchor,
             look_right,
-            behavior_name: behavior_name.to_string(),
+            behavior_name: Some(behavior_name.to_string()),
         });
+    }
+
+    /// createMascot 経路の spawn 要求（behavior_name = None・#9b）。
+    /// [`Manager::request_spawn`] が rng を消費した後の look_right を受け取る。
+    fn queue_spawn_next(&self, image_set_name: &str, anchor: (i32, i32), look_right: bool) {
+        self.spawns.borrow_mut().push(SpawnRequest {
+            image_set_name: image_set_name.to_string(),
+            anchor,
+            look_right,
+            behavior_name: None,
+        });
+    }
+
+    /// [`Environment::restore_windows`] への委譲（#9b）。
+    fn restore_windows(&self) {
+        self.restore_windows();
+    }
+
+    /// Allowed Behaviours 無効リスト含有判定（true = トグル OFF・#9b）。
+    /// 未知 set / 非含有の名前は false（Java 既定 = 全 Behavior 有効）。
+    fn behavior_disabled(&self, image_set: &str, behavior_name: &str) -> bool {
+        self.disabled_behaviors
+            .borrow()
+            .get(image_set)
+            .is_some_and(|list| list.iter().any(|behavior| behavior == behavior_name))
     }
 }

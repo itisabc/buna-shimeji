@@ -14,7 +14,9 @@
 //!     pub image_set_name: String,
 //!     pub anchor: (i32, i32),
 //!     pub look_right: bool,
-//!     pub behavior_name: String,                   // #8: queue_spawn の第 4 引数
+//!     pub behavior_name: Option<String>,           // #9b: None = buildNextBehavior(null) 経路 /
+//!                                                  //       Some(name) = buildBehavior(name) 経路
+//!                                                  //      （queue_spawn の第 4 引数は Some 化して格納）
 //! }
 //!
 //! pub trait OsSource {                             // OS 供給の抽象（実 Win32 供給は #10）
@@ -22,6 +24,8 @@
 //!     fn cursor_position(&self) -> Option<(i32, i32)>; // None = 取得失敗（MouseInfo null 相当）
 //!     fn active_window(&self) -> Option<(i64, Rect)>;  // (id, 矩形)。None = アクティブ窓無し
 //!     fn move_window(&self, id: i64, x: i32, y: i32);  // SetWindowPos 相当
+//!     fn windows(&self) -> Vec<(i64, Rect)>;       // #9b: interactive 窓列挙（OUT_OF_BOUNDS 判定前）
+//!     fn raise_window(&self, id: i64);             // #9b: BringWindowToTop 相当
 //! }
 //! // Rect 型 = `simeji::mascot::Rect`。
 //!
@@ -179,6 +183,12 @@ impl OsSource for FakeSource {
     fn move_window(&self, id: i64, x: i32, y: i32) {
         self.state.borrow_mut().moved.push((id, x, y));
     }
+
+    fn windows(&self) -> Vec<(i64, simeji::mascot::Rect)> {
+        Vec::new()
+    }
+
+    fn raise_window(&self, _id: i64) {}
 }
 
 type EnvHandle = Rc<RefCell<FakeState>>;
@@ -608,10 +618,14 @@ fn env_spawn_queue_is_fifo_and_drain_clears() {
     assert_eq!(drained[0].image_set_name, "TestSet");
     assert_eq!(drained[0].anchor, (100, 200));
     assert!(!drained[0].look_right);
-    assert_eq!(drained[0].behavior_name, "Walk");
+    assert_eq!(
+        drained[0].behavior_name,
+        Some("Walk".to_string()),
+        "#9b: queue_spawn の第 4 引数は Some 化して格納される"
+    );
     assert_eq!(drained[1].anchor, (300, 400));
     assert!(drained[1].look_right);
-    assert_eq!(drained[1].behavior_name, "Stare");
+    assert_eq!(drained[1].behavior_name, Some("Stare".to_string()));
 
     // drain 後は空（クリアされる）
     assert!(env.drain_spawns().is_empty());

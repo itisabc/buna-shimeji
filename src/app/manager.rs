@@ -7,6 +7,13 @@
 //! - setBehaviorAll L291-340（構築失敗 → log + dispose）
 //! - isPaused / togglePauseAll L465-495（空 = false・allMatch）
 //! - getCount / getMascotWithAffordance / hasOverlappingMascotsAtPoint L522-601
+//! - #9b 追加: createMascot L480-505（rng 消費は要求時・build_next_behavior(None)）、
+//!   setBehaviorAll(Configuration, name, imageSet) L320-340（per-set 構築）、
+//!   setBehaviorAll の Configuration 取得（getConfiguration(mascot.getImageSet()) 相当
+//!   = set 別 BehaviorTable オーバーレイ map・(AF)）、
+//!   Main.setMascotBehaviorEnabled L526-544 の passthrough、restoreWindows
+//!   passthrough（WindowsEnvironment L292-347・Environment 側実装）、
+//!   Mascot ポップアップ分類 L523-553（behavior_menu_items）
 //!
 //! 構造上の意図的差異（Java 一致検証時に差し引くこと）:
 //! 1. Java は内部 Ticker スレッド（L146-184）で 40ms 周期に tick を回すが、本実装は
@@ -21,11 +28,18 @@
 //! 4. Java `Manager.remove`（L277-283）に相当する外部削除 API は持たない。
 //!    削除は [`Mascot::dispose`](crate::mascot::Mascot::dispose) の remove_pending
 //!    フラグ経由のみ（design §1.5）
-//! 5. setBehaviorAll の Configuration 取得（L298 Main.getInstance()）は未導入のため、
-//!    本実装は全 mascot が同一 BehaviorTable / ファクトリを共有する構造
-//!    （design §1.5）。set 単位 conf 差し替えは将来タスク
+//! 5. setBehaviorAll の Configuration 取得（L298 Main.getInstance()）は resolver /
+//!    BehaviorTable 注入に置き換え済み。#9b で Main.getConfiguration(imageSet) 相当
+//!    の **set 別 BehaviorTable 上書き map**（[`Manager::set_behavior_table`]+
+//!    base フォールバック・(AF)）を導入し、全構築経路（spawn drain / setBehaviorAll
+//!    群 / メニュー / mascot.tick の次行動構築）が「マスコット自身の set」（または
+//!    要求 set）の table を使う。ファクトリ / rng のみ全 set 共有
 //! 6. ReadWriteLock / synchronized は排除（単一スレッド・design §1.5）
+//! 7. setBehavior は構造上の簡略: Java L291-310 は Main.setBehavior(…L962-967) 経由
+//!    （中で setBehavior も呼ぶ）のため、Mascot::set_behavior から set_behavior_and_init
+//!    を経由する同一構造（#8）
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +51,16 @@ use crate::render::imageset::ImageSet;
 /// image set resolver の型（Java `Main.getConfiguration(imageSet)` 相当の注入点）。
 type ImageSetResolver = dyn FnMut(&str) -> Option<Arc<ImageSet>>;
 
+/// マスコット右クリック メニューの行動分類（Java `Mascot` ポップアップ
+/// L523-553 相当・#9b）。双方とも table 挿入順。
+pub struct BehaviorMenu {
+    /// 有効 && 名前に "/" を含まない非 toggleable 行動（setBehavior メニュー項目）。
+    /// toggleable 且つ有効な行動も Java 同様 selectable に出る（L529-547 逐語）。
+    pub selectable: Vec<String>,
+    /// Allowed Behaviours トグル項目（名前, checked = enabled = 無効リスト非含有）。
+    pub toggleable: Vec<(String, bool)>,
+}
+
 /// マスコット集合の所有者（Java `Manager` 相当・スレッド/lock は排除）。
 pub struct Manager {
     /// Java `mascots` L42 相当。
@@ -45,9 +69,12 @@ pub struct Manager {
     added: Vec<Mascot>,
     /// Java `getEnvironment()` 相当・Manager が所有。
     environment: Environment,
-    /// Java `Main.getInstance().getConfiguration(imageSet)` 相当の代替
-    /// （全 mascot 共有・構造上の意図的差異 doc 5）。
+    /// 既定の BehaviorTable（Java Main の既定 Configuration 相当）。
+    /// set 別の上書きは [`Manager::set_tables`]（#9b・(AF)）。
     table: BehaviorTable,
+    /// Main.getConfiguration(imageSet) 相当の set 別 BehaviorTable オーバーレイ
+    /// （#9b・(AF)・9d Reload が登録する）。未登録 set は base `table` にフォールバック。
+    set_tables: HashMap<String, BehaviorTable>,
     /// Java ファクトリ相当（Box 注入・既存 Mascot::new と同一パターン）。
     factory: Box<dyn BehaviorFactory>,
     /// Java `Math.random()` の注入版（design §1.5）。
@@ -62,6 +89,16 @@ pub struct Manager {
     /// 全員消滅後の exit 依頼フラグ（Java L240-243 の `Main.exit()` 相当）。
     /// process::exit はしない（#10 がイベントループで消費）。
     exit_flag: bool,
+}
+
+/// 「要求 set の table を選ぶ」共通ヘルパ（Java `getConfiguration(imageSet)` 相当）。
+/// field-disjoint borrow で呼ぶため静的ヘルパにする（`&self` を取らない）。
+fn table_for<'a>(
+    set_tables: &'a HashMap<String, BehaviorTable>,
+    base: &'a BehaviorTable,
+    image_set_name: &str,
+) -> &'a BehaviorTable {
+    set_tables.get(image_set_name).unwrap_or(base)
 }
 
 impl Manager {
@@ -107,6 +144,7 @@ impl Manager {
             added: Vec::new(),
             environment,
             table,
+            set_tables: HashMap::new(),
             factory,
             rng,
             resolver: None,
@@ -123,6 +161,27 @@ impl Manager {
         resolver: impl FnMut(&str) -> Option<Arc<ImageSet>> + 'static,
     ) {
         self.resolver = Some(Box::new(resolver));
+    }
+
+    /// set 別 BehaviorTable を上書き登録する（Java
+    /// `Main.getConfiguration(imageSet)` が set 毎の Configuration を返す部分相当・
+    /// #9b・(AF)・9d Reload が map に書く前提）。未登録 set は base table に
+    /// フォールバックする。
+    pub fn set_behavior_table(&mut self, image_set_name: &str, table: BehaviorTable) {
+        self.set_tables.insert(image_set_name.to_string(), table);
+    }
+
+    /// Main.createMascot(String) L480-505 相当: rng.unit を**呼び出し時に 1 回消費**
+    /// して初期向きを決め（L490 setLookRight(Math.random() < 0.5) 逐語）、anchor
+    /// (-4000,-4000)・behavior_name None の spawn 要求をキューへ積む。実際の
+    /// Mascot 生成・buildNextBehavior(None) 経路の構築・追加は次 tick の
+    /// [`Manager::tick`] drain（AGENTS §5-6 追加キューイング・意図的差異 design §1.8(f)）。
+    /// resolver 未設定 / 未知 set は drain でスキップされる（既存 drain 挙動踏襲）。
+    pub fn request_spawn(&mut self, image_set_name: &str) {
+        // Java L490: mascot.setLookRight(Math.random() < 0.5)（乱数消費はこの呼び出し時）
+        let look_right = self.rng.unit() < 0.5;
+        self.environment_view()
+            .queue_spawn_next(image_set_name, (-4000, -4000), look_right);
     }
 
     /// Mascot を追加キューへ積む（Java `add` L252-269 逐語のうち
@@ -154,6 +213,11 @@ impl Manager {
         // ② spawn キュー drain（Java Breed L94 は manager.add() 即時だが
         //   AGENTS §5-6 により次 tick 一括反映・意図的差異 design §1.8(f)）。
         //   set 不在 / behavior 構築失敗 → log + スキップ（Java Breed L95-99 逐語）。
+        //   構築は「要求 set」の table を使う（Java L298
+        //   getConfiguration(imageSet) 相当・#9b (AF)）:
+        //   None → buildNextBehavior(null)（Main.java L497 逐語）/
+        //   Some(name) → buildBehavior(name)（Breed.java L93 逐語。
+        //   Some("")= BornBehaviour 省略 → Java 同様構築 Err → スキップ）。
         let spawns = self.environment.drain_spawns();
         let env: &dyn EnvironmentView = &self.environment;
         for request in spawns {
@@ -176,24 +240,35 @@ impl Manager {
                 Mascot::new(request.image_set_name.as_str(), image_set, request.anchor);
             // Java Breed.java L90: setLookRight(action.getMascot().isLookRight())
             mascot.set_look_right(request.look_right);
-            // Java Breed.java L93: getBornBehavior() で Behavior 構築（第 4 引数伝播・#8）。
-            match self.table.build_behavior(
-                &request.behavior_name,
-                &mut mascot,
-                env,
-                self.factory.as_mut(),
-                self.rng.as_mut(),
-            ) {
+            let table = table_for(&self.set_tables, &self.table, &request.image_set_name);
+            // Java Breed.java L93 / Main.java L497: born behavior 構築（第 4 引数伝播・#8）
+            let built = match &request.behavior_name {
+                None => table.build_next_behavior(
+                    None,
+                    &mut mascot,
+                    env,
+                    self.factory.as_mut(),
+                    self.rng.as_mut(),
+                ),
+                Some(name) => table.build_behavior(
+                    name,
+                    &mut mascot,
+                    env,
+                    self.factory.as_mut(),
+                    self.rng.as_mut(),
+                ),
+            };
+            match built {
                 Ok(runner) => {
                     if let Err(err) = mascot.set_behavior(
                         Some(runner),
                         env,
-                        &self.table,
+                        table,
                         self.factory.as_mut(),
                         self.rng.as_mut(),
                     ) {
-                        // Java Breed.java L95-99: 構築 / 実行例外 → log + dispose 相当
-                        //（未追加のまま破棄・子は Manager に乗らない）
+                        // Java Breed.java L95-99 / Main.java L498-503: 構築 / 実行例外 →
+                        // log + dispose 相当（未追加のまま破棄・子は Manager に乗らない）
                         log::error!("spawn された Mascot の behavior 初期化に失敗: {err}");
                     } else {
                         // Java L94: manager.add(newMascot)
@@ -203,7 +278,7 @@ impl Manager {
                 Err(err) => {
                     log::error!(
                         "spawn された Mascot の behavior `{}` 構築に失敗: {err}",
-                        request.behavior_name
+                        request.behavior_name.as_deref().unwrap_or("(null)")
                     );
                 }
             }
@@ -215,10 +290,14 @@ impl Manager {
         // Java L223: noMascots
         let no_mascots = self.mascots.is_empty();
 
-        // Java L227-229: 全員 1 tick 進める
+        // Java L227-229: 全員 1 tick 進める。
+        // 構築は「マスコット自身の set」の table を使う（#9b・(AF)・
+        // Java buildNextBehavior は mascot 自身の Configuration で呼ばれるため）。
         if !no_mascots {
             for mascot in &mut self.mascots {
-                mascot.tick(env, &self.table, self.factory.as_mut(), self.rng.as_mut());
+                let set_name = mascot.image_set_name().to_string();
+                let table = table_for(&self.set_tables, &self.table, &set_name);
+                mascot.tick(env, table, self.factory.as_mut(), self.rng.as_mut());
             }
         }
         // Java L232-234（mascot.apply ループ）は #10 が [`Manager::apply_all`] で
@@ -307,24 +386,63 @@ impl Manager {
 
     /// Java `setBehaviorAll(String)` L291-310 逐語（全員へ setBehavior・
     /// 構築 / 実行失敗 → log + dispose（L301-306 逐語・削除は次 tick））。
+    /// 各マスコットは「自身の set」の table で構築する（L298
+    /// getConfiguration(mascot.getImageSet()) 相当・#9b (AF)）。
     pub fn set_behavior_all(&mut self, name: &str) {
         if self.mascots.is_empty() {
             return;
         }
         let env: &dyn EnvironmentView = &self.environment;
         for mascot in &mut self.mascots {
-            match self.table.build_behavior(
-                name,
-                mascot,
-                env,
-                self.factory.as_mut(),
-                self.rng.as_mut(),
-            ) {
+            // Java L296: Configuration configuration =
+            //   Main.getInstance().getConfiguration(mascot.getImageSet())
+            let set_name = mascot.image_set_name().to_string();
+            let table = table_for(&self.set_tables, &self.table, &set_name);
+            match table.build_behavior(name, mascot, env, self.factory.as_mut(), self.rng.as_mut())
+            {
                 Ok(runner) => {
                     if let Err(err) = mascot.set_behavior(
                         Some(runner),
                         env,
-                        &self.table,
+                        table,
+                        self.factory.as_mut(),
+                        self.rng.as_mut(),
+                    ) {
+                        log::error!(r#"Behavior "{name}" の設定に失敗: {err}"#);
+                        mascot.dispose();
+                    }
+                }
+                Err(err) => {
+                    log::error!(r#"Behavior "{name}" の構築に失敗: {err}"#);
+                    mascot.dispose();
+                }
+            }
+        }
+    }
+
+    /// Java 3 引数 overload `setBehaviorAll(Configuration, name, imageSet)`
+    /// L320-340 逐語: 該当 set のマスコットのみ「その set」の table で構築 +
+    /// setBehavior・他 set は無傷。構築 / 実行失敗（L329-334 逐語・該当 set の
+    /// マスコットの catch は if の外側のため同一）→ log + そのマスコットのみ
+    /// dispose（削除は次 tick）。
+    pub fn set_behavior_all_of_set(&mut self, image_set_name: &str, name: &str) {
+        if self.mascots.is_empty() {
+            return;
+        }
+        let env: &dyn EnvironmentView = &self.environment;
+        for mascot in &mut self.mascots {
+            // Java L327: if (mascot.getImageSet().equals(imageSet))
+            if mascot.image_set_name() != image_set_name {
+                continue;
+            }
+            let table = table_for(&self.set_tables, &self.table, image_set_name);
+            match table.build_behavior(name, mascot, env, self.factory.as_mut(), self.rng.as_mut())
+            {
+                Ok(runner) => {
+                    if let Err(err) = mascot.set_behavior(
+                        Some(runner),
+                        env,
+                        table,
                         self.factory.as_mut(),
                         self.rng.as_mut(),
                     ) {
@@ -343,6 +461,64 @@ impl Manager {
     /// Java L133-135 逐語（既定 true・L72）。
     pub fn set_exit_on_last_removed(&mut self, exit_on_last_removed: bool) {
         self.exit_on_last_removed = exit_on_last_removed;
+    }
+
+    /// Allowed Behaviours トグルの passthrough（Main.setMascotBehaviorEnabled
+    /// L526-544 逐語のリスト変異は [`Environment::set_behavior_enabled`]・#9b）。
+    pub fn set_behavior_enabled(&mut self, image_set: &str, name: &str, enabled: bool) {
+        self.environment
+            .set_behavior_enabled(image_set, name, enabled);
+    }
+
+    /// 画面外の窓を作業領域へ戻す（WindowsEnvironment.restoreWindows L292-347
+    /// の実装は [`Environment`]・tray RestoreWindows の供給経路・#9b）。
+    pub fn restore_windows(&mut self) {
+        self.environment.restore_windows();
+    }
+
+    /// マスコット右クリック メニューの行動分類（Java `Mascot` ポップアップ
+    /// L523-553 逐語相当・#9b）。要求 set（Java `getConfiguration(imageSet)` 相当・
+    /// 未知 set は base table で動作）の table を挿入順で走査する:
+    /// - hidden → 完全スキップ（L526）
+    /// - 名前に "/" を含む → 完全スキップ（L529 / L548 の contains("/") 否定）
+    /// - 有効な非 toggleable → selectable のみ（L529-547）
+    /// - toggleable → toggleable に (name, checked = enabled) 追加（L549-556）かつ
+    ///   有効なら selectable にも（L529 の behaviorEnabled && !contains("/")）
+    /// - frequency は参照しない（Java も参照しない）
+    ///
+    /// 無効判定は [`BehaviorTable::is_behavior_enabled`] の同一式（Java L583-588
+    /// 短絡: 非 toggleable は常に有効 = 「無効な非 toggleable」は到達不能）。
+    pub fn behavior_menu_items(&self, image_set_name: &str) -> BehaviorMenu {
+        let table = table_for(&self.set_tables, &self.table, image_set_name);
+        let env: &dyn EnvironmentView = &self.environment;
+        let mut menu = BehaviorMenu {
+            selectable: Vec::new(),
+            toggleable: Vec::new(),
+        };
+        for row in &table.rows {
+            // Java L526: if (!config.isBehaviorHidden(behaviorName))
+            if row.hidden || row.name.contains('/') {
+                continue;
+            }
+            // Java L528: boolean behaviorEnabled =
+            //   config.isBehaviorEnabled(behaviorName, this)
+            let enabled = BehaviorTable::is_behavior_enabled(row, image_set_name, env);
+            if !row.toggleable {
+                // Java L529-547: behaviorEnabled && !contains("/") → setBehaviorMenu
+                if enabled {
+                    menu.selectable.push(row.name.clone());
+                }
+            } else {
+                // Java L549-556: isBehaviorToggleable → allowedBehaviorsMenu に
+                // (displayName, behaviorEnabled) で追加
+                menu.toggleable.push((row.name.clone(), enabled));
+                // L529: toggleable && 有効 は selectable にも出る
+                if enabled {
+                    menu.selectable.push(row.name.clone());
+                }
+            }
+        }
+        menu
     }
 
     /// 全員消滅 tick 後に true。process::exit はしない（#10 がイベントループで消費）。

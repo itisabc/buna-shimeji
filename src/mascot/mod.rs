@@ -168,6 +168,20 @@ pub trait EnvironmentView {
         todo!("app impl at #8")
     }
 
+    /// createMascot 経路の追加マスコット要求をキューへ積む（Main.createMascot
+    /// L480-505 相当・#9b）。behavior_name は None = drain 時に
+    /// buildNextBehavior(None) で構築することを示す（[`Manager::request_spawn`]
+    /// `manager::Manager::request_spawn` 経路）。
+    fn queue_spawn_next(&self, image_set_name: &str, anchor: (i32, i32), look_right: bool) {
+        todo!("app impl at #9b")
+    }
+
+    /// 画面外の窓を作業領域へ戻す（Java `WindowsEnvironment.restoreWindows`
+    /// L292-347 相当・tray RestoreWindows の供給経路・#9b）。
+    fn restore_windows(&self) {
+        todo!("app impl at #9b")
+    }
+
     /// Allowed Behaviours トグルの無効判定（Java `Configuration.isBehaviorEnabled`
     /// L583-588 の `disabledBehaviors.get(set).contains(name)` 部相当・#9）。
     ///

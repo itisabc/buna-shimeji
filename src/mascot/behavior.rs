@@ -507,7 +507,7 @@ impl BehaviorTable {
                 // Java L481: isEffective(context) && isBehaviorEnabled(builder, mascot)
                 //（短絡評価・左から右。非 toggleable では env を呼ばない）
                 if Self::row_is_effective(row, &mut vars, &ctx)
-                    && Self::is_behavior_enabled(row, mascot, env)
+                    && Self::is_behavior_enabled(row, mascot.image_set_name(), env)
                 {
                     candidates.push((row.name.as_str(), i64::from(row.frequency)));
                     total_frequency += i64::from(row.frequency);
@@ -521,7 +521,11 @@ impl BehaviorTable {
                 // Java L496: isEffective(context) && isBehaviorEnabled(name, mascot)
                 //（String オーバーロード = 未知名は false・L598-604）
                 if Self::ref_is_effective(reference, &mut vars, &ctx)
-                    && self.is_behavior_enabled_by_name(&reference.name, mascot, env)
+                    && self.is_behavior_enabled_by_name(
+                        &reference.name,
+                        mascot.image_set_name(),
+                        env,
+                    )
                 {
                     candidates.push((reference.name.as_str(), i64::from(reference.frequency)));
                     total_frequency += i64::from(reference.frequency);
@@ -563,7 +567,7 @@ impl BehaviorTable {
         let Some(row) = self.find(name) else {
             return Err(BehaviorError::UnknownBehavior(name.to_string()));
         };
-        if Self::is_behavior_enabled(row, mascot, env) {
+        if Self::is_behavior_enabled(row, mascot.image_set_name(), env) {
             self.build_behavior_direct(name, factory)
         } else {
             log::warn!("Behavior `{name}` は無効化されているため Fall へフォールバックします");
@@ -640,8 +644,16 @@ impl BehaviorTable {
     /// Allowed Behaviours 無効リストに含まれる = true（= トグル OFF）」を返す契約
     /// （app 実装は #9b）のため、`!env.behavior_disabled(...)` が Java の
     /// `!disabledBehaviors.get(imageSet).contains(name)` に対応する。
-    fn is_behavior_enabled(row: &BehaviorRow, mascot: &Mascot, env: &dyn EnvironmentView) -> bool {
-        !row.toggleable || !env.behavior_disabled(mascot.image_set_name(), &row.name)
+    ///
+    /// #9b から Manager の [`behavior_menu_items`]
+    /// `manager::Manager::behavior_menu_items` が同一式を再利用するため
+    /// `pub(crate)`（mascot 参照ではなく set 文字列引数・式自体は不変）。
+    pub(crate) fn is_behavior_enabled(
+        row: &BehaviorRow,
+        image_set: &str,
+        env: &dyn EnvironmentView,
+    ) -> bool {
+        !row.toggleable || !env.behavior_disabled(image_set, &row.name)
     }
 
     /// Java Configuration.isBehaviorEnabled(String, Mascot) L598-604 逐語。
@@ -649,11 +661,11 @@ impl BehaviorTable {
     fn is_behavior_enabled_by_name(
         &self,
         name: &str,
-        mascot: &Mascot,
+        image_set: &str,
         env: &dyn EnvironmentView,
     ) -> bool {
         match self.find(name) {
-            Some(row) => Self::is_behavior_enabled(row, mascot, env),
+            Some(row) => Self::is_behavior_enabled(row, image_set, env),
             None => false,
         }
     }
