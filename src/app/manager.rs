@@ -14,6 +14,10 @@
 //!   Main.setMascotBehaviorEnabled L526-544 の passthrough、restoreWindows
 //!   passthrough（WindowsEnvironment L292-347・Environment 側実装）、
 //!   Mascot ポップアップ分類 L523-553（behavior_menu_items）
+//! - #9d 追加: Reload（素材ローダは app/reload.rs・本モジュールは参照付け替え）。
+//!   Java `Main.reloadAllImageSets`（L547-566）の「全消し + 再作成」は採用せず、
+//!   design.md §2 Reload 方針（§1.10 (d) 9d・ユーザー承認）により**意図的差異**の
+//!   参照付け替え路線（存続 mascot の anchor 等は維持・ImageSet Arc と行動表のみ差し替え）
 //!
 //! 構造上の意図的差異（Java 一致検証時に差し引くこと）:
 //! 1. Java は内部 Ticker スレッド（L146-184）で 40ms 周期に tick を回すが、本実装は
@@ -44,6 +48,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app::environment::Environment;
+use crate::app::reload::ReloadMaterial;
 use crate::mascot::behavior::{BehaviorFactory, BehaviorTable};
 use crate::mascot::{EnvironmentView, Mascot, Rng};
 use crate::render::imageset::ImageSet;
@@ -452,6 +457,126 @@ impl Manager {
                 }
                 Err(err) => {
                     log::error!(r#"Behavior "{name}" の構築に失敗: {err}"#);
+                    mascot.dispose();
+                }
+            }
+        }
+    }
+
+    /// Reload（タスク #9d）: 全マスコットの画像セット参照付け替え + 行動表の全入れ替え。
+    ///
+    /// Java `Main.reloadAllImageSets`（Main.java L547-566）は「全消し + 再作成」だが、
+    /// design.md §2 Reload 方針（§1.10 (d) 9d・ユーザー承認）により**意図的差異**として
+    /// 参照付け替え路線を採用する: 存続マスコットの anchor / look_right / paused /
+    /// dragging は維持し、ImageSet Arc と行動表だけを差し替える。
+    ///
+    /// - 空 materials: [`Manager::dispose_all`]（remove_pending・削除は次 tick）+
+    ///   set_tables クリア・base table は変更しない
+    /// - 非空 materials:
+    ///   1. base table を materials[0]（既定 set = 辞書順先頭）の table で置換し、
+    ///      set_tables を全消しの上で全 materials 分を再登録する（既定 set 分は
+    ///      clone して base と set_tables の両方へ・stale エントリは残らない）
+    ///   2. マスコットを **index 順** で処理する: 自 set が materials に残存 →
+    ///      自 set 名のまま新 [`ImageSet`](crate::render::imageset::ImageSet) オブジェクトへ
+    ///      [`Mascot::rebind_image_set`](crate::mascot::Mascot::rebind_image_set) /
+    ///      消滅 → materials[0] の set 名・image_set へ付け替え
+    ///      （design §2「Reload 時に既存 ImageSet 参照」行相当）
+    ///   3. behavior 再構築: 現在の behavior 名が「付け替え後 set の table」に存在かつ
+    ///      enabled（[`BehaviorTable::is_behavior_enabled`] の同一式で pre-check）なら
+    ///      同名再構築（pre-check 済みのため build_behavior の再配置分岐は不通 =
+    ///      同名経路では rng を消費しない）。存在しない / 無効 / behavior 無しは
+    ///      [`BehaviorTable::build_next_behavior`]（previous None = Java createMascot
+    ///      L493 の buildNextBehavior(null) と同一経路）で再選択。どちらも新 runner
+    ///      で進行をリセットする（anchor / look_right / paused / dragging 維持）
+    ///   4. 構築 Err / set_behavior Err → log + そのマスコットのみ dispose
+    ///      （Java setBehaviorAll L291-340 の catch 部相当・他は無傷）
+    ///
+    /// Environment の disabled map（Allowed Behaviours）・image set resolver・
+    /// added キューは一切変更しない。
+    pub fn reload(&mut self, materials: Vec<ReloadMaterial>) {
+        if materials.is_empty() {
+            // 空: 全員 dispose 扱い（削除は次 tick の retain）+ set_tables クリア +
+            // base table 変更なし
+            self.dispose_all();
+            self.set_tables.clear();
+            return;
+        }
+
+        // rebind 用の set 名 → 新 Arc 対応（materials は table 抽出で消費するため
+        // 先に作る。残存 set も新オブジェクトへ付け替える）
+        let new_sets: HashMap<String, Arc<ImageSet>> = materials
+            .iter()
+            .map(|m| (m.name.clone(), Arc::clone(&m.image_set)))
+            .collect();
+        // 既定 set（materials[0] = 辞書順先頭）の情報（消滅 set フォールバック用）
+        let first_name = materials[0].name.clone();
+        let first_image_set = Arc::clone(&materials[0].image_set);
+
+        // 1. base table を materials[0] の table で置換 + set_tables 全消し再登録
+        //（既定 set 分は clone して base と set_tables の両方へ）
+        let mut materials = materials.into_iter();
+        let first = materials.next().expect("materials 非空は事前確認済み");
+        self.set_tables.clear();
+        self.set_tables.insert(first.name, first.table.clone());
+        self.table = first.table;
+        for material in materials {
+            self.set_tables.insert(material.name, material.table);
+        }
+
+        // 2-4. index 順で走査（rng 消費順が index 順に依存するため固定）
+        let env: &dyn EnvironmentView = &self.environment;
+        for mascot in &mut self.mascots {
+            // 2. 自 set の扱い決定（残存 = 新 Arc へ付け替え / 消滅 = 既定 set へ）
+            let own_set = mascot.image_set_name().to_string();
+            match new_sets.get(&own_set) {
+                Some(new_arc) => mascot.rebind_image_set(own_set.clone(), Arc::clone(new_arc)),
+                None => mascot.rebind_image_set(first_name.clone(), Arc::clone(&first_image_set)),
+            }
+            let set_name = mascot.image_set_name().to_string();
+
+            // 3. behavior 再構築（判定は「付け替え後 set」の table で行う）
+            let table = table_for(&self.set_tables, &self.table, &set_name);
+            let current_name = mascot.behavior_name().map(str::to_string);
+            let same_name_enabled = match &current_name {
+                Some(name) => table
+                    .find(name)
+                    .is_some_and(|row| BehaviorTable::is_behavior_enabled(row, &set_name, env)),
+                None => false,
+            };
+            let built = match (&current_name, same_name_enabled) {
+                (Some(name), true) => table.build_behavior(
+                    name,
+                    mascot,
+                    env,
+                    self.factory.as_mut(),
+                    self.rng.as_mut(),
+                ),
+                _ => table.build_next_behavior(
+                    None,
+                    mascot,
+                    env,
+                    self.factory.as_mut(),
+                    self.rng.as_mut(),
+                ),
+            };
+
+            // 4. 構築 Err / set_behavior Err → そのマスコットのみ dispose（他は無傷）
+            match built {
+                Ok(runner) => {
+                    let runner_name = runner.name.clone();
+                    if let Err(err) = mascot.set_behavior(
+                        Some(runner),
+                        env,
+                        table,
+                        self.factory.as_mut(),
+                        self.rng.as_mut(),
+                    ) {
+                        log::error!(r#"Reload 後の Behavior "{runner_name}" の設定に失敗: {err}"#);
+                        mascot.dispose();
+                    }
+                }
+                Err(err) => {
+                    log::error!("Reload 後の Behavior 構築に失敗: {err}");
                     mascot.dispose();
                 }
             }

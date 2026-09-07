@@ -421,6 +421,9 @@ impl Mascot {
     }
 
     /// Behavior を設定して初期化する（Java setBehavior L962-967 逐語）。
+    /// Java は代入→init の順で既存 behavior を**置き換える**ため、こちらも先に
+    /// 旧 runner を破棄してから init する（#9d: Reload の同名再構築 / 再選択が
+    /// 既存 behavior 持ちの mascot に対して新 runner を反映するために必須）。
     /// init 中に遷移が起きた場合は遷移先が採用される（Java も setBehavior が
     /// 再帰的に呼ばれるため同じ構造・design.md 補足 9 参照）。
     pub fn set_behavior(
@@ -432,7 +435,14 @@ impl Mascot {
         rng: &mut dyn Rng,
     ) -> Result<(), BehaviorError> {
         match behavior {
-            Some(runner) => behavior::set_behavior_and_init(runner, self, env, table, factory, rng),
+            Some(runner) => {
+                // Java L963: this.behavior = behavior（旧 runner は置き換え = 破棄）。
+                // 破棄してから init することで、init 中の遷移がなければ新 runner が
+                // set_behavior_and_init 内で代入される（旧 runner を保持したままでは
+                // 「none なら代入」の guard により新 runner が捨てられていた）。
+                self.behavior = None;
+                behavior::set_behavior_and_init(runner, self, env, table, factory, rng)
+            }
             None => {
                 self.behavior = None;
                 Ok(())
@@ -599,6 +609,26 @@ impl Mascot {
 
     pub fn image_set_name(&self) -> &str {
         &self.image_set_name
+    }
+
+    /// Reload（#9d）用の画像セット付け替え。`image_set_name` と `image_set`
+    /// （Arc）の **2 フィールド差し替えのみ** を行う。
+    /// 実行中 behavior（runner）/ anchor / look_right / time / paused / dragging /
+    /// needs_repaint は一切変更しない（同名 behavior の再構築・再選択・
+    /// 再描画要求は呼び出し側（[`crate::app::manager::Manager::reload`]）の責務。
+    /// design.md §2「Reload 時に既存 ImageSet 参照」行の新系付け替え相当）。
+    pub fn rebind_image_set(
+        &mut self,
+        image_set_name: impl Into<String>,
+        image_set: Arc<ImageSet>,
+    ) {
+        self.image_set_name = image_set_name.into();
+        self.image_set = image_set;
+    }
+
+    /// 保持中の画像セットへの参照（Arc の deref・Reload (#9d) の差し替え観測点）。
+    pub fn image_set(&self) -> &ImageSet {
+        &self.image_set
     }
 
     pub fn sound(&self) -> Option<&str> {
