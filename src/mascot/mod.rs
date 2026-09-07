@@ -167,6 +167,21 @@ pub trait EnvironmentView {
     ) {
         todo!("app impl at #8")
     }
+
+    /// Allowed Behaviours トグルの無効判定（Java `Configuration.isBehaviorEnabled`
+    /// L583-588 の `disabledBehaviors.get(set).contains(name)` 部相当・#9）。
+    ///
+    /// 意味論（テストダブル・behavior.rs 呼び出し側と一致）:
+    /// **true = その (image_set, behavior) が Allowed Behaviours 無効リストに
+    /// 含まれる（= トグル OFF・無効）**。behavior.rs の `is_behavior_enabled` は
+    /// `!toggleable || !env.behavior_disabled(set, name)` で Java 等価式
+    /// （`!toggleable || !disabled.contains(name)`・短絡評価）を組み立てる。
+    ///
+    /// 既定実装は false = 無効リスト空 = Java 既定（全 Behavior 有効）。
+    /// app 実装（#9b）は settings の無効リスト含有判定で差し替える。
+    fn behavior_disabled(&self, image_set: &str, behavior_name: &str) -> bool {
+        false
+    }
 }
 
 /// Java `Math.random()` 相当の [0,1) 一様乱数の抽象。

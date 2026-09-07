@@ -388,6 +388,7 @@ fn single_table(name: &str, frequency: i32) -> BehaviorTable {
             name: name.to_string(),
             frequency,
             hidden: false,
+            toggleable: false,
             action: SequenceChild::Ref {
                 name: name.to_string(),
                 attrs: VarMap::new(),

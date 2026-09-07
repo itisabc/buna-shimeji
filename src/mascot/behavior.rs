@@ -17,10 +17,11 @@
 //! Phase 1 の意図的な範囲外（doc 開示）:
 //! - (B) 参照存在検証（Java validate()）は行わない。存在しない名前の構築は
 //!   [`BehaviorError::UnknownBehavior`] として構築時にエラーになる
-//! - (C) Toggleable（Allowed Behaviours トグル）は #9。Phase 1 では全 Behavior が
-//!   常時有効（[`BehaviorTable::is_behavior_enabled`]）
-//! - (C) Hotspot の contains 判定と hotspot 用 isBehaviorEnabled は資産 hotspot
-//!   0 件のため placeholder（常に一致・常に有効）
+//! - (C) Toggleable（Allowed Behaviours トグル）は #9 で実装済み。無効判定は
+//!   [`EnvironmentView::behavior_disabled`]（true = 無効リストに含まれる）へ委譲し、
+//!   app 実装は #9b
+//! - (C) Hotspot の contains 判定は資産 hotspot 0 件のため placeholder（常に一致）。
+//!   hotspot 経路の isBehaviorEnabled は [`BehaviorTable::build_behavior`] 経由で適用済み
 //! - isHidden フィルタは buildNextBehavior には存在しない（Java 正本確認済み）
 
 use super::{EnvironmentView, Mascot, MascotContext, Rng};
@@ -269,16 +270,17 @@ impl BehaviorRunner {
         // Java L156-181: hotspot 走査（クリック中のときのみ）
         let mut hotspot_state = HotspotState::Inactive;
         if mascot.is_hotspot_clicked() {
-            // (C) contains（常に一致の placeholder）と isBehaviorEnabled（Phase 1
-            // 常時有効）は未実装のため、実在する最初の hotspot を一致したものとして
-            // 扱う。contains 実装は #7/#9。
+            // (C) contains（常に一致の placeholder）は未実装のため、実在する最初の
+            // hotspot を一致したものとして扱う。isBehaviorEnabled は build_behavior
+            // （Java buildBehavior(name, mascot) 相当）経由で適用される（#9）。
+            // contains 実装は #7/#9。
             if let Some(hotspot) = mascot.hotspots().first() {
                 hotspot_state = HotspotState::ActiveNull;
                 let behaviour = hotspot.behaviour.clone();
                 if !behaviour.is_empty() {
                     hotspot_state = HotspotState::Active;
                     let behavior = table
-                        .build_behavior(&behaviour, mascot, env, factory)
+                        .build_behavior(&behaviour, mascot, env, factory, rng)
                         .map_err(NextFlow::Fatal)?;
                     set_behavior_and_init(behavior, mascot, env, table, factory, rng)
                         .map_err(NextFlow::Fatal)?;
@@ -345,12 +347,13 @@ impl BehaviorRunner {
 
         // Java L250-268: hotspot 走査
         if let Some(hotspot) = mascot.hotspots().first() {
-            // (C) contains / isBehaviorEnabled は placeholder（常に一致・常に有効）。
+            // (C) contains は placeholder（常に一致）。isBehaviorEnabled は
+            // build_behavior（Java buildBehavior(name, mascot) 相当）経由で適用される。
             let behaviour = hotspot.behaviour.clone();
             handled = true;
             mascot.set_cursor_position(Some(point));
             if !behaviour.is_empty() {
-                let behavior = table.build_behavior(&behaviour, mascot, env, factory)?;
+                let behavior = table.build_behavior(&behaviour, mascot, env, factory, rng)?;
                 set_behavior_and_init(behavior, mascot, env, table, factory, rng)?;
             }
         }
@@ -400,6 +403,8 @@ pub struct BehaviorRow {
     pub name: String,
     pub frequency: i32,
     pub hidden: bool,
+    /// Allowed Behaviours トグル対象（BehaviorDef.toggleable の伝播）。
+    pub toggleable: bool,
     pub conditions: Vec<Variable>,
     pub action: SequenceChild,
     pub next: Option<NextBehaviorList>,
@@ -429,6 +434,7 @@ impl BehaviorTable {
                             name: def.name.clone(),
                             frequency: def.frequency,
                             hidden: def.hidden,
+                            toggleable: def.toggleable,
                             conditions: conditions.clone(),
                             action: def.action.clone(),
                             next: def.next.clone(),
@@ -439,6 +445,7 @@ impl BehaviorTable {
                     name: def.name.clone(),
                     frequency: def.frequency,
                     hidden: def.hidden,
+                    toggleable: def.toggleable,
                     conditions: Vec::new(),
                     action: def.action.clone(),
                     next: def.next.clone(),
@@ -465,6 +472,10 @@ impl BehaviorTable {
     ///   top-level 先・その後 refs）
     /// - 候補条件は conditions AND + frequency != 0（Java isEffective L374-390/L188-204
     ///   逐語）。評価エラーは log::warn してその候補をスキップ（Err にしない）
+    /// - 候補はさらに isBehaviorEnabled も通過したもの（Java L481 top-level /
+    ///   L496 refs 逐語）。非 toggleable は短絡により env を参照しない・toggleable
+    ///   は [`EnvironmentView::behavior_disabled`]（true = 無効リストに含まれる）が
+    ///   false（= 無効リスト非含有）のとき通過。未知名の参照候補は除外（Java L602）
     /// - total_frequency > 0 で頻度選択（乱数 1 回・XML 順 walk）。
     ///   決まらない / total == 0 なら再配置（乱数 1 回）+ Fall フォールバック
     pub fn build_next_behavior(
@@ -493,7 +504,11 @@ impl BehaviorTable {
         };
         if previous_additive {
             for row in &self.rows {
-                if Self::row_is_effective(row, &mut vars, &ctx) {
+                // Java L481: isEffective(context) && isBehaviorEnabled(builder, mascot)
+                //（短絡評価・左から右。非 toggleable では env を呼ばない）
+                if Self::row_is_effective(row, &mut vars, &ctx)
+                    && Self::is_behavior_enabled(row, mascot, env)
+                {
                     candidates.push((row.name.as_str(), i64::from(row.frequency)));
                     total_frequency += i64::from(row.frequency);
                 }
@@ -503,7 +518,11 @@ impl BehaviorTable {
         // Java: prevBehaviorBuilder != null && !getNextBehaviorBuilders().isEmpty()
         if let Some(next) = previous.and_then(|row| row.next.as_ref()) {
             for reference in &next.references {
-                if Self::ref_is_effective(reference, &mut vars, &ctx) {
+                // Java L496: isEffective(context) && isBehaviorEnabled(name, mascot)
+                //（String オーバーロード = 未知名は false・L598-604）
+                if Self::ref_is_effective(reference, &mut vars, &ctx)
+                    && self.is_behavior_enabled_by_name(&reference.name, mascot, env)
+                {
                     candidates.push((reference.name.as_str(), i64::from(reference.frequency)));
                     total_frequency += i64::from(reference.frequency);
                 }
@@ -527,25 +546,28 @@ impl BehaviorTable {
     }
 
     /// 名前で Behavior を構築する（Java Configuration.buildBehavior(name, mascot)
-    /// L540-555 逐語）。存在しない名前は Err(UnknownBehavior)。
-    /// 無効（disabled）分岐は Phase 1 では到達不能（is_behavior_enabled が常時 true・
-    /// (C) Toggleable は #9）。Java はここで再配置 + Fall へフォールバックするが、
-    /// 再配置には乱数が要るため rng を引数に加えられない本契約では、再配置なしの
-    /// Fall フォールバックに寄せた（Phase 1 落とし前・doc 開示）。
+    /// L540-555 逐語）。
+    /// - 名前未検出 → `Err(UnknownBehavior)`（Java は BehaviorInstantiationException
+    ///   を throw・再配置はしない）
+    /// - 既知名かつ無効（[`Self::is_behavior_enabled`] が false）→ 再配置
+    ///   （乱数 1 回消費・Java L545-548 逐語）して Fall を返す（L549 逐語）
+    /// - 有効 → [`Self::build_behavior_direct`]（乱数を消費しない）
     pub fn build_behavior(
         &self,
         name: &str,
-        _mascot: &mut Mascot,
-        _env: &dyn EnvironmentView,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
         factory: &mut dyn BehaviorFactory,
+        rng: &mut dyn Rng,
     ) -> Result<BehaviorRunner, BehaviorError> {
         let Some(row) = self.find(name) else {
             return Err(BehaviorError::UnknownBehavior(name.to_string()));
         };
-        if Self::is_behavior_enabled(row) {
+        if Self::is_behavior_enabled(row, mascot, env) {
             self.build_behavior_direct(name, factory)
         } else {
             log::warn!("Behavior `{name}` は無効化されているため Fall へフォールバックします");
+            reposition_above_area(mascot, env, rng);
             self.build_behavior_direct(BEHAVIORNAME_FALL, factory)
         }
     }
@@ -609,9 +631,30 @@ impl BehaviorTable {
         }
     }
 
-    /// (C) Java Configuration.isBehaviorEnabled L583-604 相当。Toggleable は #9 で
-    /// 実装するため Phase 1 では全 Behavior が常に有効。
-    fn is_behavior_enabled(_row: &BehaviorRow) -> bool {
-        true
+    /// Java Configuration.isBehaviorEnabled(BehaviorBuilder, Mascot) L583-588 逐語:
+    /// `builder.isToggleable() && disabledBehaviors.containsKey(imageSet)` が成立する
+    /// ときのみ無効リストを引き、それ以外は常に true。短絡評価により非 toggleable では
+    /// env を呼ばない（乱数も消費しない・Java 同様）。
+    ///
+    /// [`EnvironmentView::behavior_disabled`] は「その (image_set, behavior) が
+    /// Allowed Behaviours 無効リストに含まれる = true（= トグル OFF）」を返す契約
+    /// （app 実装は #9b）のため、`!env.behavior_disabled(...)` が Java の
+    /// `!disabledBehaviors.get(imageSet).contains(name)` に対応する。
+    fn is_behavior_enabled(row: &BehaviorRow, mascot: &Mascot, env: &dyn EnvironmentView) -> bool {
+        !row.toggleable || !env.behavior_disabled(mascot.image_set_name(), &row.name)
+    }
+
+    /// Java Configuration.isBehaviorEnabled(String, Mascot) L598-604 逐語。
+    /// 未知名は false（L602・refs 経路の候補フィルタでのみ使用）。
+    fn is_behavior_enabled_by_name(
+        &self,
+        name: &str,
+        mascot: &Mascot,
+        env: &dyn EnvironmentView,
+    ) -> bool {
+        match self.find(name) {
+            Some(row) => Self::is_behavior_enabled(row, mascot, env),
+            None => false,
+        }
     }
 }

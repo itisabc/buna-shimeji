@@ -298,6 +298,10 @@ struct MockEnv {
     multiscreen: bool,
     ctx: MockEvalCtx,
     spawns: RefCell<Vec<SpawnRecord>>,
+    /// behavior_disabled(name) が true を返す行動名（= toggle 後「無効」を表現する・#9）。
+    disabled: Vec<String>,
+    /// behavior_disabled の呼び出し記録 (image_set, behavior_name)。
+    behavior_checks: RefCell<Vec<(String, String)>>,
 }
 
 impl MockEnv {
@@ -320,7 +324,15 @@ impl MockEnv {
                 is_on_calls: RefCell::new(Vec::new()),
             },
             spawns: RefCell::new(Vec::new()),
+            disabled: Vec::new(),
+            behavior_checks: RefCell::new(Vec::new()),
         }
+    }
+
+    /// behavior_disabled が true（無効）を返す行動名を登録する（#9）。
+    fn disable(mut self, name: &str) -> Self {
+        self.disabled.push(name.to_string());
+        self
     }
 
     /// multiscreen = true に切り替え、screen を 2560 幅の仮想画面へ変える。
@@ -351,6 +363,13 @@ impl EnvironmentView for MockEnv {
 
     fn eval_context(&self) -> &dyn EvalContext {
         &self.ctx
+    }
+
+    fn behavior_disabled(&self, image_set: &str, behavior_name: &str) -> bool {
+        self.behavior_checks
+            .borrow_mut()
+            .push((image_set.to_string(), behavior_name.to_string()));
+        self.disabled.iter().any(|n| n == behavior_name)
     }
 
     fn queue_spawn(
@@ -485,11 +504,20 @@ fn def(name: &str, frequency: i32, next: Option<NextBehaviorList>) -> BehaviorDe
         name: name.to_string(),
         frequency,
         hidden: false,
+        toggleable: false,
         action: SequenceChild::Ref {
             name: name.to_string(),
             attrs: VarMap::new(),
         },
         next,
+    }
+}
+
+/// Toggleable="true" 相当の BehaviorDef（#9）。
+fn def_toggle(name: &str, frequency: i32, next: Option<NextBehaviorList>) -> BehaviorDef {
+    BehaviorDef {
+        toggleable: true,
+        ..def(name, frequency, next)
     }
 }
 
@@ -923,15 +951,16 @@ fn build_behavior_builds_named_runner_and_errors_on_unknown() {
     let mut m = mascot_at((500, 500));
     let t = table(vec![single("Walk", 100), single("Fall", 100)]);
 
+    let mut rng = FakeRng::new(&[]);
     let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
         .unwrap();
     assert_eq!(runner.name, "Walk");
 
     let runner = t.build_behavior_direct("Walk", &mut factory).unwrap();
     assert_eq!(runner.name, "Walk");
 
-    match t.build_behavior("Nope", &mut m, &env, &mut factory) {
+    match t.build_behavior("Nope", &mut m, &env, &mut factory, &mut rng) {
         Err(BehaviorError::UnknownBehavior(n)) => assert_eq!(n, "Nope"),
         Ok(_) => panic!("存在しない Behavior への build_behavior は Err が期待されます"),
         Err(_) => panic!("エラー種別は UnknownBehavior が期待されます"),
@@ -945,8 +974,159 @@ fn build_behavior_builds_named_runner_and_errors_on_unknown() {
 }
 
 // =====================================================================
-// Runner::init / Mascot::tick（契約 1・2）
+// Toggleable（#9・Configuration.java L481/L496/L540-550/L583-604 逐語）
 // =====================================================================
+
+#[test]
+fn build_next_behavior_excludes_disabled_toggleable_candidates() {
+    // toggleable 行動 Walk が env に無効と返された → 候補から除外され Fall が選ばれる
+    let env = MockEnv::new().disable("Walk");
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let mut m = mascot_at((500, 500));
+    let t = table(vec![
+        BehaviorEntry::Single(def_toggle("Walk", 100, None)),
+        single("Fall", 100),
+    ]);
+
+    // rng 0.0: 誤って Walk が残っていれば Walk が選ばれるため、Fall で判別できる
+    let mut rng = FakeRng::new(&[0.0]);
+    let runner = t
+        .build_next_behavior(None, &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Fall");
+    assert_eq!(m.anchor(), (500, 500)); // 真の候補（Fall）が選ばれたため再配置しない
+                                        // env へ麻スコットの image set 名と行動名が渡る（Java disabledBehaviors.get(imageSet) 相当）
+    assert!(env
+        .behavior_checks
+        .borrow()
+        .iter()
+        .any(|(set, name)| set == "TestSet" && name == "Walk"));
+}
+
+#[test]
+fn build_next_behavior_keeps_non_toggleable_even_if_env_reports_disabled() {
+    // 非 toggleable 行動は（Java L583-588: isToggleable() && 判定 の短絡）env 返値に
+    // 関わらず必ず候補として残る
+    let env = MockEnv::new().disable("Fall");
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let mut m = mascot_at((500, 500));
+    let t = table(vec![single("Walk", 1), single("Fall", 100)]);
+
+    // rng 0.9999: total=101 → Walk(1) を超え Fall。Fall が誤って除外されると Walk のみ
+    let mut rng = FakeRng::new(&[0.9999]);
+    let runner = t
+        .build_next_behavior(None, &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Fall");
+    // 非 toggleable では env への問い合わせが短絡して発生しない（rng [0,1) は選択のみに消費）
+    assert_eq!(rng.consumed(), 1);
+}
+
+#[test]
+fn build_next_behavior_repositions_and_falls_when_all_candidates_disabled() {
+    // 候補全滅（唯一の toggleable 行動が無効・total == 0）→ 再配置 + Fall
+    let env = MockEnv::new().disable("Walk");
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let mut m = mascot_at((500, 500));
+    let t = table(vec![
+        BehaviorEntry::Single(def_toggle("Walk", 100, None)),
+        single("Fall", 0),
+    ]);
+
+    // work_area=(0,0,1920,1040)・rng 0.5 → (int)(0.5*(1920-2))+0+1 = 960 / top-256
+    let mut rng = FakeRng::new(&[0.5]);
+    let runner = t
+        .build_next_behavior(None, &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Fall");
+    assert_eq!(m.anchor(), (960, -256));
+    assert_eq!(rng.consumed(), 1); // 再配置でのみ消費
+}
+
+#[test]
+fn build_next_behavior_filters_disabled_toggleable_ref_candidates() {
+    // next リスト参照も isEffective && isBehaviorEnabled で絞られる（Java L496）
+    let env = MockEnv::new().disable("RefOnly");
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let mut m = mascot_at((500, 500));
+    let t = table(vec![
+        BehaviorEntry::Single(def("Walk", 1, Some(next_list(false, &[("RefOnly", 1)])))),
+        BehaviorEntry::Single(def_toggle("RefOnly", 1, None)),
+        single("Fall", 0),
+    ]);
+
+    // 誤って参照候補が残れば total=1 で rng 0.5 は RefOnly を選ぶため判別できる
+    let mut rng = FakeRng::new(&[0.5]);
+    let runner = t
+        .build_next_behavior(Some("Walk"), &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Fall");
+    assert_eq!(m.anchor(), (960, -256));
+    assert_eq!(rng.consumed(), 1); // 再配置でのみ消費
+}
+
+#[test]
+fn build_behavior_repositions_and_falls_for_disabled_toggleable() {
+    // 既知名・無効 → 再配置（Java L545-548 逐語）+ Fall 返却
+    let env = MockEnv::new().disable("Walk");
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let mut m = mascot_at((500, 500));
+    let t = table(vec![
+        BehaviorEntry::Single(def_toggle("Walk", 100, None)),
+        single("Fall", 100),
+    ]);
+
+    // work_area=(0,0,1920,1040)・rng 0.5 → (int)(0.5*(1920-2))+0+1 = 960 / top-256
+    let mut rng = FakeRng::new(&[0.5]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Fall");
+    assert_eq!(m.anchor(), (960, -256));
+    assert_eq!(rng.consumed(), 1); // 再配置でのみ消費
+}
+
+#[test]
+fn build_behavior_keeps_non_toggleable_even_if_env_reports_disabled() {
+    // 非 toggleable 行動は env 返値に依らず有効（Java L583-588 の短絡）
+    let env = MockEnv::new().disable("Walk");
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let mut m = mascot_at((500, 500));
+    let t = table(vec![single("Walk", 100), single("Fall", 100)]);
+
+    let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Walk");
+    assert_eq!(m.anchor(), (500, 500)); // 再配置しない
+}
+
+#[test]
+fn build_behavior_enabled_consumes_no_random_and_keeps_behavior() {
+    let env = MockEnv::new();
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let mut m = mascot_at((500, 500));
+    let t = table(vec![
+        BehaviorEntry::Single(def_toggle("Walk", 100, None)),
+        single("Fall", 100),
+    ]);
+
+    // 有効な toggleable 行動はそのまま構築され、乱数を消費しない
+    let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Walk");
+    assert_eq!(rng.consumed(), 0);
+}
 
 #[test]
 fn init_transitions_to_next_behavior_when_action_completes_immediately() {
@@ -969,11 +1149,11 @@ fn init_transitions_to_next_behavior_when_action_completes_immediately() {
         single("Fall", 100),
     ]);
 
+    let mut rng = FakeRng::new(&[0.5]);
     let mut runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
         .unwrap();
     // init 中の遷移（build_next_behavior・単独候補 total=1）で selection random を 1 回消費
-    let mut rng = FakeRng::new(&[0.5]);
     runner
         .init(&mut m, &env, &t, &mut factory, &mut rng)
         .unwrap();
@@ -997,10 +1177,10 @@ fn tick_advances_time_once_per_tick_and_runs_action() {
     m.set_image(Some(on_screen_image())); // 画面内 bounds を保証
 
     let t = table(vec![single("Walk", 100), single("Fall", 100)]);
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
     assert_eq!(m.behavior_name(), Some("Walk")); // set_behavior で init 済み
@@ -1066,10 +1246,10 @@ fn tick_with_eval_error_disposes_but_still_counts_time() {
     m.set_image(Some(on_screen_image()));
 
     let t = table(vec![single("Walk", 100), single("Fall", 100)]);
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
 
@@ -1112,10 +1292,10 @@ fn tick_transitions_to_next_behavior_when_action_completes() {
         single("ChaseMouse", 1),
         single("Fall", 100),
     ]);
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
     assert_eq!(m.behavior_name(), Some("Walk")); // init 中はまだ遷移しない
@@ -1137,10 +1317,10 @@ fn tick_repositions_and_falls_when_off_screen() {
     m.set_image(Some(on_screen_image())); // bounds.x = 4936 >= screen.right(1920)
 
     let t = table(vec![single("Walk", 100), single("Fall", 100)]);
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
 
@@ -1163,10 +1343,10 @@ fn tick_clears_cursor_when_no_hotspots_are_active() {
     m.set_cursor_position(Some((10, 10)));
 
     let t = table(vec![single("Walk", 100)]);
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
 
@@ -1198,10 +1378,10 @@ fn tick_on_lost_ground_clears_cursor_dragging_and_falls() {
     m.set_dragging(true);
 
     let t = table(vec![single("Walk", 100), single("Fall", 100)]);
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
 
@@ -1236,10 +1416,10 @@ fn mouse_pressed_starts_drag_or_respects_undraggable() {
     let mut factory = MockFactory::new(&log);
     let mut m = mascot_at((500, 500));
     m.set_image(Some(on_screen_image()));
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
     m.mouse_pressed((10, 10), &env, &t, &mut factory, &mut rng)
@@ -1257,10 +1437,10 @@ fn mouse_pressed_starts_drag_or_respects_undraggable() {
     );
     let mut m = mascot_at((500, 500));
     m.set_image(Some(on_screen_image()));
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
     m.mouse_pressed((10, 10), &env, &t, &mut factory, &mut rng)
@@ -1279,10 +1459,10 @@ fn mouse_pressed_starts_drag_or_respects_undraggable() {
     );
     let mut m = mascot_at((500, 500));
     m.set_image(Some(on_screen_image()));
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
     let result = m.mouse_pressed((10, 10), &env, &t, &mut factory, &mut rng);
@@ -1299,10 +1479,10 @@ fn mouse_released_throws_when_dragging_and_clears_hotspot_cursor() {
     let mut factory = MockFactory::new(&log);
     let mut m = mascot_at((500, 500));
     m.set_image(Some(on_screen_image()));
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
     m.set_cursor_position(Some((5, 5)));
@@ -1317,10 +1497,10 @@ fn mouse_released_throws_when_dragging_and_clears_hotspot_cursor() {
     let mut factory = MockFactory::new(&log);
     let mut m = mascot_at((500, 500));
     m.set_image(Some(on_screen_image()));
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
     m.set_cursor_position(Some((5, 5)));
@@ -1333,10 +1513,10 @@ fn mouse_released_throws_when_dragging_and_clears_hotspot_cursor() {
     let mut factory = MockFactory::new(&log);
     let mut m = mascot_at((500, 500));
     m.set_image(Some(on_screen_image()));
-    let runner = t
-        .build_behavior("Walk", &mut m, &env, &mut factory)
-        .unwrap();
     let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
     m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
         .unwrap();
     m.mouse_released(&env, &t, &mut factory, &mut rng).unwrap();

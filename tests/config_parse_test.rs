@@ -908,6 +908,74 @@ fn real_behaviors_validate_required_ok() {
 }
 
 #[test]
+fn real_behaviors_have_no_toggleable_flags() {
+    // 資産 behaviors.xml には Toggleable 属性が 0 件（asset-report・BehaviorBuilder.java
+    // L169-176 省略時 false）→ 全 Behavior の toggleable は false
+    let cfg = real_behaviors();
+    for (_, def) in walk_behaviors(&cfg) {
+        assert!(!def.toggleable, "Behavior {} の toggleable", def.name);
+    }
+}
+
+#[test]
+fn synthetic_behavior_toggleable_attribute_parses_and_stays_out_of_action_attrs() {
+    let xml = concat!(
+        "<Mascot xmlns=\"http://www.group-finity.com/Mascot\">\n",
+        "<BehaviorList>\n",
+        "<Behavior Name=\"On\" Frequency=\"1\" Toggleable=\"true\"/>\n",
+        "<Behavior Name=\"ExplicitOff\" Frequency=\"2\" Toggleable=\"false\"/>\n",
+        "<Behavior Name=\"Unset\" Frequency=\"3\" Extra=\"7\"/>\n",
+        "</BehaviorList>\n</Mascot>\n"
+    );
+    let path = temp_conf("toggleable", xml);
+    let result = parse_behaviors(&path);
+    let _ = std::fs::remove_file(&path);
+    let cfg = result.expect("Toggleable 属性を含む behaviors をパースできる");
+    let walked = walk_behaviors(&cfg);
+    assert_eq!(walked.len(), 3);
+
+    let toggle_of = |name: &str| -> bool {
+        walked
+            .iter()
+            .find(|(_, b)| b.name == name)
+            .unwrap_or_else(|| panic!("Behavior {name}"))
+            .1
+            .toggleable
+    };
+    // Toggleable="true" → true（Java BehaviorBuilder.java L169-176 相当）
+    assert!(toggle_of("On"));
+    // Toggleable="false" → false
+    assert!(!toggle_of("ExplicitOff"));
+    // 省略時は false（= Java 既定値）
+    assert!(!toggle_of("Unset"));
+
+    // Toggleable は行動パラメータ（既定参照の attrs）に入らない（プログラムパラメータ・
+    // 除外リスト相当。Hidden/Frequency 等と同様に ActionReference に渡されない）
+    let befs: Vec<&BehaviorDef> = walked.iter().map(|(_, b)| *b).collect();
+    let on = befs.iter().find(|b| b.name == "On").unwrap();
+    let unset = befs.iter().find(|b| b.name == "Unset").unwrap();
+    for def in [on, unset] {
+        match &def.action {
+            SequenceChild::Ref { attrs, .. } => {
+                assert!(
+                    !attrs.contains_key("Toggleable"),
+                    "{}: Toggleable は action attrs に入らない",
+                    def.name
+                );
+            }
+            _ => panic!("既定の action 参照"),
+        }
+    }
+    // Unset の通常属性 Extra は従来どおり attrs に入る
+    match &unset.action {
+        SequenceChild::Ref { attrs, .. } => {
+            assert_eq!(expect_const_num(attrs.get("Extra"), "Unset@Extra"), 7.0);
+        }
+        _ => panic!("Unset の action 参照"),
+    }
+}
+
+#[test]
 fn real_behaviors_ten_condition_groups() {
     // asset-report §3-4: <Condition Condition="..."> グループ ×10
     let cfg = real_behaviors();

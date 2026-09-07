@@ -147,6 +147,10 @@ pub struct BehaviorDef {
     pub name: String,
     pub frequency: i32,
     pub hidden: bool,
+    /// Allowed Behaviours トグル対象（Java `BehaviorBuilder.toggleable` 相当）。
+    /// 属性省略時 / 必須 4 種（ChaseMouse / Fall / Dragged / Thrown）は強制 false
+    /// （Java BehaviorBuilder.java L169-176 逐語）。
+    pub toggleable: bool,
     /// 対応アクション。既定は「Behavior 名（または Action 属性）と同名の参照」。
     /// attrs（残りの属性）は Gap 等の注入変数候補になる。
     pub action: SequenceChild,
@@ -659,6 +663,16 @@ fn parse_behavior_def(
     let hidden = node
         .attribute("Hidden")
         .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    // (C) Toggleable（Java BehaviorBuilder.java L169-176 逐語）:
+    // 属性が無い場合 / 必須 4 種（ChaseMouse / Fall / Thrown / Dragged）のときは
+    // 常に false。それ以外は Boolean.parseBoolean 相当（"true" の大小無視のみ true）。
+    const TOGGLEABLE_RESERVED: [&str; 4] = ["ChaseMouse", "Fall", "Dragged", "Thrown"];
+    let toggleable = match node.attribute("Toggleable") {
+        Some(value) if !TOGGLEABLE_RESERVED.contains(&name.as_str()) => {
+            value.eq_ignore_ascii_case("true")
+        }
+        _ => false,
+    };
     let action_attr = node.attribute("Action").map(|s| s.to_string());
 
     // 子要素: NextBehaviorList / ActionReference / 匿名 Action
@@ -708,6 +722,7 @@ fn parse_behavior_def(
         name,
         frequency,
         hidden,
+        toggleable,
         action,
         next,
     })

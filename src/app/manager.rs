@@ -182,6 +182,7 @@ impl Manager {
                 &mut mascot,
                 env,
                 self.factory.as_mut(),
+                self.rng.as_mut(),
             ) {
                 Ok(runner) => {
                     if let Err(err) = mascot.set_behavior(
@@ -312,10 +313,13 @@ impl Manager {
         }
         let env: &dyn EnvironmentView = &self.environment;
         for mascot in &mut self.mascots {
-            match self
-                .table
-                .build_behavior(name, mascot, env, self.factory.as_mut())
-            {
+            match self.table.build_behavior(
+                name,
+                mascot,
+                env,
+                self.factory.as_mut(),
+                self.rng.as_mut(),
+            ) {
                 Ok(runner) => {
                     if let Err(err) = mascot.set_behavior(
                         Some(runner),

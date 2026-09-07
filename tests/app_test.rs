@@ -332,6 +332,7 @@ fn fixture_table() -> BehaviorTable {
         name: name.to_string(),
         frequency: 100,
         hidden: false,
+        toggleable: false,
         action: SequenceChild::Ref {
             name: name.to_string(),
             attrs: VarMap::new(),
