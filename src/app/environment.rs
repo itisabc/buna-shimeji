@@ -13,6 +13,9 @@
 //! - `AbstractEnvironment.updateScreenRect` L104-150: 全モニタ矩形の union
 //!   （`Rectangle.union` 式）- WindowsEnvironment.getWorkAreaRect(false) 相当の
 //!   work area 直値供給（#10）
+//! - #9c 追加: `set_disabled_behaviors`（無効行動 map の全体置換・settings.toml
+//!   復元注入用。Main.setMascotBehaviorEnabled L526-544 の per-key 変異
+//!   [`Environment::set_behavior_enabled`] とは別経路）
 //!
 //! スロット契約: [`AreaSlot::WorkArea(i)`] / [`AreaSlot::Screen(i)`] の `i` は
 //! monitor index 順で 1:1（env.rs モジュール doc 参照）。
@@ -43,7 +46,7 @@
 //!    （tests/app_test.rs 契約・tao 単一スレッド前提のため Mutex は使わない）
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::config::script::EvalContext;
 use crate::mascot::env::{AreaSlot, AreaState, CursorState};
@@ -382,6 +385,23 @@ impl Environment {
             .iter()
             .map(|(set, list)| (set.clone(), list.clone()))
             .collect()
+    }
+
+    /// 無効行動 map の全体置換（settings.toml 復元注入用・#9c）。既存内容を
+    /// クリアして注入内容のみで再構築する（マージではない）。値が空リストの
+    /// エントリは内部不変「値が空のエントリは存在しない」（[`Self::set_behavior_enabled`]
+    /// の契約）に合わせて格納しない。直後の `behavior_disabled` 読みへ反映される。
+    /// Java Main.setMascotBehaviorEnabled L526-544 の per-key 変異
+    ///（[`Self::set_behavior_enabled`]）とは別経路（起動時 Settings 復元の全体注入）。
+    pub fn set_disabled_behaviors(&mut self, disabled: BTreeMap<String, Vec<String>>) {
+        let mut map = self.disabled_behaviors.borrow_mut();
+        map.clear();
+        for (set, behaviors) in disabled {
+            if behaviors.is_empty() {
+                continue;
+            }
+            map.insert(set, behaviors);
+        }
     }
 
     /// WindowsEnvironment.restoreWindows L292-347 逐語。窓選別の INVALID / IGNORED

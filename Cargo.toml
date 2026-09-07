@@ -23,6 +23,9 @@ roxmltree = "0.21"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # トレイ
 tray-icon = "0.24"
+# 設定永続化（conf/settings.toml・タスク #9c）
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 # エラー
 thiserror = "2"
 anyhow = "1"

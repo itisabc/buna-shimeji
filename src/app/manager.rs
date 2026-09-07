@@ -18,6 +18,10 @@
 //!   Java `Main.reloadAllImageSets`（L547-566）の「全消し + 再作成」は採用せず、
 //!   design.md §2 Reload 方針（§1.10 (d) 9d・ユーザー承認）により**意図的差異**の
 //!   参照付け替え路線（存続 mascot の anchor 等は維持・ImageSet Arc と行動表のみ差し替え）
+//! - #9c 追加: request_spawn_random（Main.createMascot() 無引数版 L466-473 逐語）、
+//!   Allowed passthrough 5 種（Environment setter 委譲・Sounds は Phase 1 no-op の
+//!   ため作らない）、popup 単体操作（Mascot.java L517-562 相当:
+//!   set_behavior_at / toggle_pause_at / dismiss_at）
 //!
 //! 構造上の意図的差異（Java 一致検証時に差し引くこと）:
 //! 1. Java は内部 Ticker スレッド（L146-184）で 40ms 周期に tick を回すが、本実装は
@@ -187,6 +191,29 @@ impl Manager {
         let look_right = self.rng.unit() < 0.5;
         self.environment_view()
             .queue_spawn_next(image_set_name, (-4000, -4000), look_right);
+    }
+
+    /// Java `Main.createMascot()`（無引数版）L466-473 逐語: set 一覧からランダムに
+    /// 1 set 選んで spawn 要求する。
+    ///
+    /// - Java L468-470: `if (length == 0) { return; }` が乱数取得より先のため、
+    ///   空スライスでは warn ログ + no-op + **rng を消費しない**
+    /// - Java L471: `int random = (int) (length * Math.random())`（0 向け切り捨て）。
+    ///   選択用に [`Rng::unit`] を**ちょうど 1 回**消費する。`unit()` は [0,1) 契約の
+    ///   ため index は常に範囲内・追加クランプはしない（逐語維持）
+    /// - Java L472: `createMascot(imageSets.get(random))`。向き決定の乱数
+    ///   （L490）は [`Manager::request_spawn`] 内で 1 回消費するため、spawn 1 体
+    ///   あたりの合計消費は 2 回
+    pub fn request_spawn_random(&mut self, image_sets: &[String]) {
+        if image_sets.is_empty() {
+            // Java L468-470: length == 0 → return（乱数取得より先）
+            log::warn!("image set が 1 つも無いため spawn 要求を無視します");
+            return;
+        }
+        // Java L471: int random = (int) (length * Math.random())（切り捨て）
+        let index = (self.rng.unit() * image_sets.len() as f64) as usize;
+        // Java L472: createMascot(imageSets.get(random))
+        self.request_spawn(&image_sets[index]);
     }
 
     /// Mascot を追加キューへ積む（Java `add` L252-269 逐語のうち
@@ -463,6 +490,63 @@ impl Manager {
         }
     }
 
+    /// 単一マスコット版 setBehavior（#9c・Java `Mascot` popup の SetBehaviour
+    /// L517-522 / L538 相当）: `index` のマスコットのみ「自分の set」の table で
+    /// 構築する（[`table_for`] = Java L522 `getConfiguration(imageSet)` 相当・
+    /// [`Manager::set_behavior_all`] のループ本体と同一構造）。
+    /// 構築 / 実行失敗 → log + そのマスコットのみ dispose（Java
+    /// `Manager.setBehaviorAll` L291-310 の catch 準拠・削除反映は次 tick）。
+    /// index 範囲外 → warn + no-op（メニュー構築時と MenuEvent 時点の集合ずれ
+    /// に対する防御）。
+    pub fn set_behavior_at(&mut self, index: usize, name: &str) {
+        let Some(mascot) = self.mascots.get_mut(index) else {
+            log::warn!("set_behavior_at: index {index} は範囲外のため無視します");
+            return;
+        };
+        let env: &dyn EnvironmentView = &self.environment;
+        let set_name = mascot.image_set_name().to_string();
+        let table = table_for(&self.set_tables, &self.table, &set_name);
+        match table.build_behavior(name, mascot, env, self.factory.as_mut(), self.rng.as_mut()) {
+            Ok(runner) => {
+                if let Err(err) = mascot.set_behavior(
+                    Some(runner),
+                    env,
+                    table,
+                    self.factory.as_mut(),
+                    self.rng.as_mut(),
+                ) {
+                    log::error!(r#"Behavior "{name}" の設定に失敗: {err}"#);
+                    mascot.dispose();
+                }
+            }
+            Err(err) => {
+                log::error!(r#"Behavior "{name}" の構築に失敗: {err}"#);
+                mascot.dispose();
+            }
+        }
+    }
+
+    /// 単一マスコット版 pause トグル（#9c・Java `Mascot` popup pauseItem
+    /// L559-560 逐語 `setPaused(!isPaused())`）。index 範囲外 → warn + no-op。
+    pub fn toggle_pause_at(&mut self, index: usize) {
+        let Some(mascot) = self.mascots.get_mut(index) else {
+            log::warn!("toggle_pause_at: index {index} は範囲外のため無視します");
+            return;
+        };
+        mascot.set_paused(!mascot.is_paused());
+    }
+
+    /// 単一マスコット版 Dismiss（#9c・Java `Mascot` popup disposeMenu L562-563 逐語
+    /// `dispose()`）。remove_pending を立てるのみ・削除反映は次 tick。
+    /// index 範囲外 → warn + no-op。
+    pub fn dismiss_at(&mut self, index: usize) {
+        let Some(mascot) = self.mascots.get_mut(index) else {
+            log::warn!("dismiss_at: index {index} は範囲外のため無視します");
+            return;
+        };
+        mascot.dispose();
+    }
+
     /// Reload（タスク #9d）: 全マスコットの画像セット参照付け替え + 行動表の全入れ替え。
     ///
     /// Java `Main.reloadAllImageSets`（Main.java L547-566）は「全消し + 再作成」だが、
@@ -593,6 +677,34 @@ impl Manager {
     pub fn set_behavior_enabled(&mut self, image_set: &str, name: &str, enabled: bool) {
         self.environment
             .set_behavior_enabled(image_set, name, enabled);
+    }
+
+    /// Allowed Settings passthrough 5 種（#9c・Settings.java L32-37 / L89-94 相当）。
+    /// [`Environment`] の同名 setter 群への委譲。`sounds` は Environment setter が
+    /// 存在しないため passthrough を作らない（Phase 1 no-op・design §3-12・
+    /// トレイ側は settings 永続化のみ）。
+    pub fn set_breeding_allowed(&mut self, allowed: bool) {
+        self.environment.set_breeding_allowed(allowed);
+    }
+
+    /// [`Environment::set_transients_enabled`] への委譲（#9c）。
+    pub fn set_transients_enabled(&mut self, enabled: bool) {
+        self.environment.set_transients_enabled(enabled);
+    }
+
+    /// [`Environment::set_transformation_allowed`] への委譲（#9c）。
+    pub fn set_transformation_allowed(&mut self, allowed: bool) {
+        self.environment.set_transformation_allowed(allowed);
+    }
+
+    /// [`Environment::set_throwing_allowed`] への委譲（#9c）。
+    pub fn set_throwing_allowed(&mut self, allowed: bool) {
+        self.environment.set_throwing_allowed(allowed);
+    }
+
+    /// [`Environment::set_multiscreen`] への委譲（#9c）。
+    pub fn set_multiscreen(&mut self, multiscreen: bool) {
+        self.environment.set_multiscreen(multiscreen);
     }
 
     /// 画面外の窓を作業領域へ戻す（WindowsEnvironment.restoreWindows L292-347

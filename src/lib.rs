@@ -7,4 +7,5 @@ pub mod app;
 pub mod config;
 pub mod mascot;
 pub mod render;
+pub mod tray;
 pub mod win;
