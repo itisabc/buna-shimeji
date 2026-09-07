@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>しめじ Action コマンド一覧（Rust 版再実装リファレンス）</title>
+<style>
+  :root {
+    --bg: #fafaf7;
+    --card: #ffffff;
+    --text: #2d2a26;
+    --muted: #6f6a63;
+    --accent: #8a6d3b;
+    --accent-bg: #f4ede1;
+    --green: #2e7d32;
+    --green-bg: #e8f5e9;
+    --gray: #757575;
+    --gray-bg: #eeeeec;
+    --border: #e0dcd4;
+    --code: #efece6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Yu Gothic UI", "Meiryo", sans-serif;
+    background: var(--bg); color: var(--text);
+    margin: 0; padding: 24px 16px 64px;
+    line-height: 1.7;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: .95rem; margin-bottom: 20px; }
+  h2 {
+    font-size: 1.2rem; margin: 40px 0 12px; padding: 6px 12px;
+    background: var(--accent-bg); border-left: 5px solid var(--accent); border-radius: 0 6px 6px 0;
+  }
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 16px 0; }
+  .summary-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .summary-card .num { font-size: 1.7rem; font-weight: 700; }
+  .summary-card.full .num { color: var(--green); }
+  .summary-card.stub .num { color: var(--gray); }
+  .summary-card .label { color: var(--muted); font-size: .85rem; }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+  th, td { padding: 9px 12px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; font-size: .9rem; }
+  th { background: var(--accent-bg); font-weight: 700; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  .name { font-weight: 700; white-space: nowrap; }
+  .name code { font-family: Consolas, monospace; font-size: .88rem; }
+  .inh { color: var(--muted); font-size: .78rem; }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 10px;
+    font-size: .75rem; font-weight: 700; white-space: nowrap; margin-right: 4px;
+  }
+  .b-core   { background: var(--green-bg); color: var(--green); }
+  .b-stub   { background: var(--gray-bg);  color: var(--gray); }
+  .b-dep    { background: #fbe9e7; color: #bf360c; }
+  .b-type   { background: #e3f2fd; color: #1565c0; }
+  .b-asset  { background: var(--green-bg); color: var(--green); }
+  code { font-family: Consolas, monospace; background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: .84em; }
+  .note {
+    background: var(--card); border: 1px dashed var(--border); border-radius: 8px;
+    padding: 12px 16px; color: var(--muted); font-size: .88rem; margin: 12px 0;
+  }
+  ul { margin: 6px 0; padding-left: 22px; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 40px; }
+  .legacy-block { margin: 10px 0 24px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>しめじ Action コマンド一覧</h1>
+<p class="subtitle">Shimeji-Desktop（DalekCraft2 版）から Rust へ再実装するアクションの全種類と、それぞれの「マスコットの動き」。<br>
+参照: Java 実装 <code>.tmp/java-ref/action/</code>（38 クラス）・設計 <code>.tmp/design.md §1.8</code>（2026-09-06 確定）</p>
+
+<div class="summary-grid">
+  <div class="summary-card full">
+    <div class="num">15 種</div>
+    <div class="label"><strong>資産で使用 → フル実装</strong>（Java 逐語移植・期待値焼き込みテスト）<br>
+    資産 actions.xml が実際に参照する 10 クラス + Type 系 5 種</div>
+  </div>
+  <div class="summary-card stub">
+    <div class="num">17 種</div>
+    <div class="label"><strong>資産外 → stub（置き物）</strong>（呼ばれても即完了・警告ログ）<br>
+    うち 5 種は Java でも @Deprecated（実質別アクションと同一）</div>
+  </div>
+</div>
+
+<div class="note">
+<strong>「40 種」の数え方について</strong>: Java 実装は 38 クラス
+（= アクション種別 <strong>32 種</strong>（資産内 15 + 資産外 17）+ 基底・共通クラス 5 + 例外 1）。
+設計書の「Action 40 種」はこのアクション種別群を指す呼称です。
+<br>
+<strong>stub とは</strong>: Java 版は資産 XML が参照したクラスだけを動的に読み込むため、
+資産で使わないクラスは実行時には一切動作しません（= この資産では実質「死にコード」）。
+Rust 版では全種類を enum で定義する必要があるため、資産外は「即完了する置き物」にします。
+万一将来の資産セットが stub を参照したら起動時にエラー（fail-fast）で検出できます。
+</div>
+
+<h2>基盤クラス（共通の仕組み・5 + 1）</h2>
+<table>
+  <tr><th style="width:170px">クラス</th><th>役割</th></tr>
+  <tr><td class="name"><code>Action</code><div class="inh">インターフェース</div></td>
+      <td>全アクションの契約: <code>init</code>（開始）/ <code>hasNext</code>（継続判定）/ <code>next</code>（1 tick 実行）/ <code>isDraggable</code>（掴めるか）</td></tr>
+  <tr><td class="name"><code>ActionBase</code><div class="inh">共通基底</div></td>
+      <td>ほぼ全アクションの土台。相対時刻（<code>時間 = マスコット時刻 − 開始時刻</code>）、アニメ選択（条件一致の最初の 1 枚）、affordances（他マスコットへの合図）・hotspots（クリック判定域）の更新、共通属性の既定値<br>
+      属性: <code>Duration</code>（上限。既定=無限）/ <code>Condition</code>（既定=true）/ <code>Draggable</code>（既定=true）/ <code>Affordance</code>（既定="")</td></tr>
+  <tr><td class="name"><code>BorderedAction</code><div class="inh">基底</div></td>
+      <td>「床・壁・天井に沿った動き」の土台。<code>BorderType</code> 属性で境界を取得し、毎 tick そこに沿ってアンカーを再配置。Rust 版は <code>BorderRef</code> トークン方式（#7a）で移植</td></tr>
+  <tr><td class="name"><code>InstantAction</code><div class="inh">基底</div></td>
+      <td>1 tick で終わる単発アクションの土台（<code>hasNext</code>=常に false）。Look / Offset / Mute の親</td></tr>
+  <tr><td class="name"><code>ComplexAction</code><div class="inh">基底</div></td>
+      <td>子アクション列を先頭から順に実行する土台（現在の子が終わったら次へ進む = seek）。Sequence の親</td></tr>
+  <tr><td class="name"><code>LostGroundException</code><div class="inh">例外</div></td>
+      <td>アクション継続不可能（地面/境界を失った、窓が消えた等）。捕まえると BehaviorRunner が「Fall（落下）」へ切り替える</td></tr>
+</table>
+
+<h2>A. 資産で使用 — フル実装 15 種（#7b で Java 逐語移植）</h2>
+
+<h3 style="font-size:1.02rem; margin:20px 0 8px;">A-1. Type 系（actions.xml の Type 属性で直接使う・5 種）</h3>
+<table>
+  <tr><th style="width:120px">アクション</th><th style="width:150px">予想される動き</th><th>詳細・主な属性</th><th style="width:210px">資産での使用例</th></tr>
+  <tr>
+    <td class="name"><code>Stay</code><div class="inh">BorderedAction 継承</div><span class="badge b-type">Type</span><span class="badge b-asset">資産内</span></td>
+    <td>その場でじっとアニメ再生。座る・佇む・眠るなど</td>
+    <td>境界属性がある場合はそこから外れた瞬間に LostGround → 落下へ切り替え。アニメは <code>Condition</code> 条件一致の最初の 1 枚を使う</td>
+    <td><code>Sit</code> / <code>Sleep</code> / <code>FallOnKnee</code> 等 10 定義</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Move</code><div class="inh">BorderedAction 継承</div><span class="badge b-type">Type</span><span class="badge b-asset">資産内</span></td>
+    <td>目標座標へ歩く。歩きアニメを循環再生</td>
+    <td><code>TargetX</code>/<code>TargetY</code>（既定=制限なし）へ向かって移動。ポーズ自身の <code>Velocity</code> で実際に動く。目標の方向へ自動で向き直り（向きが変わる瞬間は <code>IsTurn</code> アニメを再生）。到達時に飛び越えていたら目標へクランプ（overshoot 補正）。境界から外れたら LostGround</td>
+    <td><code>Walk</code> / <code>RunWithIE</code> 等の土台</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Animate</code><div class="inh">BorderedAction 継承</div><span class="badge b-type">Type</span><span class="badge b-asset">資産内</span></td>
+    <td>アニメを 1 回通しで再生（境界に沿って）</td>
+    <td>Stay とほぼ同型だが「Duration で区切ったアニメ再生」が主目的。境界から外れたら LostGround</td>
+    <td><code>Parachute</code> / <code>SitOnIe</code> 等の土台・5 定義</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Sequence</code><div class="inh">ComplexAction 継承</div><span class="badge b-type">Type</span><span class="badge b-asset">資産内</span></td>
+    <td>複数の動きを順番に連続実行</td>
+    <td>子（<code>Reference</code> で他アクション参照 / Inline で直接定義）を先頭から順に。全部終わったら次の行動へ。<code>Loop="true"</code> なら最後まで行ったら先頭へ戻る（<strong>資産 55 箇所で使用・Dragged は true</strong>）。子参照に渡した属性（例: <code>Condition</code>）は参照先へ引き継がれ、確率分岐（Tripping の 5% 転倒）が成立する</td>
+    <td><code>StandUp</code> / <code>Fall</code> / <code>WalkAlongWorkAreaFloor</code> 等 59 定義（最多）</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Select</code><div class="inh">Sequence 同一</div><span class="badge b-type">Type</span><span class="badge b-asset">資産内</span></td>
+    <td>Sequence と同じ（別名）</td>
+    <td>Java 実装は空クラス（Sequence をそのまま継承）。読みやすさのための別名</td>
+    <td>Inline ネストで 3 使用</td>
+  </tr>
+</table>
+
+<h3 style="font-size:1.02rem; margin:20px 0 8px;">A-2. Embedded クラス（actions.xml が Class= で参照・10 種）</h3>
+<table>
+  <tr><th style="width:120px">クラス</th><th style="width:150px">予想される動き</th><th>詳細・主な属性</th><th style="width:210px">資産での使用例</th></tr>
+  <tr>
+    <td class="name"><code>Look</code><div class="inh">InstantAction 継承</div><span class="badge b-core">Embedded</span><span class="badge b-asset">資産内</span></td>
+    <td>その場で振り向く（1 tick）</td>
+    <td><code>LookRight</code> 属性（true=右を向く / 既定=反対方向）。アニメなし</td>
+    <td><code>Turn</code> 行動（ランダム振り向き）</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Offset</code><div class="inh">InstantAction 継承</div><span class="badge b-core">Embedded</span><span class="badge b-asset">資産内</span></td>
+    <td>その場のまま位置をずらす（1 tick）</td>
+    <td><code>X</code>/<code>Y</code> を<strong>生値（スケール不変）</strong>でアンカーへ加算。壁登りと組み合わせる「細かい位置調整」専用（スケールをかけると資産の座標系が崩れるため意図的に生値）</td>
+    <td><code>ClimbWall</code> 等の段差調整</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Jump</code><div class="inh">ActionBase 継承</div><span class="badge b-core">Embedded</span><span class="badge b-asset">資産内</span></td>
+    <td>目標へ放物線でジャンプ（窓から飛び降り等）</td>
+    <td><code>TargetX</code>/<code>TargetY</code>/<code>VelocityParam</code>（既定 20.0）。目標へ向かう放物線速度を毎 tick 計算し <code>VelocityX</code>/<code>VelocityY</code> 変数としてアニメに注入。目標距離が速度以下になったら目標座標へスナップ</td>
+    <td><code>JumpFromLeftWall</code> / <code>JumpFromIE</code> 等</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Fall</code><div class="inh">ActionBase 継承</div><span class="badge b-core">Embedded</span><span class="badge b-asset">資産内</span></td>
+    <td>重力で落下する（全ての「落ちる」の芯）</td>
+    <td><code>InitialVx</code>/<code>InitialVy</code>/<code>Gravity</code>/<code>ResistanceX</code>/<code>ResistanceY</code>。毎 tick 重力加速+空気抵抗減衰。1 tick 分の移動を <code>dev</code> 分割して<strong>小刻み衝突判定</strong>（床から弾かれても最大 80px 上方向で床を再探索・下向き時のみ）。床/壁に着いたら停止。<code>VelocityX</code>/<code>VelocityY</code> 変数注入。<strong>Rust 版は Java の half-up 四捨五入（java_round）を必須に再現</strong></td>
+    <td><code>Fall</code>（必須ビヘイビア）/ <code>FallFromWall</code> 等</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Dragged</code><div class="inh">ActionBase 継承</div><span class="badge b-core">Embedded</span><span class="badge b-asset">資産内</span></td>
+    <td>マウスで引きずられている状態（必須ビヘイビア）</td>
+    <td>カーソル位置+<code>OffsetX</code>/<code>OffsetY</code>（既定 0/120・<code>OffsetType="Origin"</code> なら画像中心基準）へ追従。足元ぶりの揺れを物理っぽく減衰（0.1/0.8 係数・<code>FootX</code>/<code>FootDX</code> 変数注入 → アニメ条件で足元アニメ切替）。カーソルを離すと BehaviorRunner が「Thrown」へ。250tick 毎に 10% で自発的に手を放す（rng 消費は条件成立時のみ・短絡一致）。<strong>refreshWorkArea 呼び出しは Rust 版で no-op 化+コメント保持（design §1.7(e)-3）</strong></td>
+    <td><code>Dragged</code>（必須ビヘイビア・Loop="true"）</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Regist</code><div class="inh">ActionBase 継承</div><span class="badge b-core">Embedded</span><span class="badge b-asset">資産内</span></td>
+    <td>窓の端っこに「ヒョイッ」と座る（窓端座りの着地演出）</td>
+    <td>アニメ再生中はドラッグ状態。終了フレームで 50% の確率で振り向き（rng）した後 LostGround → 落下へ。<code>OffsetX</code>/<code>OffsetType</code> は Dragged 同型</td>
+    <td><code>SitOnTheLeftEdgeOfIE</code> 等の末尾</td>
+  </tr>
+  <tr>
+    <td class="name"><code>WalkWithIE</code><div class="inh">Move 継承</div><span class="badge b-core">Embedded</span><span class="badge b-asset">資産内</span></td>
+    <td>インタラクティブウィンドウ（IE 窓）を<strong>担いで歩く</strong></td>
+    <td><code>IeOffsetX</code>/<code>IeOffsetY</code>（生値・マスコットが窓のどこを掴むか）。歩きながら窓も同じ量だけ動かす（moveActiveIE）。窓が見えない/掴み位置がずれたら LostGround。<code>throwing_allowed</code> トゲート有効時のみ動く。RunWithIe は BorderType=Floor 版</td>
+    <td><code>WalkWithIe</code> / <code>RunWithIe</code></td>
+  </tr>
+  <tr>
+    <td class="name"><code>ThrowIE</code><div class="inh">Animate 継承</div><span class="badge b-core">Embedded</span><span class="badge b-asset">資産内</span></td>
+    <td>窓を「ブンッ」と投げ飛ばす</td>
+    <td><code>InitialVX</code>=32 / <code>InitialVY</code>=−10 / <code>Gravity</code>=0.5（スケール適用）。毎 tick 窓を初速+重力で移動。開始時に掴んでいた窓の ID を記憶し、<strong>途中で別窓に切り替わったら中断</strong>。throwing トゲート有効時のみ</td>
+    <td><code>ThrowIEFromLeft</code> / <code>RunAndThrowIEFromRight</code> 等</td>
+  </tr>
+  <tr>
+    <td class="name"><code>FallWithIE</code><div class="inh">Fall 継承</div><span class="badge b-core">Embedded</span><span class="badge b-asset">資産内</span></td>
+    <td>窓を担いだまま落下する</td>
+    <td>Fall の落下物理+WalkWithIE の掴み維持（ずれたら LostGround）を合成。着地後も窓を運ぶ。throwing トゲート有効時のみ</td>
+    <td><code>FallWithIe</code></td>
+  </tr>
+  <tr>
+    <td class="name"><code>Breed</code><div class="inh">Animate 継承</div><span class="badge b-core">Embedded</span><span class="badge b-asset">資産内</span></td>
+    <td>アニメ（分裂動作）の最後の 1 フレームで<strong>子マスコットを湧かす</strong></td>
+    <td><code>BornX</code>/<code>BornY</code>（生まれる位置のオフセット・向きで左右反転）/ <code>BornBehaviour</code>（子の初期行動）/ <code>BornMascot</code>（子の画像セット・既定=自分と同じ）/ <code>BornTransient</code>（使い捨て子フラグ）/ <code>BornInterval</code> / <code>BornCount</code>。<strong>「増殖」トグル・「Transients」トゲートの両方で制御</strong>（#7b は EnvironmentView 経由で供給）。Rust 版はスポーンをキューイングし次 tick で一括反映（AGENTS.md §5-6 踏襲・Java 即時との意図的差異）</td>
+    <td><code>PullUpShimeji1</code> / <code>Divide1</code>（増殖行動）</td>
+  </tr>
+</table>
+
+<h2>B. 資産外 — stub 17 種（呼ばれても即完了・将来実装可能な形で置く）</h2>
+
+<div class="note">
+Java 版も資産 XML が参照しないクラスはロードされず実行されないため、
+実行系としての挙動は「stub（即完了+警告ログ）」と一致します。
+下表は<strong>将来実装したときの動き</strong>の説明。Embedded FQN が未知だった場合は stub ではなく起動エラー（fail-fast）。
+</div>
+
+<h3 style="font-size:1.02rem; margin:20px 0 8px;">B-1. @Deprecated（Java 1.0.21 で統合済み・実質 Animate/Move/Stay/Jump と同一・5 種）</h3>
+<table>
+  <tr><th style="width:150px">クラス</th><th style="width:130px">実質</th><th>説明</th></tr>
+  <tr><td class="name"><code>Broadcast</code><span class="badge b-dep">Deprecated</span></td><td>= Animate</td><td rowspan="4" style="vertical-align:top">1.0.21 でブロードキャスト機能が ActionBase 本体へ統合され、これら 4 クラスは親クラスと<strong>完全に同一の動作</strong>になりました（Java ソースは継承宣言のみ）。資産でも使われていないため stub。将来の資産互換のため名前だけ残る</td></tr>
+  <tr><td class="name"><code>BroadcastJump</code><span class="badge b-dep">Deprecated</span></td><td>= Jump</td></tr>
+  <tr><td class="name"><code>BroadcastMove</code><span class="badge b-dep">Deprecated</span></td><td>= Move</td></tr>
+  <tr><td class="name"><code>BroadcastStay</code><span class="badge b-dep">Deprecated</span></td><td>= Stay</td></tr>
+  <tr><td class="name"><code>MoveWithTurn</code><span class="badge b-dep">Deprecated</span></td><td>= Move + 向き直り強制</td><td>Move と同じだが向き直りアニメ（最後のアニメ）を強制使用。1.0.21 で Move 本体へ turning 機能が統合され deprecated。stub</td></tr>
+</table>
+
+<h3 style="font-size:1.02rem; margin:20px 0 8px;">B-2. 実装保留（Phase 2・12 種）</h3>
+<table>
+  <tr><th style="width:150px">クラス</th><th style="width:170px">将来実装したときの動き</th><th>詳細（Java 実装の内容）</th></tr>
+  <tr>
+    <td class="name"><code>Turn</code><span class="badge b-stub">stub</span></td>
+    <td>その場で向きだけを変える</td>
+    <td>BorderedAction。現在の向きと action の向きが違う間、振り向きアニメを再生して完了したら終了</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Transform</code><span class="badge b-stub">stub</span></td>
+    <td>別の画像セット（キャラ）へ<strong>変身</strong>する</td>
+    <td>Animate 継承。アニメ最終フレームで <code>TransformMascot</code> セットへ画像差し替え+<code>TransformBehaviour</code> 行動へ切り替え。「変身」トグル（transformation）が有効時のみ。AGENTS.md の R9（差し替え容易）と直結する将来実装候補</td>
+  </tr>
+  <tr>
+    <td class="name"><code>SelfDestruct</code><span class="badge b-stub">stub</span></td>
+    <td>アニメを演じた後<strong>自分自身を消す</strong></td>
+    <td>Animate 継承。最終フレームで dispose（マスコット削除）。使い捨てマスコットの退出演出用</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Mute</code><span class="badge b-stub">stub</span></td>
+    <td>効果音を止める（1 tick）</td>
+    <td>InstantAction 継承。<code>Sound</code> 属性指定ならその音だけ、無指定なら全効果音停止。効果音実体は Phase 1 外（効果音枠のみ実装）のため先行実装は不要</td>
+  </tr>
+  <tr>
+    <td class="name"><code>BreedMove</code><span class="badge b-stub">stub</span></td>
+    <td>歩きながら定期的に増殖する</td>
+    <td>Move 継承+Breed の増殖ロジック。<code>BornInterval</code> 毎のフレームで増殖</td>
+  </tr>
+  <tr>
+    <td class="name"><code>BreedJump</code><span class="badge b-stub">stub</span></td>
+    <td>ジャンプしながら定期的に増殖する</td>
+    <td>Jump 継承+Breed の増殖ロジック。同上</td>
+  </tr>
+  <tr>
+    <td class="name"><code>ComplexMove</code><span class="badge b-stub">stub</span></td>
+    <td>目標へ歩き、到着したら<strong>自分と相手の行動を両方切り替える</strong>。増殖・対象スキャンにも対応</td>
+    <td>BorderedAction 継承。<code>Characteristics</code>（Breed/Scan）、<code>Behaviour</code>/<code>TargetBehaviour</code>、<code>TargetLook</code>。Move の移動+到着時の双方向 Behavior 変更+Breed 増殖+Scan（affordance 持ちマスコット探索）。<strong>Manager 連携（他マスコット検索・Behavior 変更）が必要</strong>なため Phase 2 で EnvironmentView 拡張込みで実装</td>
+  </tr>
+  <tr>
+    <td class="name"><code>ComplexJump</code><span class="badge b-stub">stub</span></td>
+    <td>目標へジャンプし、到着したら自分と相手の行動を両方切り替える</td>
+    <td>ActionBase 継承（Jump 相当の移動+Breed/Scan 特性）。到着時の双方向 Behavior 変更+TargetLook（向かい合わせ）。Phase 2 対象</td>
+  </tr>
+  <tr>
+    <td class="name"><code>ScanMove</code><span class="badge b-stub">stub</span></td>
+    <td>合図（affordance）を出している相手を探して歩き、接触したら両者の行動を切り替える</td>
+    <td>BorderedAction 継承。ターゲット追尾+向き直りアニメ+overshoot クランプ+到着時の双方向 Behavior 変更。Manager の getMascotWithAffordance が必要。Phase 2 対象</td>
+  </tr>
+  <tr>
+    <td class="name"><code>ScanJump</code><span class="badge b-stub">stub</span></td>
+    <td>合図を出している相手へジャンプし、着地したら両者の行動を切り替える</td>
+    <td>ActionBase 継承。ScanMove のジャンプ版。Phase 2 対象</td>
+  </tr>
+  <tr>
+    <td class="name"><code>ScanInteract</code><span class="badge b-stub">stub</span></td>
+    <td>合図を出している相手のそばで干渉アニメを演じ、終わったら両者の行動を切り替える</td>
+    <td>BorderedAction 継承。ターゲット追尾+向き直りアニメ+干渉アニメ末尾で双方向 Behavior 変更。Phase 2 対象</td>
+  </tr>
+  <tr>
+    <td class="name"><code>Interact</code><span class="badge b-stub">stub</span></td>
+    <td>他のマスコットと重なっている間だけ干渉アニメを演じ、終わったら行動を切り替える</td>
+    <td>Animate 継承。<code>hasOverlappingMascotsAtPoint</code>（自分の位置に重なりがあるか）を hasNext 条件に使用。Phase 2 対象</td>
+  </tr>
+</table>
+
+<h2>共通用語の凡例</h2>
+<ul>
+  <li><strong>LostGround</strong>: アクション継続不可能（地面を失った・窓が消えた・掴みが外れた）→ BehaviorRunner が捕まえて「Fall（落下）」へ切り替え。マスコットが空中に残らないための安全網</li>
+  <li><strong>アニメ選択</strong>: 複数アニメから「<code>Condition</code> 式が true になった最初の 1 枚」を毎フレーム選び直す（<code>#{...}</code> 式は毎フレーム再評価）</li>
+  <li><strong>変数注入</strong>: アクションが <code>VelocityX</code>/<code>FootX</code> 等をアニメ式へ渡す。アニメの条件式から参照できる（例: <code>#{FootX &lt; mascot.environment.cursor.x-50}</code>）</li>
+  <li><strong>スケール不変（生値）属性</strong>: <code>Offset</code> の X/Y、<code>WalkWithIE</code>/<code>ThrowIE</code> 系の掴みオフセットはスケールを適用しない（資産の座標系が崩れるため。Java の意図的仕様）</li>
+  <li><strong>rng 消費点</strong>: Dragged（10% 自発離手・短絡評価）と Regist（終了時 50% 振り向き）のみ。Rust 版は乱数注入式（テスト可能）で Java の Math.random と同じ 2 点だけを消費</li>
+</ul>
+
+<p class="foot">
+出典: DalekCraft2/Shimeji-Desktop @dea8952（New BSD License）の action/ 38 クラス全読解に基づく。
+作成: orch（2026-09-06）。資産内/資産外の区分と実装方針は design.md §1.8（ユーザー承認 A 案）。
+</p>
+
+</div>
+</body>
+</html>
