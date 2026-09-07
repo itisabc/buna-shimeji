@@ -835,8 +835,7 @@ impl BreedAction {
             .base
             .text_attr("BornMascot")
             .unwrap_or_else(|| BREED_DEFAULT_BORN_MASCOT.to_string());
-        // BornBehaviour は #8 の Behavior 識別で使用（キューへ渡す anchor/先のみ保持）
-        let _born_behavior = self
+        let born_behavior = self
             .bordered
             .base
             .text_attr("BornBehaviour")
@@ -877,8 +876,9 @@ impl BreedAction {
         };
 
         for _index in 0..born_count {
-            // Java L94（manager.add）→ Rust は queue_spawn（次 tick 反映・意図的差異）
-            env.queue_spawn(&child_type, anchor, look_right);
+            // Java L94（manager.add）→ Rust は queue_spawn（次 tick 反映・意図的差異）。
+            // BornBehaviour 名（L93 getBornBehavior()）は第 4 引数で queue へ伝播する（#8）
+            env.queue_spawn(&child_type, anchor, look_right, &born_behavior);
         }
         Ok(())
     }

@@ -3,8 +3,9 @@
 //! 構造は設計の最適形（design.md §1.5/§1.6）: Java の singleton・EDT・ReadWriteLock を
 //! 排除し、環境・乱数・行動表・ファクトリはメソッド引数で注入する（Manager が所有）。
 //! ロジックは Java を仕様として逐語移植する:
-//! - tick（L613-656）: `isAnimating()`（L997-999 = animating && !paused）のとき
-//!   behavior.next() を 1 回呼び、try/catch の外側で time++
+//! - tick（L613-656）: `isAnimating()`（L997-999 = animating && !paused）かつ
+//!   behavior 有りのとき behavior.next() を 1 回呼び time++（L613-625・behavior
+//!   無しでは time は進まない）
 //! - setImage（L835-862）: 同値 no-op / prev 更新 / needs_repaint = true
 //! - getBounds（L910-918）: anchor - image.center の矩形。image 無しは直前の非 null
 //!   画像から復元
@@ -155,8 +156,15 @@ pub trait EnvironmentView {
     /// Breed 用の追加マスコット要求をキューへ積む
     /// （Java は manager.add() 即時。Rust は次 tick 一括反映 = AGENTS.md §5-6 追加/
     /// 削除キューイング踏襲 → 意図的差異・design §1.8(f)。キューの所有と反映は
-    /// Manager（#8）。anchor は出生計算済みの値、look_right は親の向き）。
-    fn queue_spawn(&self, image_set_name: &str, anchor: (i32, i32), look_right: bool) {
+    /// Manager（#8）。anchor は出生計算済みの値、look_right は親の向き、
+    /// behavior_name は BornBehaviour 属性の評価結果（#8 で 4 引数化・省略時 ""））。
+    fn queue_spawn(
+        &self,
+        image_set_name: &str,
+        anchor: (i32, i32),
+        look_right: bool,
+        behavior_name: &str,
+    ) {
         todo!("app impl at #8")
     }
 }
@@ -326,6 +334,7 @@ impl Mascot {
         // take/put-back: next 内の遷移は self.behavior を直接差し替えるため、
         // 遷移済みなら take した古い runner は破棄する。
         let Some(mut runner) = self.behavior.take() else {
+            // Java L613-625: time++ は `behavior != null` の内側（behavior 無しでは増えない）
             return;
         };
         if let Err(err) = runner.next(self, env, table, factory, rng) {
@@ -508,6 +517,12 @@ impl Mascot {
     /// 再描画要否（Java needsRepaint）。クリア（apply 相当）は #8 renderer glue。
     pub fn needs_repaint(&self) -> bool {
         self.needs_repaint
+    }
+
+    /// 再描画要否フラグをクリアする（Java `Mascot.apply` L693-696 の
+    /// `needsRepaint = false` 相当・Manager.apply_all glue から呼ばれる・#8）。
+    pub fn clear_needs_repaint(&mut self) {
+        self.needs_repaint = false;
     }
 
     /// リソース解放 + Manager からの削除依頼（Java dispose L713-730 のうち

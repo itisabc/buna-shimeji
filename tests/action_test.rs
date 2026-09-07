@@ -15,7 +15,9 @@
 //!   `rng: &mut dyn Rng` を引数に受ける（design §1.8(e)）
 //! - EnvironmentView 追加 4 メソッド（§1.8(f)）: `breeding_allowed() -> bool` /
 //!   `transients_enabled() -> bool` / `transformation_allowed() -> bool` /
-//!   `queue_spawn(image_set_name: &str, anchor: (i32, i32), look_right: bool)`
+//!   `queue_spawn(image_set_name: &str, anchor: (i32, i32), look_right: bool,
+//!   behavior_name: &str)`（**#8 で 4 引数化**: Breed が BornBehaviour 名を
+//!   第 4 引数で queue へ渡す契約・design §1.8(f) 補完）
 //! - config 変更: `Animation { condition, poses, is_turn }` /
 //!   `ActionDef::Sequence/Select { …, is_loop: bool }`（design §1.8(g)・Rust 予約語
 //!   `loop` のため `is_loop`）/ `ActionDef::* { border: Option<BorderType> }`
@@ -47,12 +49,13 @@ use simeji::render::imageset::{Frame, ImageSet};
 // 合成モニタ状態の test-double
 // =====================================================================
 
-/// queue_spawn の呼び出し記録。
+/// queue_spawn の呼び出し記録（#8: 第 4 引数 = BornBehaviour 名を pin）。
 #[derive(Debug, Clone, PartialEq)]
 struct SpawnRec {
     image_set_name: String,
     anchor: (i32, i32),
     look_right: bool,
+    behavior_name: String,
 }
 
 /// Java Area 相当の AreaState（dbottom=床移動検証用デルタ・visible=true）。
@@ -231,11 +234,18 @@ impl EnvironmentView for SynthEnv {
         self.transformation
     }
 
-    fn queue_spawn(&self, image_set_name: &str, anchor: (i32, i32), look_right: bool) {
+    fn queue_spawn(
+        &self,
+        image_set_name: &str,
+        anchor: (i32, i32),
+        look_right: bool,
+        behavior_name: &str,
+    ) {
         self.spawns.borrow_mut().push(SpawnRec {
             image_set_name: image_set_name.to_string(),
             anchor,
             look_right,
+            behavior_name: behavior_name.to_string(),
         });
     }
 }
@@ -1459,7 +1469,11 @@ fn breed_spawns_once_at_penultimate_frame() {
     // アニメ duration 2 → 最終フレーム（time 1）で breed
     let action = create(
         ActionKind::Breed,
-        &attrs(&[("BornX", "16"), ("BornY", "32")]),
+        &attrs(&[
+            ("BornX", "16"),
+            ("BornY", "32"),
+            ("BornBehaviour", "PullUp"),
+        ]),
         vec![anim(None, false, vec![pose("p.png", (64, 64), (0, 0), 2)])],
         1.0,
     );
@@ -1478,8 +1492,10 @@ fn breed_spawns_once_at_penultimate_frame() {
             image_set_name: "TestSet".to_string(),
             anchor: (984, 532),
             look_right: true,
+            behavior_name: "PullUp".to_string(),
         }],
-        "lookRight=true → BornX を減算（L84-89）・BornY を加算・親の lookRight を引継"
+        "lookRight=true → BornX を減算（L84-89）・BornY を加算・親の lookRight を引継・\
+         BornBehaviour 名（\"PullUp\"）が queue の第 4 引数で伝播する（#8）"
     );
 }
 
@@ -1589,6 +1605,12 @@ fn breed_gates_breeding_and_transient_settings() {
         env.spawns.borrow().len(),
         1,
         "transients only で breeding 許可は不要"
+    );
+    assert_eq!(
+        env.spawns.borrow()[0].behavior_name,
+        "",
+        "BornBehaviour 属性省略時は既定値（空文字列・BorderedAction BREED_DEFAULT_BORN_BEHAVIOR）\
+         が第 4 引数で渡る（#8）"
     );
 }
 

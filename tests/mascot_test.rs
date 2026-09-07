@@ -276,13 +276,28 @@ impl EvalContext for MockEvalCtx {
     }
 }
 
+/// queue_spawn の呼び出し記録（#8: BornBehaviour 名が第 4 引数で渡る契約 pin・
+/// tests/action_test.rs の SpawnRec と同形）。
+#[derive(Debug, Clone, PartialEq)]
+struct SpawnRecord {
+    image_set_name: String,
+    anchor: (i32, i32),
+    look_right: bool,
+    behavior_name: String,
+}
+
 /// EnvironmentView モック。既定: work_area=(0,0,1920,1040) / screen=(0,0,1920,1080) /
 /// multiscreen=false。
+///
+/// queue_spawn は 4 引数（#8 拡張・BornBehaviour 名が queue に伝播する契約）で
+/// 観測可能にした。それ以外の拡張メソッドは default todo!("app impl at #8") のまま
+/// （これらの検証は tests/env_test.rs / tests/app_test.rs が担う）。
 struct MockEnv {
     work_area: Rect,
     screen: Rect,
     multiscreen: bool,
     ctx: MockEvalCtx,
+    spawns: RefCell<Vec<SpawnRecord>>,
 }
 
 impl MockEnv {
@@ -304,6 +319,7 @@ impl MockEnv {
             ctx: MockEvalCtx {
                 is_on_calls: RefCell::new(Vec::new()),
             },
+            spawns: RefCell::new(Vec::new()),
         }
     }
 
@@ -335,6 +351,21 @@ impl EnvironmentView for MockEnv {
 
     fn eval_context(&self) -> &dyn EvalContext {
         &self.ctx
+    }
+
+    fn queue_spawn(
+        &self,
+        image_set_name: &str,
+        anchor: (i32, i32),
+        look_right: bool,
+        behavior_name: &str,
+    ) {
+        self.spawns.borrow_mut().push(SpawnRecord {
+            image_set_name: image_set_name.to_string(),
+            anchor,
+            look_right,
+            behavior_name: behavior_name.to_string(),
+        });
     }
 }
 
