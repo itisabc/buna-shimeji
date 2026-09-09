@@ -37,6 +37,7 @@ use crate::render::imageset::{java_round, scale_pose};
 
 pub mod bordered;
 pub mod complex;
+pub mod factory;
 
 use bordered::{
     AnimateAction, BreedAction, FallWithIEAction, MoveAction, StayAction, ThrowIEAction,

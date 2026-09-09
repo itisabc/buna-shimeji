@@ -17,7 +17,10 @@
 pub mod imageset;
 
 use tao::dpi::{PhysicalPosition, PhysicalSize};
-use tao::event_loop::EventLoop;
+// EventLoopWindowTarget で受ける（tao 0.37 の WindowBuilder::build が target を要求。
+// イベントハンドラ内での窓生成（#10b-2c の view 補充）に対応。EventLoop は Deref するため
+// main 側の &EventLoop 直渡しも引き続き動く）
+use tao::event_loop::EventLoopWindowTarget;
 use tao::window::Window;
 
 use crate::render::imageset::Frame;
@@ -89,12 +92,14 @@ pub struct MascotView {
 impl MascotView {
     /// 透過ウィンドウを生成する（tao ウィンドウ生成・WS_EX_LAYERED 付与・
     /// WS_POPUP 矯正は `LayeredWindow::create` 内部で実施済み）。
+    /// `window_target` は [`tao::event_loop::EventLoopWindowTarget`]
+    /// （イベントハンドラ内での生成に対応・win/window.rs doc 参照）。
     pub fn create<T: 'static>(
-        event_loop: &EventLoop<T>,
+        window_target: &EventLoopWindowTarget<T>,
         width: u32,
         height: u32,
     ) -> Result<Self, WindowError> {
-        let window = LayeredWindow::create(event_loop, width, height)?;
+        let window = LayeredWindow::create(window_target, width, height)?;
         Ok(MascotView {
             window,
             last_image: None,

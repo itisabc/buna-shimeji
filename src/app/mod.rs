@@ -12,6 +12,7 @@
 //!
 //! 意図的差異の列挙は各モジュール（environment.rs / manager.rs）のモジュール doc 参照。
 
+pub mod assets;
 pub mod environment;
 pub mod manager;
 pub mod reload;

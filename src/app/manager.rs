@@ -47,13 +47,13 @@
 //!    （中で setBehavior も呼ぶ）のため、Mascot::set_behavior から set_behavior_and_init
 //!    を経由する同一構造（#8）
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app::environment::Environment;
 use crate::app::reload::ReloadMaterial;
-use crate::mascot::behavior::{BehaviorFactory, BehaviorTable};
+use crate::mascot::behavior::{BehaviorError, BehaviorFactory, BehaviorTable};
 use crate::mascot::{EnvironmentView, Mascot, Rng};
 use crate::render::imageset::ImageSet;
 
@@ -98,6 +98,12 @@ pub struct Manager {
     /// 全員消滅後の exit 依頼フラグ（Java L240-243 の `Main.exit()` 相当）。
     /// process::exit はしない（#10 がイベントループで消費）。
     exit_flag: bool,
+    /// tick の retain（[`Manager::tick`] 内）で除去した mascot の「除去前 index」
+    /// （#10b-2b・glue の view 同期用）。昇順で蓄積し、[`Manager::take_removed`]
+    /// の呼び出しで drain する。dispose_all / reload の全消しは remove_pending を
+    /// 立てるだけなので、該当分は次 tick の retain を通って本記録に現れる
+    /// （glue は take_removed を唯一の除去同期点として扱ってよい）。
+    removed_indices: Vec<usize>,
 }
 
 /// 「要求 set の table を選ぶ」共通ヘルパ（Java `getConfiguration(imageSet)` 相当）。
@@ -160,6 +166,7 @@ impl Manager {
             exit_on_last_removed: true,
             enabled: true,
             exit_flag: false,
+            removed_indices: Vec::new(),
         }
     }
 
@@ -316,8 +323,20 @@ impl Manager {
             }
         }
 
-        // Java L217-220（removed → Rust は remove_pending フラグ一括反映）
-        self.mascots.retain(|mascot| !mascot.remove_pending());
+        // Java L217-220（removed → Rust は remove_pending フラグ一括反映）。
+        // 除去した mascot の除去前 index を removed_indices に記録する
+        // （#10b-2b・glue の view 同期用。昇順になる）
+        let mut index = 0usize;
+        let mut removed = Vec::new();
+        self.mascots.retain(|mascot| {
+            let keep = !mascot.remove_pending();
+            if !keep {
+                removed.push(index);
+            }
+            index += 1;
+            keep
+        });
+        self.removed_indices.append(&mut removed);
 
         // Java L223: noMascots
         let no_mascots = self.mascots.is_empty();
@@ -345,6 +364,15 @@ impl Manager {
     /// #10 が draw + `clear_needs_repaint` を実施できる形）。
     pub fn apply_all(&mut self, apply: impl FnMut(&mut Mascot)) {
         self.mascots.iter_mut().for_each(apply);
+    }
+
+    /// tick の retain で除去した mascot の「除去前 index」を昇順で返し、
+    /// 蓄積を空にする（drain・#10b-2b・glue の view 同期用）。
+    /// 呼ぶまで tick 間で蓄積され（毎 tick リセットでない）、呼んだら空になる。
+    /// dispose_all / reload 由来の除去も次 tick の retain を通って含まれる
+    /// （フィールド doc を参照）。
+    pub fn take_removed(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.removed_indices)
     }
 
     /// 環境の観測点（spawn キュー push 等・Java `getEnvironment` 相当）。
@@ -536,6 +564,64 @@ impl Manager {
         mascot.set_paused(!mascot.is_paused());
     }
 
+    /// index のマスコットの pause 状態（#10b-2c・popup の「一時停止/再開」
+    /// ラベル切替用の読み出し）。index 範囲外は None。
+    pub fn is_paused_at(&self, index: usize) -> Option<bool> {
+        self.mascots.get(index).map(Mascot::is_paused)
+    }
+
+    /// index のマスコットの画像 set 名（#10b-2c・popup 構築の
+    /// [`Manager::behavior_menu_items`] 引数の取得点）。index 範囲外は None。
+    pub fn image_set_name_at(&self, index: usize) -> Option<String> {
+        self.mascots
+            .get(index)
+            .map(|mascot| mascot.image_set_name().to_string())
+    }
+
+    /// index のマスコットへマウスボタン押下を転送する（#10b-2c・
+    /// Java `Main` の MouseListener → `Mascot.mousePressed` L430-447 相当。
+    /// `point` は**スクリーン座標**契約（hotspot 記録用・Dragged の差分計算は
+    /// Environment の cursor（スクリーン座標）を使用するため同一空間）。
+    /// 左ボタン判定は呼び出し側（#10b-2c）の責務。index 範囲外 → warn + Ok。
+    pub fn mouse_pressed_at(
+        &mut self,
+        index: usize,
+        point: (i32, i32),
+    ) -> Result<(), BehaviorError> {
+        let Some(mascot) = self.mascots.get_mut(index) else {
+            log::warn!("mouse_pressed_at: index {index} は範囲外のため無視します");
+            return Ok(());
+        };
+        let env: &dyn EnvironmentView = &self.environment;
+        let set_name = mascot.image_set_name().to_string();
+        let table = table_for(&self.set_tables, &self.table, &set_name);
+        mascot.mouse_pressed(point, env, table, self.factory.as_mut(), self.rng.as_mut())
+    }
+
+    /// index のマスコットへマウスボタン解放を転送する（#10b-2c・
+    /// Java `Mascot.mouseReleased` L455-471 相当）。index 範囲外 → warn + Ok。
+    pub fn mouse_released_at(&mut self, index: usize) -> Result<(), BehaviorError> {
+        let Some(mascot) = self.mascots.get_mut(index) else {
+            log::warn!("mouse_released_at: index {index} は範囲外のため無視します");
+            return Ok(());
+        };
+        let env: &dyn EnvironmentView = &self.environment;
+        let set_name = mascot.image_set_name().to_string();
+        let table = table_for(&self.set_tables, &self.table, &set_name);
+        mascot.mouse_released(env, table, self.factory.as_mut(), self.rng.as_mut())
+    }
+
+    /// index のマスコットのカーソル位置を更新する（#10b-2c・
+    /// Java `Mascot.setCursorPosition` L1320-1332 相当・CursorMoved 経路。
+    /// `point` (= Some) はスクリーン座標契約）。index 範囲外 → warn + no-op。
+    pub fn set_cursor_position_at(&mut self, index: usize, point: Option<(i32, i32)>) {
+        let Some(mascot) = self.mascots.get_mut(index) else {
+            log::warn!("set_cursor_position_at: index {index} は範囲外のため無視します");
+            return;
+        };
+        mascot.set_cursor_position(point);
+    }
+
     /// 単一マスコット版 Dismiss（#9c・Java `Mascot` popup disposeMenu L562-563 逐語
     /// `dispose()`）。remove_pending を立てるのみ・削除反映は次 tick。
     /// index 範囲外 → warn + no-op。
@@ -705,6 +791,14 @@ impl Manager {
     /// [`Environment::set_multiscreen`] への委譲（#9c）。
     pub fn set_multiscreen(&mut self, multiscreen: bool) {
         self.environment.set_multiscreen(multiscreen);
+    }
+
+    /// 無効行動 map の全体置換 passthrough（#10b-2c・settings.toml 復元注入の
+    /// 起動時適用経路）。
+    /// [`Environment::set_disabled_behaviors`] への委譲（[`EnvironmentView`] には
+    /// 置かれていないため index 系 passthrough と同様の Manager 経由とする）。
+    pub fn set_disabled_behaviors(&mut self, disabled: BTreeMap<String, Vec<String>>) {
+        self.environment.set_disabled_behaviors(disabled);
     }
 
     /// 画面外の窓を作業領域へ戻す（WindowsEnvironment.restoreWindows L292-347

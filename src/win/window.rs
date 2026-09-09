@@ -22,7 +22,9 @@ use std::io;
 use std::slice;
 
 use tao::dpi::PhysicalSize;
-use tao::event_loop::EventLoop;
+// EventLoopWindowTarget で受ける（tao 0.37 の WindowBuilder::build が target を要求する。
+// EventLoop 自体は EventLoopWindowTarget へ Deref するため main 側は &EventLoop を渡せる・#10b-2c）
+use tao::event_loop::EventLoopWindowTarget;
 use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::{Window, WindowBuilder};
 use thiserror::Error;
@@ -126,8 +128,13 @@ pub fn correct_exstyle(exstyle: isize) -> isize {
 /// - フォーカスを取らない（マウス入力は受ける。Java 版の AWT Window 相当）
 ///
 /// サイズは画像に合わせ動的変更できる（`Window::set_inner_size` / [`LayeredWindow::resize`]）。
+///
+/// `window_target` は [`tao::event_loop::EventLoopWindowTarget`]。tao 0.37 では
+/// イベントハンドラ内（`run` クロージャの第 2 引数）でも新規窓を生成する必要がある
+/// （#10b-2c の view 補充経路）ため、`EventLoop` ではなく target で受ける
+/// （`EventLoop` は Deref するため main 側の `&event_loop` 直渡しも引き続き動く）。
 pub fn build_layered_tao_window<T: 'static>(
-    event_loop: &EventLoop<T>,
+    window_target: &EventLoopWindowTarget<T>,
     width: u32,
     height: u32,
 ) -> Result<Window, WindowError> {
@@ -146,7 +153,7 @@ pub fn build_layered_tao_window<T: 'static>(
         .with_skip_taskbar(true)
         .with_visible(true)
         .with_inner_size(PhysicalSize::new(width, height))
-        .build(event_loop)
+        .build(window_target)
         .map_err(|e| WindowError::CreateFailed(e.to_string()))?;
 
     let hwnd = hwnd_from_isize(window.hwnd());
@@ -274,13 +281,15 @@ pub struct LayeredWindow {
 }
 
 impl LayeredWindow {
-    /// 透過ウィンドウを生成する。
+    /// 透過ウィンドウを生成する。`window_target` は
+    /// [`tao::event_loop::EventLoopWindowTarget`]（イベントハンドラ内での生成に対応・
+    /// [`build_layered_tao_window`] doc 参照）。
     pub fn create<T: 'static>(
-        event_loop: &EventLoop<T>,
+        window_target: &EventLoopWindowTarget<T>,
         width: u32,
         height: u32,
     ) -> Result<Self, WindowError> {
-        let window = build_layered_tao_window(event_loop, width, height)?;
+        let window = build_layered_tao_window(window_target, width, height)?;
         let hwnd = hwnd_from_isize(window.hwnd());
         Ok(LayeredWindow {
             window,

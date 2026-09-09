@@ -418,6 +418,7 @@ fn material(name: &str, image_set: Arc<ImageSet>, entries: Vec<BehaviorEntry>) -
         name: name.to_string(),
         image_set,
         table: table(entries),
+        disabled_animations: Vec::new(),
     }
 }
 

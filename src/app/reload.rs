@@ -4,7 +4,8 @@
 //! [`BehaviorTable`](crate::mascot::behavior::BehaviorTable)）を conf/img ディレクトリ
 //! から一括ロードする。エラー方針は「conf 側の失敗 = 素材全体の中止（Err 伝播）、
 //! 個々の画像 set の失敗 = warn ログ + スキップ（他の set は続行）」。
-//! conf↔set の参照整合は警告のみ出す（欠落参照アニメの実無効化適用は #10）。
+//! conf↔set の参照整合は警告出力 + 欠落参照アニメの記録（`disabled_animations`・
+//! #10b-1。実無効化の適用は構築経由の XmlBehaviorFactory）を行う。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,7 +16,7 @@ use thiserror::Error;
 use crate::config::{parse_actions, parse_behaviors, validate_required_behaviors, ConfigError};
 use crate::mascot::behavior::BehaviorTable;
 use crate::render::imageset::{
-    available_refs, check_references, enumerate_sets, ImageSet, ImagesetError,
+    available_refs, check_references, enumerate_sets, DisabledAnimation, ImageSet, ImagesetError,
 };
 
 /// Reload の差し替え素材 1 set 分（[`crate::app::manager::Manager::reload`] の入力）。
@@ -28,6 +29,10 @@ pub struct ReloadMaterial {
     pub image_set: Arc<ImageSet>,
     /// 当該 set 用の行動表（behaviors.xml 全行の set 毎所有 copy）。
     pub table: BehaviorTable,
+    /// 当該 set で欠落参照により無効化されたアニメ（check_references 結果・
+    /// #10b-1。消費先は構築経由の
+    /// [`XmlBehaviorFactory`](crate::mascot::action::factory::XmlBehaviorFactory)）。
+    pub disabled_animations: Vec<DisabledAnimation>,
 }
 
 /// 素材ロードエラー（conf 側 / set 列挙の失敗 = 素材全体の中止）。
@@ -51,7 +56,9 @@ pub enum MaterialError {
 /// 4. set 毎に [`ImageSet::load`]（`scales` に無い set は `None` = 等倍）→
 ///    失敗 set は warn ログ + スキップ（他は続行）
 /// 5. set 毎に [`available_refs`] + [`check_references`] で conf↔set 整合を検査し
-///    `report.warnings` を warn ログ（アニメ実無効化の適用は #10・ここでは警告のみ）。
+///    `report.warnings` を warn ログ。`report.disabled`（欠落参照アニメ）は
+///    [`ReloadMaterial::disabled_animations`] に記録する（#10b-1・構築経由の
+///    [`XmlBehaviorFactory`](crate::mascot::action::factory::XmlBehaviorFactory) が消費）。
 ///    refs 列挙の I/O 失敗 set も画像読み込み失敗に準じてスキップする
 /// 6. 行動表は set 毎に [`BehaviorTable::new`] で所有 copy する
 /// 7. 列挙順の [`Vec<ReloadMaterial>`] を返す（set 0 件 = Ok(空 Vec)）
@@ -101,6 +108,7 @@ pub fn load_materials(
             name: set,
             image_set,
             table,
+            disabled_animations: report.disabled,
         });
     }
     Ok(materials)

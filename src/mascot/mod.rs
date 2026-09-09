@@ -25,6 +25,7 @@ pub mod action;
 pub mod animation;
 pub mod behavior;
 pub mod env;
+pub mod rng;
 
 use std::sync::Arc;
 
@@ -564,6 +565,16 @@ impl Mascot {
         self.needs_repaint = false;
     }
 
+    /// 再描画要否フラグを設定する（Reload 後の全マスコット強制再描画用・#10b-2c）。
+    /// [`Mascot::rebind_image_set`] は needs_repaint を立てないため、Reload 成功後に
+    /// wiring（main）が全マスコットへ再設定する（design.md §1.10 (c)「Reload 後の
+    /// 再描画は wiring が MascotView::reset() で全ビュー再描画」の mascot 側補完・
+    /// 新資産で同一 pose → set_image 同値 no-op の場合 needs_repaint が立たない
+    /// 経路の遮断用）。
+    pub fn set_needs_repaint(&mut self, needs_repaint: bool) {
+        self.needs_repaint = needs_repaint;
+    }
+
     /// リソース解放 + Manager からの削除依頼（Java dispose L713-730 のうち
     /// ウィンドウ破棄を除く部分）。削除反映は次 tick（remove_pending・#8）。
     pub fn dispose(&mut self) {
@@ -629,6 +640,12 @@ impl Mascot {
     /// 保持中の画像セットへの参照（Arc の deref・Reload (#9d) の差し替え観測点）。
     pub fn image_set(&self) -> &ImageSet {
         &self.image_set
+    }
+
+    /// 保持中の画像セットの [`Arc`] clone（不変データ共有・design.md §1.5）。
+    /// bin / glue 側（描画・Reload 系）から参照を持つための取得点。
+    pub fn image_set_arc(&self) -> Arc<ImageSet> {
+        Arc::clone(&self.image_set)
     }
 
     pub fn sound(&self) -> Option<&str> {

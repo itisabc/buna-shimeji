@@ -1,0 +1,626 @@
+//! 起動シーケンス・結線（タスク #10b-2c・design.md §1.4 / §1.9 / §1.10(c)）。
+//!
+//! 決定済みの起動手順（orch wiring 設定）を以下の順に実施する:
+//! 1. `env_logger`（既定 info・`RUST_LOG` 尊重）
+//! 2. exe ディレクトリ解決 → [`resolve_assets`]（Err は欠落パス入りで終了）
+//! 3. `Settings::load(conf/settings.toml)`（handoff ⑪・Err は表示して終了）
+//! 4. [`SingleInstance::acquire`]（`let _guard` 束縛でドロップ防止・
+//!    AlreadyRunning は「既に起動しています」で終了）
+//! 5. tao `EventLoop` 構築（UserEvent 型 = `()`）
+//! 6. **EventLoop 構築後に** `load_materials`（1 回・XML 破損系は行番号付き表示で終了）
+//! 7. [`App`]{resolver map / factory / rng / per-set tables} 組立。per-set tables は
+//!    [`Manager::reload`]（materials 非空経路 = base 置換 + set_tables 全消し再登録・
+//!    mascot 0 体のため behavior 再構築ループは no-op）で一括登録する
+//! 8. settings 初期適用（allowed 6 種 → passthrough・disabled_behaviors →
+//!    [`Manager::set_disabled_behaviors`]）
+//! 9. 起動時 1 体 [`Manager::request_spawn_random`]
+//! 10. トレイ（[`TrayMenuModel::build_tray`] + `TrayIconBuilder`）
+//! 11. `EventLoop::run` glue（[`App`] の 3 経路: NewEvents / WindowEvent / LoopDestroyed）
+//!
+//! tao 0.37 実装の対応（ソース実読・event_loop.rs / platform_impl/windows/event_loop.rs
+//! + event_loop/runner.rs）:
+//! - **`AboutToWait` 変体は存在しない**（tao 0.37 は winit 由来でない独自変体:
+//!   NewEvents / MainEventsCleared / RedrawEventsCleared / LoopDestroyed 等）。
+//!   tick スケジュールは [`ControlFlow::WaitUntil`] 発火を起点とする:
+//!   handler は各イベントバッチの先頭 `Event::NewEvents(StartCause)` で
+//!   [`Manager::tick_due`] 判定 → 到来していれば tick 実行 →
+//!   `WaitUntil(last_tick + 40ms)` を再設定する（タイマー約束の回復）。
+//!   アイドル中は wait スレッドが時刻まで待ち `NewEvents(ResumeTimeReached)` を発火する
+//!   （platform_impl L2360-2412 PROCESS_NEW_EVENTS_MSG / runner.rs `call_new_events`
+//!   L373-420・`call_redraw_events_cleared` L421-424 実読）。各行 NewEvents で
+//!   WaitUntil を設定し直すため、マウスイベント等でタイマーが中断されても回復する
+//! - `EventLoop::run` は内部で `std::process::exit(exit_code)` を呼ぶ
+//!   （event_loop.rs L220-233・platform_impl L264-292 実読）。よって handler 側では
+//!   [`ControlFlow::Exit`] を設定するのみで終了する（design §1.9: exit flag は
+//!   handler で process::exit をしない）。`LoopDestroyed` ではトレイの cleanup
+//!   （`TrayIcon` drop = Shell_NotifyIcon(NIM_DELETE)）を tao 内部 exit の前に行い
+//!   ゴーストアイコンを防ぐ
+//! - `WindowEvent::MouseInput` は押下位置を持たないため、ポイントは
+//!   [`EventLoopWindowTarget::cursor_position()`]（= `GetCursorPos` 物理 global・
+//!   PMv2。Dragged の差分計算と同一空間 = スクリーン座標契約）で取得する
+//!   （tao util.rs L216-218 実読）
+//! - `EventLoopWindowTarget` 上で新しい窓が作れる
+//!   （`WindowBuilder::build(&Target)` window.rs L610 実読）。spawn drain 直後の
+//!   view 補充は handler 内 [`MascotView::create`]（target 受け・本タスクの
+//!   小改修で win/render 側を target 受けへ変更）
+//! - `WindowEvent::Resized` は完全無視（draw glue の `set_inner_size` 由来を含めて
+//!   draw 経路以外で反応しない・⑥(N)）
+//!
+//! muda / tray-icon 実物 API（Cargo.lock 実物照合: tray-icon 0.24.2 / muda 0.19.3・
+//! tray-icon は `pub mod menu { pub use muda::*; }` / `pub use muda::dpi` を re-export）:
+//! - マスコット右クリック popup:
+//!   [`tray_icon::menu::ContextMenu::show_context_menu_for_hwnd`]
+//!   （position `None` = カーソル位置。Windows 版は `TrackPopupMenu(TPM_RETURNCMD)`
+//!   同期追跡 → 選択時に MenuEvent 発行。platform_impl/windows/mod.rs L960 +
+//!   L1039-1041 + menu_selected 経路 実読）。**同期的**
+//!   （メニュー追跡中は handler をブロックする。モーダルループ中もメッセージポンプは回る
+//!   ため wndproc / tao runner は動き続ける。挙動は手動確認対象）
+//! - [`tray_icon::menu::MenuEvent::receiver`] の `try_recv()` で毎 tick drain
+//! - トレイ本体: `TrayIconBuilder::with_menu / with_icon / with_tooltip / build`
+//!   （icon 無しは Shell_NotifyIcon が NIF_ICON 無しで通知領域に表示されないため、
+//!   既定は 16×16 マッシュルーム配色単色※指示「既定アイコンで可・Phase 1 対象外」の範囲）
+//!
+//! Reload 結線（tray.rs `apply_tray_command` の Reload 分岐は lib API として残し・
+//! wiring 側で自前処理）:
+//! `load_materials` → Err なら log + 現状維持 / Ok なら resolver map 差し替え +
+//! [`Manager::reload`] + 全 view [`MascotView::reset`] + 全 mascot
+//! [`Mascot::set_needs_repaint(true)`]（新資産で同一 pose なら set_image が同値
+//! no-op により needs_repaint が立たない経路の遮断・本タスクの lib 小改修）。
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::{bail, Context};
+use tao::event::{ElementState, Event, MouseButton, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget};
+use tao::platform::windows::WindowExtWindows;
+use tao::window::WindowId;
+use tray_icon::menu::{ContextMenu, MenuEvent};
+use tray_icon::TrayIcon;
+
+use simeji::app::assets::{resolve_assets, AssetDirs};
+use simeji::app::environment::Environment;
+use simeji::app::manager::Manager;
+use simeji::app::reload::load_materials;
+use simeji::config::parse_actions;
+use simeji::mascot::action::factory::XmlBehaviorFactory;
+use simeji::mascot::rng::JavaRandom;
+use simeji::render::imageset::ImageSet;
+use simeji::render::MascotView;
+use simeji::tray::{apply_tray_command, Settings, TrayCommand, TrayContext, TrayMenuModel};
+use simeji::win::os_source::Win32OsSource;
+use simeji::win::window::{SingleInstance, SingleInstanceError};
+
+/// 単一起動 mutex 名（ユーザーセッション内単一・`Local\` 名前空間）。
+const SINGLE_INSTANCE_MUTEX: &str = "Local\\SimejiSingleInstance";
+
+/// 既定トレイアイコン（Phase 1 は資産アイコン非対象のため 16×16・
+/// マッシュルーム断面配色）。`TrayIconAttributes::icon = None` では
+/// Shell_NotifyIcon が NIF_ICON 無しで通知領域に出ないため付与する。
+fn default_tray_icon() -> Result<tray_icon::Icon, tray_icon::BadIcon> {
+    let (width, height) = (16u32, 16u32);
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            // 傘（上方 or 端側の8px幅）: 茶（Saddle Brown #8B4513）/ 柄: 明るいベージュ
+            let (r, g, b) = if y < 8 || !(4..12).contains(&x) {
+                (139, 69, 19)
+            } else {
+                (245, 233, 211)
+            };
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    tray_icon::Icon::from_rgba(rgba, width, height)
+}
+
+/// [`Settings`] の走査 scale map を [`load_materials`] 入力の `HashMap` に変換する
+/// ([`Settings::scales`] BTreeMap 契約 → HashMap 化・tray.rs Reload 分岐と同一変換)。
+fn scales_of(settings: &Settings) -> HashMap<String, f64> {
+    settings
+        .scales()
+        .iter()
+        .map(|(set, scale)| (set.clone(), *scale))
+        .collect()
+}
+
+/// exe 同場所の conf/img パス + トレイコンテキスト（起動後は不変）。
+struct AppDirs {
+    conf_dir: PathBuf,
+    img_dir: PathBuf,
+    tray_context: TrayContext,
+}
+
+impl AppDirs {
+    fn new(conf_dir: PathBuf, img_dir: PathBuf, image_sets: Vec<String>) -> AppDirs {
+        let tray_context = TrayContext {
+            conf_dir: conf_dir.clone(),
+            img_dir: img_dir.clone(),
+            image_sets,
+        };
+        AppDirs {
+            conf_dir,
+            img_dir,
+            tray_context,
+        }
+    }
+}
+
+/// イベントループ glue の状態（本文。
+/// [`Manager`]（mascot 集合 + Environment + 行動表）/ settings / 视图群 /
+/// トレイモデル + アイコン / popup 保持 / resolver map / draw warn 抑止备忘 の所有者）。
+struct App {
+    dirs: AppDirs,
+    resolver_map: Rc<RefCell<HashMap<String, Arc<ImageSet>>>>,
+    manager: Manager,
+    settings: Settings,
+    tray_model: TrayMenuModel,
+    /// LoopDestroyed で明示 drop（Shell_NotifyIcon(NIM_DELETE) ＝ ゴーストアイコン防止）
+    tray: Option<TrayIcon>,
+    views: Vec<MascotView>,
+    // mascot 右クリック popup のモデル（選択時 / drain 時に command_of 走査）
+    menu_popups: Vec<TrayMenuModel>,
+    last_tick: Instant,
+    // draw 失敗 / frame 取得失敗の連続 warn 抑止（index → 最後の warn 文字列）
+    last_draw_warns: HashMap<usize, String>,
+}
+
+impl App {
+    /// `Event::NewEvents`（イベントバッチ先頭・WinUntil 发火を含む）。
+    fn on_new_events(
+        &mut self,
+        target: &EventLoopWindowTarget<()>,
+        control_flow: &mut ControlFlow,
+    ) {
+        let elapsed = self.last_tick.elapsed();
+        if Manager::tick_due(elapsed) {
+            // ① tick（environment 更新 / spawn drain / remove / 全員 tick /
+            // exit flag 設定がこの 1 呼び出しに全て含まれる）
+            self.manager.tick(Instant::now());
+            self.last_tick = Instant::now();
+
+            // ② view 同期（不足分 create → ocos 仮寸法 1×1・次 draw で正寸化。
+            // create 失敗は log + 次回再試行）
+            self.sync_views(target);
+            // 除去同期（tick retain で消えた mascot index → 降順 remove で対応維持）
+            for index in self.manager.take_removed().into_iter().rev() {
+                if index < self.views.len() {
+                    self.views.remove(index);
+                }
+            }
+
+            // ③ draw glue（draw + clear_needs_repaint）
+            handle_draws(
+                &mut self.views,
+                &mut self.manager,
+                &mut self.last_draw_warns,
+            );
+
+            // ④ トレイ / popup コマンド drain・適用
+            self.drain_menu_events();
+
+            // ⑤ 終了判定（design §1.9: handler で process::exit はしない）
+            if self.manager.should_exit() {
+                *control_flow = ControlFlow::Exit;
+                return;
+            }
+        }
+        let elapsed = self.last_tick.elapsed();
+        // タイマー約束の回復（elapsed < 間隔 = 残り時間 / >= 間隔 = 40ms クランプ）
+        *control_flow = ControlFlow::WaitUntil(self.last_tick + Manager::next_delay(elapsed));
+    }
+
+    /// マスコット窓の不足分補充（1×1 → draw glue で正寸化）。
+    fn sync_views(&mut self, target: &EventLoopWindowTarget<()>) {
+        while self.views.len() < self.manager.count() {
+            match MascotView::create(target, 1, 1) {
+                Ok(view) => self.views.push(view),
+                Err(err) => {
+                    log::error!(
+                        "マスコットのウィンドウ生成に失敗しました（次 tick で再試行します）: {err}"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    /// マウス入力（window id → view index）。
+    fn on_window_event(
+        &mut self,
+        target: &EventLoopWindowTarget<()>,
+        window_id: WindowId,
+        event: WindowEvent<'_>,
+    ) {
+        match event {
+            // 完全無視（draw glue の set_inner_size 由来等・⑥(N)）
+            WindowEvent::Resized(_) => {}
+            // マスコット窓は閉じさせない（Java 版同様）
+            WindowEvent::CloseRequested => {}
+            WindowEvent::MouseInput { state, button, .. } => {
+                let Some(index) = view_index_of(&self.views, window_id) else {
+                    return;
+                };
+                match (state, button) {
+                    (ElementState::Pressed, MouseButton::Left) => {
+                        // スクリーン座標契約（GetCursorPos 物理・PMv2）
+                        let point = target
+                            .cursor_position()
+                            .map_or((0, 0), |pos| (pos.x as i32, pos.y as i32));
+                        if let Err(err) = self.manager.mouse_pressed_at(index, point) {
+                            log::error!("マウス押下の処理に失敗しました: {err}");
+                            self.manager.dismiss_at(index);
+                        }
+                    }
+                    (ElementState::Pressed, MouseButton::Right) => {
+                        self.open_popup(index);
+                    }
+                    (ElementState::Released, MouseButton::Left) => {
+                        if let Err(err) = self.manager.mouse_released_at(index) {
+                            log::error!("マウス解放の処理に失敗しました: {err}");
+                            self.manager.dismiss_at(index);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // ドラッグ追従用（Java Mascot.setCursorPosition 相当・スクリーン座標）
+            WindowEvent::CursorMoved { position, .. } => {
+                let Some(index) = view_index_of(&self.views, window_id) else {
+                    return;
+                };
+                if let Ok(outer) = self.views[index].window().outer_position() {
+                    let point = (outer.x + position.x as i32, outer.y + position.y as i32);
+                    self.manager.set_cursor_position_at(index, Some(point));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// マスコット右クリック（Java `Mascot` popup 相当）:
+    /// 構築（[`Manager::behavior_menu_items`]）→ muda context menu 表示（同期追跡）。
+    fn open_popup(&mut self, index: usize) {
+        let Some(set_name) = self.manager.image_set_name_at(index) else {
+            return;
+        };
+        let Some(view) = self.views.get(index) else {
+            return;
+        };
+        let menu_items = self.manager.behavior_menu_items(&set_name);
+        let is_paused = self.manager.is_paused_at(index).unwrap_or(false);
+        let model = TrayMenuModel::build_popup(
+            index,
+            &self.dirs.tray_context.image_sets,
+            &menu_items,
+            is_paused,
+        );
+        // muda / tray-icon 実物 API: position None = カーソル位置（doc 参照）
+        let hwnd = view.window().hwnd();
+        unsafe {
+            model.menu().show_context_menu_for_hwnd(hwnd, None);
+        }
+        // drain 時の command_of 走査のため保持する
+        self.menu_popups.push(model);
+    }
+
+    /// トレイ / popup メニューコマンドの drain・適用（⑨）。
+    /// - tray コマンド → [`apply_tray_command`（Reload は自前）] + `sync_allowed`
+    /// - popup コマンド → [`apply_tray_command`]（SetAllowed 無し・sync 不要・
+    ///   選択された popup は保持から除去）
+    /// - 未知 id（選択されずに消えた popup 残り等）は warn で無視
+    fn drain_menu_events(&mut self) {
+        while let Ok(menu_event) = MenuEvent::receiver().try_recv() {
+            let id = menu_event.id().clone();
+            if let Some(command) = self.tray_model.command_of(&id) {
+                self.apply_command(command);
+                // Allowed トグル適用後の UI 整合（必ず・#9c 契約）
+                self.tray_model.sync_allowed(&self.settings.allowed);
+                continue;
+            }
+            if let Some(position) = self
+                .menu_popups
+                .iter()
+                .position(|model| model.command_of(&id).is_some())
+            {
+                let popup = self.menu_popups.swap_remove(position);
+                if let Some(command) = popup.command_of(&id) {
+                    self.apply_command(command);
+                }
+                continue;
+            }
+            log::warn!("未知のメニュー id を無視しました: {id:?}");
+        }
+    }
+
+    /// コマンド適用（Reload は wiring 自前処理・それ以外は tray.rs 既存経路）。
+    fn apply_command(&mut self, command: TrayCommand) {
+        match command {
+            TrayCommand::Reload => self.reload(),
+            other => {
+                apply_tray_command(
+                    &mut self.manager,
+                    &mut self.settings,
+                    other,
+                    &self.dirs.tray_context,
+                );
+            }
+        }
+    }
+
+    /// Reload（wiring 自前処理・tray.rs `apply_tray_command` の Reload 分岐は
+    /// resolver map を触れないためここで行う）。
+    fn reload(&mut self) {
+        let scales = scales_of(&self.settings);
+        match load_materials(&self.dirs.conf_dir, &self.dirs.img_dir, &scales) {
+            Ok(materials) => {
+                // resolver map 差し替え（次構築から新 ImageSet を返す）
+                *self.resolver_map.borrow_mut() = materials
+                    .iter()
+                    .map(|material| (material.name.clone(), Arc::clone(&material.image_set)))
+                    .collect();
+                // 参照付け替え（ImageSet Arc / 行動表 / behavior 再構築）
+                self.manager.reload(materials);
+                // 全 view reset（ImageKey に set 名を含まないため必須・design §1.10(c)）
+                self.views.iter_mut().for_each(MascotView::reset);
+                // 全マスコットへ再描画要求（rebind は builds needs_repaint を立てない・
+                // set_image 同値 no-op 経路の遮断）
+                self.manager
+                    .apply_all(|mascot| mascot.set_needs_repaint(true));
+            }
+            Err(err) => {
+                log::error!("Reload に失敗したため現状を維持します: {err}");
+            }
+        }
+    }
+}
+
+// =====================================================================
+// 結線ヘルパ群（動的3経路 = NewEvents クローズ / WindowEvent / LoopDestroyed）
+// =====================================================================
+
+/// `window_id` → view index 特定（マスコット窓の MouseInput / CursorMoved の送付先）。
+fn view_index_of(views: &[MascotView], window_id: WindowId) -> Option<usize> {
+    views
+        .iter()
+        .position(|view| view.window().id() == window_id)
+}
+
+/// 「同一内容の連続 warn を出さない」スパム抑止（index 毎に最後の warn 文字列を記憶）。
+fn warn_once(memo: &mut HashMap<usize, String>, index: usize, message: impl FnOnce() -> String) {
+    let message = message();
+    if memo.get(&index) == Some(&message) {
+        return;
+    }
+    memo.insert(index, message.clone());
+    log::warn!("マスコット #{index} の描画を問題によりスキップしました: {message}");
+}
+
+/// draw glue（③(T) sink = draw + clear_needs_repaint）。
+/// manager と views は別所有物のため、[`Manager::apply_all`] のクロージャ内で
+/// views[view_index] を借用できる（mascots 順 = views 順契約・実読確認済み）。
+fn handle_draws(
+    views: &mut [MascotView],
+    manager: &mut Manager,
+    last_draw_warns: &mut HashMap<usize, String>,
+) {
+    let mut view_index = 0usize;
+    manager.apply_all(|mascot| {
+        let index = view_index;
+        view_index += 1;
+        let Some(view) = views.get_mut(index) else {
+            // create 失敗で view 未補充 → 次回再試行
+            return;
+        };
+        if !mascot.needs_repaint() {
+            return;
+        }
+        // 画像状態（image_ref / center（flip 調整済み）/ 寸法）
+        let Some(image_state) = mascot.image().cloned() else {
+            // frame 取得失敗（None）→ log（連続抑止）+ clear しない（次 tick 再試行）
+            warn_once(last_draw_warns, index, || {
+                "画像ポーズが未解決（mascot が画像を保持していません）".to_string()
+            });
+            return;
+        };
+        let image_set = mascot.image_set_arc();
+        let Some(frame) = image_set.frames.get(&image_state.image_ref) else {
+            warn_once(last_draw_warns, index, || {
+                format!("画像 {} が画像セットに存在しません", image_state.image_ref)
+            });
+            return;
+        };
+
+        // `pose_anchor` は「flip 前」のポーズアンカー（dx/dy）を渡す:
+        // - [`MascotView::draw`] は flip=true 時に [`simeji::render::flipped_offset_x`]
+        //   = `width - pose_anchor.0`（Java `ImagePairs.getImage(right)` L85-91 の
+        //   `rightImage.getWidth() - scaledAnchorX` 相当）をオフセットに使用する
+        // - [`ImageState::center`] は flip 調整済み（look_right 時 width - dx・
+        //   animation.rs L114-118）のため、flip=true 時は
+        //   `width - center.0` で flip 前値（dx）に復元する（center をそのまま渡すと
+        //   二重反転となり反転画像内アンカー位置が anchor からずれる）
+        let flip = mascot.look_right();
+        let pose_anchor = if flip {
+            (
+                i32::try_from(image_state.width).unwrap_or(i32::MAX) - image_state.center.0,
+                image_state.center.1,
+            )
+        } else {
+            image_state.center
+        };
+
+        match view.draw(
+            &image_state.image_ref,
+            frame,
+            flip,
+            pose_anchor,
+            mascot.anchor(),
+        ) {
+            Ok(_) => {
+                mascot.clear_needs_repaint();
+                last_draw_warns.remove(&index);
+            }
+            Err(err) => {
+                warn_once(last_draw_warns, index, || format!("描画に失敗: {err}"));
+            }
+        }
+    });
+}
+
+// =====================================================================
+// main
+// =====================================================================
+
+fn main() -> anyhow::Result<()> {
+    // 1. ログ（既定 info・RUST_LOG 尊重）
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // 2. exe ディレクトリ → 資産ディレクトリ（欠落パス入りエラーで終了）
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+        .context("実行ファイルのディレクトリを特定できませんでした")?;
+    let AssetDirs { conf_dir, img_dir } = resolve_assets(&exe_dir)?;
+
+    // 3. settings.toml（パースエラー等はファイルパスを添えて終了・handoff ⑪）
+    let settings_path = conf_dir.join("settings.toml");
+    let settings = Settings::load(&settings_path)
+        .with_context(|| format!("{} の読み込みに失敗しました", settings_path.display()))?;
+
+    // 4. 単一起動（ドロップ防止のため _guard 束縛）
+    let _guard = match SingleInstance::acquire(SINGLE_INSTANCE_MUTEX) {
+        Ok(guard) => guard,
+        Err(SingleInstanceError::AlreadyRunning) => {
+            bail!("既に起動しています（単一起動のため終了します）");
+        }
+        Err(err @ SingleInstanceError::CreateFailed(_)) => return Err(err.into()),
+    };
+
+    // 5. tao EventLoop（UserEvent 型 = ()。構築は失敗時に panics・tao 仕様）
+    let event_loop = EventLoop::<()>::new();
+
+    // 6. 素材ロード（EventLoop 構築後・XML 破損等は行番号付きで終了）
+    let scales = scales_of(&settings);
+    let materials = match load_materials(&conf_dir, &img_dir, &scales) {
+        Ok(materials) => materials,
+        Err(err) => bail!("起動時の素材ロードに失敗しました: {err}"),
+    };
+    if materials.is_empty() {
+        bail!(
+            "有効な画像セットが 1 つもありません: {} 配下に画像 set（PNG のフォルダ）が必要です",
+            img_dir.display()
+        );
+    }
+
+    // 7. resolver map（main 所有・Reload で差し替え・resolver は Rc/RefCell 参照）
+    let resolver_map: Rc<RefCell<HashMap<String, Arc<ImageSet>>>> = Rc::new(RefCell::new(
+        materials
+            .iter()
+            .map(|material| (material.name.clone(), Arc::clone(&material.image_set)))
+            .collect(),
+    ));
+
+    // set 一覧（トレイ「呼ぶ」選択元・spawn ランダム選択元・辞書順 = 既定 set が先頭）
+    let image_sets: Vec<String> = materials
+        .iter()
+        .map(|material| material.name.clone())
+        .collect();
+
+    // factory 用 ActionsConfig（XmlBehaviorFactory は disabled 除去を構築時 1 回のみ行う。
+    // load_materials 内部でも parse_actions するが、ActionsConfig は外へ出ないため
+    // 同内容の 2 度パース・同期ロード許容内。Err は行番号付き表示）
+    let actions = match parse_actions(&conf_dir.join("actions.xml")) {
+        Ok(actions) => actions,
+        Err(err) => bail!("actions.xml の解析に失敗しました: {err}"),
+    };
+    // factory は Manager が 1 個のみ保持する（manager.rs 既存設計追従・差し替え API 無し）。
+    // per-set DisabledAnimation（check_references は set 毎列挙に依存）は
+    // 既定 set（= materials[0]）の分を factory に適用する。scale も既定 set の値
+    //（未指定 = 1.0 = 等倍・同資産では scale 未指定で挙動互換）
+    let default_disables: Vec<(String, usize)> = materials[0]
+        .disabled_animations
+        .iter()
+        .map(|disabled| (disabled.action.clone(), disabled.animation_index))
+        .collect();
+    let default_scale = settings
+        .scales()
+        .get(&materials[0].name)
+        .copied()
+        .unwrap_or(1.0);
+    let factory = XmlBehaviorFactory::new(actions, default_scale, &default_disables);
+
+    let mut manager = Manager::new(
+        Environment::new(Win32OsSource),
+        materials[0].table.clone(),
+        Box::new(factory),
+        Box::new(JavaRandom::from_os()),
+    );
+    // per-set tables 登録（materials 非空経路 = base 置換 + set_tables 全消し再登録。
+    // mascot 0 体なので behavior 再構築ループは no-op・rng 消費 0）
+    manager.reload(materials);
+
+    manager.set_image_set_resolver({
+        let resolver_map = Rc::clone(&resolver_map);
+        move |image_set_name| resolver_map.borrow().get(image_set_name).cloned()
+    });
+
+    // 8. settings 初期適用（Sounds は Phase 1 no-op）
+    manager.set_breeding_allowed(settings.allowed.breeding);
+    manager.set_transients_enabled(settings.allowed.transients);
+    manager.set_transformation_allowed(settings.allowed.transformation);
+    manager.set_throwing_allowed(settings.allowed.throwing);
+    manager.set_multiscreen(settings.allowed.multiscreen);
+    // 無効 Behavior map（Manager passthrough・全体置換）
+    manager.set_disabled_behaviors(settings.disabled_behaviors.clone());
+
+    // 9. 起動時 1 体
+    manager.request_spawn_random(&image_sets);
+
+    // 10. トレイ（icon / tooltip は既定値・資産アイコンは Phase 1 対象外）
+    let tray_model = TrayMenuModel::build_tray(&image_sets, &settings.allowed);
+    let tray_icon = tray_icon::TrayIconBuilder::new()
+        .with_menu(Box::new(tray_model.menu().clone()))
+        .with_icon(default_tray_icon().context("トレイアイコンの生成に失敗しました")?)
+        .with_tooltip("しめじ")
+        .build()
+        .context("トレイアイコンの生成に失敗しました")?;
+    // 「LoopDestroyed で明示 drop」のため Option 化
+    let tray = Some(tray_icon);
+
+    let mut app = App {
+        dirs: AppDirs::new(conf_dir, img_dir, image_sets),
+        resolver_map,
+        manager,
+        settings,
+        tray_model,
+        tray,
+        views: Vec::new(),
+        menu_popups: Vec::new(),
+        last_tick: Instant::now(),
+        last_draw_warns: HashMap::new(),
+    };
+
+    // 11. tao イベントループ（tick 1 本・描画/入力/トレイ受信は同じループ）
+    event_loop.run(move |event, target, control_flow| {
+        match event {
+            Event::NewEvents(_) => app.on_new_events(target, control_flow),
+            Event::WindowEvent {
+                window_id, event, ..
+            } => {
+                app.on_window_event(target, window_id, event);
+            }
+            // 終了前 cleanup（tao 0.37 内部で process::exit(exit_code) が走るため
+            // handler 側の明示 exit は不要。ゴーストトレイアイコン防止の drop のみ）
+            Event::LoopDestroyed => {
+                let app = &mut app;
+                drop(app.tray.take());
+                app.menu_popups.clear();
+            }
+            _ => {}
+        }
+    });
+}
