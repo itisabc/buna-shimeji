@@ -39,8 +39,8 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, SetWindowPos, UpdateLayeredWindow,
     GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, ULW_ALPHA,
-    WS_CAPTION, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_GROUP, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
-    WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
+    WS_CAPTION, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_GROUP,
+    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
 };
 
 #[derive(Error, Debug)]
@@ -86,6 +86,37 @@ pub fn premultiply_rgba_to_argb(rgba: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+/// style を真の枠なし窓（WS_POPUP）に矯正する純関数。
+///
+/// 装飾系 6 ビット（WS_CAPTION / WS_SYSMENU / WS_MAXIMIZEBOX / WS_MINIMIZEBOX /
+/// WS_THICKFRAME / WS_GROUP。MINIMIZEBOX と GROUP は同値）を除去し、
+/// WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS を付与する。それ以外のビットは保持する。
+///
+/// tao 0.37 は `with_decorations(false)` でも装飾系スタイルを無条件に残す
+/// （`to_window_styles`）ための対処。UpdateLayeredWindow の per-pixel α 合成は
+/// 真の枠なし窓を前提とする（スパイク検証 2026-09-05）。
+pub fn correct_style(style: isize) -> isize {
+    (style
+        & !(WS_CAPTION.0
+            | WS_SYSMENU.0
+            | WS_MAXIMIZEBOX.0
+            | WS_MINIMIZEBOX.0
+            | WS_THICKFRAME.0
+            | WS_GROUP.0) as isize)
+        | (WS_POPUP.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0) as isize
+}
+
+/// exstyle をタスクバー/Alt-Tab に出ない形に矯正する純関数。
+///
+/// WS_EX_APPWINDOW を除去し WS_EX_TOOLWINDOW を付与する。他のビットは保持し、
+/// WS_EX_LAYERED の付与は含めない（呼び出し側で先に OR 済みの値を渡す）。
+///
+/// tao 0.37 の `with_skip_taskbar(true)` は APPWINDOW を除去しないため、
+/// レイヤード描画用の exstyle 設定後に追加適用する（タスク #9e・実測対処）。
+pub fn correct_exstyle(exstyle: isize) -> isize {
+    (exstyle & !(WS_EX_APPWINDOW.0 as isize)) | WS_EX_TOOLWINDOW.0 as isize
+}
+
 /// レイヤード表示用の tao ウィンドウを生成し、`WS_EX_LAYERED` を付与する
 /// （[`LayeredWindow`] と softbuffer スパイクモードの共通土台）。
 ///
@@ -120,9 +151,15 @@ pub fn build_layered_tao_window<T: 'static>(
 
     let hwnd = hwnd_from_isize(window.hwnd());
     unsafe {
-        // 既存の exstyle に WS_EX_LAYERED を追加する。
+        // 既存の exstyle に WS_EX_LAYERED を追加し、タスクバーに出ないよう
+        // APPWINDOW を除去して TOOLWINDOW に矯正する（skip_taskbar(true) は
+        // APPWINDOW を除去しない実測への対処・タスク #9e）。
         let exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle | WS_EX_LAYERED.0 as isize);
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            correct_exstyle(exstyle | WS_EX_LAYERED.0 as isize),
+        );
 
         // tao 0.37 は with_decorations(false) でも WS_CAPTION|WS_SYSMENU|WS_MAX(MIN)IMIZEBOX
         // を無条件に残す(to_window_styles)。UpdateLayeredWindow の per-pixel α 合成は
@@ -130,15 +167,7 @@ pub fn build_layered_tao_window<T: 'static>(
         // WS_POPUP に矯正する。これがないと ULW が TRUE を返しても内容が
         // スクリーンに合成されない(スパイク検証 2026-09-05)。
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        let popup_style = (style
-            & !(WS_CAPTION.0
-                | WS_SYSMENU.0
-                | WS_MAXIMIZEBOX.0
-                | WS_MINIMIZEBOX.0
-                | WS_THICKFRAME.0
-                | WS_GROUP.0) as isize)
-            | (WS_POPUP.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0) as isize;
-        SetWindowLongPtrW(hwnd, GWL_STYLE, popup_style);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, correct_style(style));
         // スタイル変更を非クライアント領域に反映し、outer = client = 要求サイズに矯正する
         // (CreateWindowEx 時に AdjustWindowRect 相当で幅が膨張するための是正)。
         let _ = SetWindowPos(
