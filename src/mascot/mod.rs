@@ -461,8 +461,22 @@ impl Mascot {
         self.anchor
     }
 
+    /// アンカー更新（Java setAnchor + `Mascot.apply` L661-690 の位置反映）。
+    ///
+    /// Java `apply` は 2 層構造: 位置（bounds）は needsRepaint と無関係に
+    /// 「窓 bounds と mascot bounds に差分があれば setBounds する」（L678-682）を
+    /// 毎 tick 行い、needsRepaint は画像の再描画（L683-696）のみに使う。Rust 版は
+    /// 窓位置反映も needs_repaint 経由で行うため、anchor 変化時に needs_repaint
+    /// を立てる（画像固定の移動フレームで窓移動がスキップされる実機バグの修正・
+    /// 「bounds 差分 → setBounds」の観察等価）。
+    /// 同値呼び出しは Java の bounds 同値スキップ（差分無しで setBounds しない）の
+    /// 観察等価として needs_repaint を一切変えない（立てない・既に立った要求は
+    /// 消さない）。
     pub fn set_anchor(&mut self, anchor: (i32, i32)) {
-        self.anchor = anchor;
+        if self.anchor != anchor {
+            self.anchor = anchor;
+            self.needs_repaint = true;
+        }
     }
 
     pub fn look_right(&self) -> bool {

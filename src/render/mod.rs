@@ -123,6 +123,32 @@ impl MascotView {
     /// （`?` でエラー伝播時は前回状態を維持する）。
     /// 処理順は「位置変更→present」（plan.md L93: present() は GetWindowRect の
     /// 現在位置を ULW に渡すため、位置を先に確定させて ULW を 1 呼び出しで確定させる）。
+    ///
+    /// # 窓寸法 drift の自己修復（タスク #12）
+    ///
+    /// 描画冒頭で窓物理寸法（tao `inner_size()` = GetClientRect）と frame 寸法を
+    /// 比較し、不一致なら窓サイズを frame に復帰して ULW を再送する。
+    ///
+    /// 因果モデル（ユーザー実機の混在 DPI 環境で実測確定）:
+    /// 1. 窓は create 時に主モニタ DPI（例: 125%）コンテキストで論理 102.4
+    ///    （=128/1.25）初期化され、窓物理は 128px
+    /// 2. モニタ間移動（例: 100% の副モニタへ落下）で WM_DPICHANGED が来ると
+    ///    tao 0.37 は通常窓（fullscreen なし && 非最大化 = allow_resize）に対し
+    ///    OS suggested_rect を無条件適用する（無効化オプションなし）ため、
+    ///    窓物理が 102px に再スケールされる
+    /// 3. 落下中は画像固定（shime4 等）のため image_changed=false → ULW 未呼出し
+    ///    → 窓 102px が持続し、128px DIB バッファの右/下 26px がクリップされる
+    ///    （マスコットの体の角が消える症状）
+    /// 4. 窓が縮小しても DIB バッファは 128px 不変のため buffer_size == frame であり、
+    ///    既存の「buffer_size 不一致時のみ set_inner_size」経路では窓が戻らない
+    ///    （縮むのは窓だけで、バッファは縮んでいない）
+    ///
+    /// 対処として size_drift を image_changed と同一の present 経路の発火条件に
+    /// 加え、窓物理寸法を frame に復帰させる。落下中は anchor 変化で毎 tick
+    /// draw が呼ばれる（#11 修正後 needs_repaint が立つ）ため、修復は次 tick
+    /// （≤40ms・1 フレーム以内）に完了しクリップは知覚不能。
+    /// 単一 DPI 環境では size_drift=false が常に成立するため挙動は不変。
+    /// コストは draw あたり inner_size()（GetClientRect）1 回のみ。
     pub fn draw(
         &mut self,
         image_ref: &str,
@@ -145,6 +171,11 @@ impl MascotView {
         };
         let image_changed = self.last_image.as_ref() != Some(&key);
         let pos_changed = self.last_pos != Some(next_pos);
+        // 窓物理寸法の drift 検知（自己修復・doc「窓寸法 drift の自己修復」参照）:
+        // WM_DPICHANGED → tao suggested resize で窓だけが frame からずれた状態を
+        // 検出する。DIB バッファは縮んでいないため buffer_size では検出できない。
+        let win_size = self.window.window().inner_size();
+        let size_drift = win_size.width != frame.width || win_size.height != frame.height;
 
         if pos_changed {
             // 位置変更を先に行う（plan.md L93: window.rs の present() は
@@ -155,14 +186,18 @@ impl MascotView {
                 .window()
                 .set_outer_position(PhysicalPosition::new(next_pos.0, next_pos.1));
         }
-        if image_changed {
-            // バッファ寸法が変わる場合のみ tao 側サイズを先に動かしてから DIB を
-            // 再確保する（不変条件 outer = client = DIB 寸法を維持。
-            // resize は DIB 再確保のみで tao サイズを触らないための順序）。
-            if self.window.buffer_size() != Some((frame.width, frame.height)) {
+        if image_changed || size_drift {
+            // 窓物理寸法を frame に同期する。size_drift 時はバッファ寸法が一致して
+            // いても（窓だけ縮小している状態）tao 側サイズの復帰が必要なため、
+            // buffer_size 不一致チェックと独立条件として set_inner_size する。
+            if size_drift || self.window.buffer_size() != Some((frame.width, frame.height)) {
                 self.window
                     .window()
                     .set_inner_size(PhysicalSize::new(frame.width, frame.height));
+            }
+            // バッファ寸法が変わる場合のみ DIB を再確保する（不変条件
+            // outer = client = DIB 寸法を維持。resize は DIB 再確保のみ）。
+            if self.window.buffer_size() != Some((frame.width, frame.height)) {
                 self.window.resize(frame.width, frame.height)?;
             }
             let pixels = compose_argb(frame, flip);
@@ -174,7 +209,9 @@ impl MascotView {
             self.last_pos = Some(next_pos);
         }
 
-        Ok(match (image_changed, pos_changed) {
+        // present を実行した（image_changed または size_drift 修復）かどうかで区分。
+        let redrawn = image_changed || size_drift;
+        Ok(match (redrawn, pos_changed) {
             (true, true) => DrawAction::MovedAndRedrawn,
             (true, false) => DrawAction::Redrawn,
             (false, true) => DrawAction::MovedOnly,

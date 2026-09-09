@@ -322,6 +322,22 @@ impl MoveAction {
             .base
             .num_attr(mascot, env, "TargetY", DEFAULT_TARGET_Y)?;
 
+        // ComplexMove.java L145-146 相当（design §1.10(f)・Java 逐語原則からの
+        // 意図的差異・ユーザー決定 方針 (b)）: TargetX/TargetY を変数へ注入し
+        // アニメ条件から参照可能にする。Java 本家の Move は putVariable しないため
+        // TargetY 条件付き Move（資産 ClimbWall）は評価エラーになるが、ComplexMove
+        // 相当の注入を MoveAction にも適用する。注入値 = 上記属性評価値
+        //（属性無し時は DEFAULT_TARGET_X/Y）。get_turning_animation（アニメ条件評価）
+        // より前に注入する。
+        self.bordered
+            .base
+            .vars
+            .inject("TargetX", f64::from(target_x));
+        self.bordered
+            .base
+            .vars
+            .inject("TargetY", f64::from(target_y));
+
         let mut down = false;
 
         // Java L69-75: 方向転換アニメ有効化 + 向き更新
@@ -382,7 +398,29 @@ impl Action for MoveAction {
     ) -> Result<(), ActionError> {
         self.has_turning = None;
         self.turning = false;
-        self.bordered.init_common(mascot, env)
+        self.bordered.init_common(mascot, env)?;
+        // ComplexMove.java L85-86 相当（Java 準拠）: init 時に TargetX/TargetY を
+        // 解決して変数へ注入する。next_pre の refresh_hotspots（eval_quiet 経路）が
+        // init 直後フレームから TargetY 条件を解決済み値で評価できるようにするため
+        // （Java も init 時 putVariable・refreshHotspots は解決済み値で評価）。
+        // 属性無し時は num_attr の既定値（DEFAULT_TARGET_X/Y）が注入される。
+        let target_x = self
+            .bordered
+            .base
+            .num_attr(mascot, env, "TargetX", DEFAULT_TARGET_X)?;
+        let target_y = self
+            .bordered
+            .base
+            .num_attr(mascot, env, "TargetY", DEFAULT_TARGET_Y)?;
+        self.bordered
+            .base
+            .vars
+            .inject("TargetX", f64::from(target_x));
+        self.bordered
+            .base
+            .vars
+            .inject("TargetY", f64::from(target_y));
+        Ok(())
     }
 
     fn has_next(

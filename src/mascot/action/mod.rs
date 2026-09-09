@@ -368,14 +368,36 @@ impl Base {
     /// 1) resetVariables: #{} / アニメ条件キャッシュクリア（本実装ではアニメ条件も
     ///    vars を共有するため resetValues = #{..} のみ再評価相当）
     /// 2) affordances: clear（非空時）+ Affordance 属性追加（trim 非空時）
-    /// 3) refreshHotspots: アニメ条件評価例外時クリア（catch 相当・L149-152）
+    /// 3) refreshHotspots: Java ActionBase.refreshHotspots（L140-155）逐語
+    ///    （[`Base::refresh_hotspots`]・アニメ条件評価 / 失敗時は catch 準拠の握り）
     ///
     /// tick 本体は各実装がこの直後に続ける（Java abstract tick L138）。
+    /// refreshHotspots をオーバーライドする Dragged は
+    /// [`Base::next_pre_clear_hotspots`] を使う。
     pub(crate) fn next_pre(
         &mut self,
         mascot: &mut Mascot,
         env: &dyn EnvironmentView,
     ) -> Result<(), ActionError> {
+        self.next_pre_common(mascot);
+        self.refresh_hotspots(mascot, env);
+        Ok(())
+    }
+
+    /// Java next() 共通部分 + `Dragged.refreshHotspots` オーバーライド相当
+    /// （Dragged.java L112-122 逐語: clearHotspots のみ・アニメ条件評価しない。
+    /// 評価しないため環境は不要）。
+    pub(crate) fn next_pre_clear_hotspots(
+        &mut self,
+        mascot: &mut Mascot,
+    ) -> Result<(), ActionError> {
+        self.next_pre_common(mascot);
+        mascot.set_hotspots(Vec::new());
+        Ok(())
+    }
+
+    /// next() 共通の resetVariables + affordances 部分（ActionBase L105-113 逐語）。
+    fn next_pre_common(&mut self, mascot: &mut Mascot) {
         self.vars.reset_values();
 
         // Clear affordances（L108-113）
@@ -386,45 +408,59 @@ impl Base {
         if !affordance.trim().is_empty() {
             mascot.add_affordance(affordance);
         }
+    }
 
-        // refreshHotspots（L140-155: アニメ条件評価例外時クリア・catch 相当）。
-        // アニメ条件の評価は throwaway の Variables で行う（self.vars のキャッシュを
-        // 汚さない: テスト契約では当該フレームの tick 内の注入値で再評価される。
-        // Java の「refreshHotspots で条件評価してしまう」挙動に対する意図的差異）。
-        {
-            let mut throwaway = crate::config::script::Variables::new();
-            let snapshot = mascot.eval_snapshot();
-            let ctx = MascotContext {
-                snapshot: &snapshot,
-                env,
-            };
-            let outcome = (|| -> Result<Option<&Animation>, crate::config::script::EvalError> {
-                for animation in &self.animations {
-                    match &animation.condition {
-                        Some(cond) => match throwaway.eval(cond, &ctx)? {
-                            EvalValue::Bool(true) => return Ok(Some(animation)),
-                            EvalValue::Bool(false) => continue,
-                            // Java の (Boolean) キャスト失敗相当
-                            EvalValue::Number(_) => {
-                                return Err(crate::config::script::EvalError {
-                                    expr: "Animation".to_string(),
-                                    message: "アニメ条件はブールである必要があります".to_string(),
-                                })
-                            }
-                        },
-                        None => return Ok(Some(animation)),
-                    }
+    /// Java ActionBase.refreshHotspots L140-155 逐語。
+    ///
+    /// ```java
+    /// try {
+    ///   Animation animation = getAnimation();   // 自身の variables（注入値含む）で条件評価
+    ///   if (animation != null) {
+    ///     getMascot().setHotspots(animation.getHotspots());
+    ///   }
+    /// } catch (VariableException e) {
+    ///   getMascot().clearHotspots();            // log 無し
+    /// }
+    /// ```
+    ///
+    /// アニメ条件の評価は自身の variables（[`Base::vars`]. 注入値含む）+
+    /// [`MascotContext`] で行う（getAnimation L165-180 と同一経路・getVariables()
+    /// 逐語）。評価は warn 無しの `Variables::eval_quiet` を使う（Java catch は
+    /// 評価失敗を log 無しで握るため。tick 内のアニメ選択は warn ありの eval を
+    /// 維持する）。hotspot 供給値は資産 hotspot 0 件のため空 Vec（既存設計維持）。
+    fn refresh_hotspots(&mut self, mascot: &mut Mascot, env: &dyn EnvironmentView) {
+        let snapshot = mascot.eval_snapshot();
+        let ctx = MascotContext {
+            snapshot: &snapshot,
+            env,
+        };
+        let outcome = (|| -> Result<bool, EvalError> {
+            for animation in &self.animations {
+                match &animation.condition {
+                    Some(cond) => match self.vars.eval_quiet(cond, &ctx)? {
+                        EvalValue::Bool(true) => return Ok(true),
+                        EvalValue::Bool(false) => continue,
+                        // Java の (Boolean) キャスト失敗相当
+                        EvalValue::Number(_) => {
+                            return Err(EvalError {
+                                expr: "Animation".to_string(),
+                                message: "アニメ条件はブールである必要があります".to_string(),
+                            })
+                        }
+                    },
+                    None => return Ok(true),
                 }
-                Ok(None)
-            })();
-            match outcome {
-                Ok(Some(_)) => mascot.set_hotspots(Vec::new()),
-                // Java catch 相当: 条件評価例外時 clearHotspots
-                Err(_) => mascot.set_hotspots(Vec::new()),
-                Ok(None) => {}
             }
+            Ok(false)
+        })();
+        match outcome {
+            // 有効アニメ有り → setHotspots（資産 hotspot 0 件のため空供給）
+            Ok(true) => mascot.set_hotspots(Vec::new()),
+            // Java catch 相当: 条件評価例外時 clearHotspots（log 無し）
+            Err(_) => mascot.set_hotspots(Vec::new()),
+            // Java L146-149: animation == null → hotspots 保持
+            Ok(false) => {}
         }
-        Ok(())
     }
 
     /// 条件一致する最初のアニメの rel 時刻フレームを適用する
@@ -844,7 +880,10 @@ impl Action for DraggedAction {
         env: &dyn EnvironmentView,
         rng: &mut dyn Rng,
     ) -> Result<(), ActionError> {
-        self.base.next_pre(mascot, env)?;
+        // Java L100-119 + L112-122 逐語: refreshHotspots をオーバーライドするため
+        // アニメ条件評価は行わず clearHotspots のみ（"action does not support
+        // hotspots"・Dragged.java L112-122 逐語）。
+        self.base.next_pre_clear_hotspots(mascot)?;
 
         // Java L67-68 逐語
         mascot.set_look_right(false);
@@ -1004,7 +1043,10 @@ impl Action for RegistAction {
         env: &dyn EnvironmentView,
         rng: &mut dyn Rng,
     ) -> Result<(), ActionError> {
-        self.base.next_pre(mascot, env)?;
+        // Java Regist.java L81-92 逐語: refreshHotspots をオーバーライドし
+        // clearHotspots のみ（"action does not support hotspots"・アニメ条件評価しない）。
+        // Java で refreshHotspots をオーバーライドするのは Dragged と Regist の 2 種のみ。
+        self.base.next_pre_clear_hotspots(mascot)?;
 
         // Java L66 逐語
         mascot.set_dragging(true);

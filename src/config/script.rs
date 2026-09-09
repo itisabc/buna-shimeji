@@ -134,7 +134,28 @@ impl Variables {
     /// Java: script/Variable.java#get(VariableMap) 相当。
     /// needsReevaluation が立っている時だけ評価し、評価後は値をキャッシュする。
     /// 評価失敗時は log::warn に式とエラーを出して Err を返す（panic しない）。
+    /// warn 無しで評価する必要のある経路（hotspot 更新・Java ActionBase
+    /// refreshHotspots の catch 相当）は [`Variables::eval_quiet`] を使う。
     pub fn eval(&mut self, var: &Variable, ctx: &dyn EvalContext) -> Result<EvalValue, EvalError> {
+        self.eval_quiet(var, ctx).map_err(|err| {
+            // warn は Script 式のみ（Constant の評価失敗は旧実装から warn 無し）
+            if let Variable::Script { source, .. } = var {
+                log::warn!("スクリプト式を評価できません: {{{}}}（{}）", source, err);
+            }
+            err
+        })
+    }
+
+    /// [`Variables::eval`] の warn 無し変種（評価ロジック・キャッシュは同一）。
+    /// Java `ActionBase.refreshHotspots`（ActionBase.java L149-152）の catch は
+    /// アニメ条件の評価失敗を log 無しで握るため、hotspot 更新経路のみで使用する。
+    /// tick 内のアニメ選択（getAnimation 経由）は warn ありの [`Variables::eval`]
+    /// を維持する。
+    pub fn eval_quiet(
+        &mut self,
+        var: &Variable,
+        ctx: &dyn EvalContext,
+    ) -> Result<EvalValue, EvalError> {
         match var {
             Variable::Constant(value) => const_eval(value),
             Variable::Script {
@@ -150,10 +171,7 @@ impl Variables {
                         self.cache.insert(key, value);
                         Ok(value)
                     }
-                    Err(err) => {
-                        log::warn!("スクリプト式を評価できません: {{{}}}（{}）", source, err);
-                        Err(err)
-                    }
+                    Err(err) => Err(err),
                 }
             }
         }
