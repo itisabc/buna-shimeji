@@ -338,6 +338,16 @@ impl Manager {
         });
         self.removed_indices.append(&mut removed);
 
+        // タスク #17: Java Mascot.getTotalCount L986-988 = manager.getCount() の
+        // live 参照を再現する。spawn 反映 / 除去反映の後・全員 tick の前に
+        // 各マスコットへ現在の生存数を配線し、tick 中の条件評価
+        //（例: conf/behaviors.xml の `#{mascot.totalCount < 50}`）が最新値を
+        // 参照するようにする（spawn で増えた子も同 tick から正しい値を持つ）。
+        let total_count = self.mascots.len() as i32;
+        for mascot in &mut self.mascots {
+            mascot.set_total_count(total_count);
+        }
+
         // Java L223: noMascots
         let no_mascots = self.mascots.is_empty();
 

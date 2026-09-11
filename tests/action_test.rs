@@ -951,6 +951,139 @@ fn fall_registance_attributes_are_read_and_applied() {
 }
 
 // =====================================================================
+// Fall 初速の int 切り捨て（Fall.java L82-83 / getInitialVx L155-157 /
+// getInitialVy L159-161）
+//
+// Java は getInitialVx()/getInitialVy() が `eval(..., Number.class, 0).intValue()`
+// を返す（= 0 方向切り捨て・NaN→0・飽和の i32）。その i32 に scaling を掛けて
+// 初速 velocityX/velocityY を作る。非整数式（実資産 `${-15-Math.random()*5}` 等）は
+// 切り捨てられてから scale されるため、f64 のまま scale すると最初の移動量
+// `dx = round(velocityX + modX)`（L117）が 1px ずれる。
+// =====================================================================
+
+/// 契約 1: InitialVX が非整数式のとき、初速は切り捨て後の整数に基づく。
+/// InitialVX=`${-15.7}`・scale 1.0・既定 RegistanceX=0.05:
+///   正: vX = (int)(-15.7) * 1.0 = -15
+///       tick1: vX = -15 - (-15*0.05) = -14.25・modX = -0.25
+///              dx = Java round(-14.5) = -14 → (500-14, 500+2) = (486, 502)
+///   誤: vX = -15.7 → vX=-14.915・modX=-0.915 → dx = round(-15.83) = -16
+///       → (484, 502)（RED 検出）
+#[test]
+fn fall_initial_vx_non_integer_truncates_before_scaling() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((500, 500));
+    let table = single_table("X", 1);
+
+    let action = create(
+        ActionKind::Fall,
+        &attrs(&[("InitialVX", "${-15.7}")]),
+        vec![anim(None, false, vec![pose("p.png", (64, 64), (0, 0), 5)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(
+        m.anchor(),
+        (486, 502),
+        "InitialVX=-15.7 は intValue() で -15 に切り捨ててから scale（dx=-14）。\
+         f64 のままなら dx=-16 で (484,502) になる"
+    );
+}
+
+/// 契約 2: scaling ≠ 1 でも適用順序は「切り捨て → scaling」。
+/// InitialVX=`${-15.7}`・scale 2.0:
+///   正: vX = (int)(-15.7) * 2.0 = -30
+///       tick1: vX = -30 - (-30*0.05) = -28.5・modX = -0.5
+///              dx = Java round(-29.0) = -29 → (500-29, 500+4) = (471, 504)
+///       （重力も scale: 2*2=4）
+///   誤: vX = -15.7*2.0 = -31.4 → vX=-29.83・modX=-0.83
+///       → dx = round(-30.66) = -31 → (469, 504)（RED 検出）
+#[test]
+fn fall_initial_vx_truncates_before_scaling_order() {
+    let mut env = SynthEnv::new();
+    env.scaling_value = 2.0;
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((500, 500));
+    let table = single_table("X", 1);
+
+    let action = create(
+        ActionKind::Fall,
+        &attrs(&[("InitialVX", "${-15.7}")]),
+        vec![anim(None, false, vec![pose("p.png", (64, 64), (0, 0), 5)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(
+        m.anchor(),
+        (471, 504),
+        "切り捨て → scale の順（-15*2=-30 → dx=-29）。scale 先行なら -31.4 → dx=-31"
+    );
+}
+
+/// 契約 3（回帰）: もともと整数の式は従来どおり。
+/// InitialVX=`${-15}`・scale 1.0 → (int)(-15)=-15 → 契約 1 の正解と同じ (486, 502)。
+#[test]
+fn fall_initial_vx_integer_expression_unchanged() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((500, 500));
+    let table = single_table("X", 1);
+
+    let action = create(
+        ActionKind::Fall,
+        &attrs(&[("InitialVX", "${-15}")]),
+        vec![anim(None, false, vec![pose("p.png", (64, 64), (0, 0), 5)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(m.anchor(), (486, 502), "整数式 -15 は切り捨て不要（回帰）");
+}
+
+/// 契約 4: InitialVY も同様に切り捨ててから scale（Fall.java L83 / L159-161）。
+/// 重力・抵抗の影響を消すため Gravity=0・RegistanceY=0 とし、初回 tick の
+/// anchor.y 移動量として観測する。
+/// InitialVY=`${15.7}`・scale 1.0:
+///   正: vY = (int)(15.7) * 1.0 = 15 → dy = round(15) = 15 → (500, 515)
+///   誤: vY = 15.7・modY = 0.7 → dy = round(16.4) = 16 → (500, 516)（RED 検出）
+#[test]
+fn fall_initial_vy_non_integer_truncates_before_scaling() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((500, 500));
+    let table = single_table("X", 1);
+
+    let action = create(
+        ActionKind::Fall,
+        &attrs(&[
+            ("InitialVY", "${15.7}"),
+            ("Gravity", "0"),
+            ("RegistanceY", "0"),
+        ]),
+        vec![anim(None, false, vec![pose("p.png", (64, 64), (0, 0), 5)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(
+        m.anchor(),
+        (500, 515),
+        "InitialVY=15.7 は intValue() で 15 に切り捨て（dy=15）。\
+         f64 のままなら modY=0.7 で dy=16 になる"
+    );
+}
+
+// =====================================================================
 // Jump 契約（Jump.java L43-97）
 // =====================================================================
 

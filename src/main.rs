@@ -256,14 +256,15 @@ impl App {
                             self.manager.dismiss_at(index);
                         }
                     }
-                    (ElementState::Pressed, MouseButton::Right) => {
-                        self.open_popup(index);
-                    }
                     (ElementState::Released, MouseButton::Left) => {
                         if let Err(err) = self.manager.mouse_released_at(index) {
                             log::error!("マウス解放の処理に失敗しました: {err}");
                             self.manager.dismiss_at(index);
                         }
+                    }
+                    // Java `isPopupTrigger()` 準拠: Windows はボタンを離した時に開く
+                    (ElementState::Released, MouseButton::Right) => {
+                        self.open_popup(index);
                     }
                     _ => {}
                 }
@@ -284,6 +285,7 @@ impl App {
 
     /// マスコット右クリック（Java `Mascot` popup 相当）:
     /// 構築（[`Manager::behavior_menu_items`]）→ muda context menu 表示（同期追跡）。
+    /// 選択された時のみモデルを保持する（未選択で閉じたモデルは回収者がいないため破棄）。
     fn open_popup(&mut self, index: usize) {
         let Some(set_name) = self.manager.image_set_name_at(index) else {
             return;
@@ -299,20 +301,26 @@ impl App {
             &menu_items,
             is_paused,
         );
-        // muda / tray-icon 実物 API: position None = カーソル位置（doc 参照）
+        // muda / tray-icon 実物 API: position None = カーソル位置（doc 参照）。
+        // 戻り値 = 項目選択の有無（platform_impl/windows/mod.rs show_context_menu_for_hwnd
+        // L960-973 実読）: true の時点で MenuEvent は menu_selected 経由で同期送信済み
+        // （同 L1238-1243）。
         let hwnd = view.window().hwnd();
-        unsafe {
-            model.menu().show_context_menu_for_hwnd(hwnd, None);
+        let selected = unsafe { model.menu().show_context_menu_for_hwnd(hwnd, None) };
+        if selected {
+            // 同期送信済みの MenuEvent を次ループ `drain_menu_events` が command_of で
+            // 回収するため保持する（選択時のみ）。
+            self.menu_popups.push(model);
         }
-        // drain 時の command_of 走査のため保持する
-        self.menu_popups.push(model);
+        // 未選択で閉じた場合（Esc / メニュー外クリック）は MenuEvent が発生しないため
+        // 回収者がおらず、ここで model を破棄する（リーク根絶・A-4）。
     }
 
     /// トレイ / popup メニューコマンドの drain・適用（⑨）。
     /// - tray コマンド → [`apply_tray_command`（Reload は自前）] + `sync_allowed`
     /// - popup コマンド → [`apply_tray_command`]（SetAllowed 無し・sync 不要・
     ///   選択された popup は保持から除去）
-    /// - 未知 id（選択されずに消えた popup 残り等）は warn で無視
+    /// - 未知 id は warn で無視
     fn drain_menu_events(&mut self) {
         while let Ok(menu_event) = MenuEvent::receiver().try_recv() {
             let id = menu_event.id().clone();

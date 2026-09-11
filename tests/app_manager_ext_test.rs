@@ -92,6 +92,7 @@ use std::time::Instant;
 
 use simeji::app::environment::{Environment, OsSource};
 use simeji::app::manager::{BehaviorMenu, Manager};
+use simeji::config::script::Variable;
 use simeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
 use simeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
@@ -329,6 +330,24 @@ fn row_entry(name: &str, frequency: i32, hidden: bool, toggleable: bool) -> Beha
 /// 非 toggleable・非 hidden の行 1 つ。
 fn row(name: &str, frequency: i32) -> BehaviorEntry {
     row_entry(name, frequency, false, false)
+}
+
+/// Condition ノード 1 つ（AND 積み上げの Group）に行 1 つを束ねたエントリ。
+fn group_entry(condition: &str, name: &str, frequency: i32) -> BehaviorEntry {
+    BehaviorEntry::Group {
+        conditions: vec![Variable::parse(condition)],
+        behaviors: vec![BehaviorDef {
+            name: name.to_string(),
+            frequency,
+            hidden: false,
+            toggleable: false,
+            action: SequenceChild::Ref {
+                name: name.to_string(),
+                attrs: VarMap::new(),
+            },
+            next: None,
+        }],
+    }
 }
 
 fn table(entries: Vec<BehaviorEntry>) -> BehaviorTable {
@@ -894,4 +913,141 @@ fn manager_behavior_menu_items_classify_rows_in_insertion_order() {
     let menu = manager.behavior_menu_items("AltSet");
     assert_eq!(menu.selectable, ["AltWalk"]);
     assert!(menu.toggleable.is_empty());
+}
+
+// =====================================================================
+// タスク #17: mascot.totalCount の配線（Java Mascot.getTotalCount L986-988 =
+// manager.getCount() live 参照）。公開経路 Mascot::eval_snapshot().total_count で
+// 各マスコットから見た生存数を検証する（実装詳細フィールドには触れない）。
+// =====================================================================
+
+/// 全マスコットが現在解決する `mascot.totalCount`（Mascot::eval_snapshot の公開経路）。
+fn total_counts(manager: &mut Manager) -> Vec<i32> {
+    let mut out = Vec::new();
+    manager.apply_all(|m| out.push(m.eval_snapshot().total_count));
+    out
+}
+
+/// 契約 1: add / spawn の次 tick 反映後、各マスコットの `mascot.totalCount` が
+/// 現在の生存数（`Manager::count()`）を返す。既存実装は既定値 1 固定で FAIL。
+#[test]
+fn manager_tick_wires_total_count_to_live_survivor_count() {
+    // add 経路
+    let (env, _) = single_monitor_env();
+    let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
+    for i in 0..3 {
+        manager.add(mascot_of_set("TestSet", (100 + i * 50, 500)));
+    }
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 3);
+    assert_eq!(
+        total_counts(&mut manager),
+        vec![3, 3, 3],
+        "add 反映後は各マスコットから生存数 3 が見える"
+    );
+
+    // spawn drain 経路でも同じ（drain 反映の後・全員 tick の前に配線される）
+    manager.set_image_set_resolver(resolver_for(&["TestSet"]));
+    manager.request_spawn("TestSet");
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 4);
+    assert_eq!(
+        total_counts(&mut manager),
+        vec![4, 4, 4, 4],
+        "spawn 反映後は新規を含む全員が生存数 4 を見る"
+    );
+}
+
+/// 契約 2: 除去（dispose → 次 tick の retain）後は生存数が減少して見える。
+/// 増加方向だけでなく減少方向も最新化されることを pin する（増加時のみ更新する
+/// 実装では残存マスコットが古い値のままになり FAIL）。
+#[test]
+fn manager_tick_refreshes_total_count_downward_after_removal() {
+    let (env, _) = single_monitor_env();
+    let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
+    manager.add(mascot_of_set("TestSet", (100, 500)));
+    manager.add(mascot_of_set("TestSet", (200, 500)));
+    manager.add(mascot_of_set("TestSet", (300, 500)));
+    manager.tick(Instant::now());
+    assert_eq!(
+        total_counts(&mut manager),
+        vec![3, 3, 3],
+        "除去前は生存数 3"
+    );
+
+    // (100,500) のみ dispose → 次 tick の retain 後、残りは減少した生存数を見る
+    manager.apply_all(|m| {
+        if m.anchor() == (100, 500) {
+            m.dispose();
+        }
+    });
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 2);
+    assert_eq!(
+        total_counts(&mut manager),
+        vec![2, 2],
+        "除去反映後は生存数が減少して見える（減少方向も最新化）"
+    );
+}
+
+/// 契約 3: 増殖上限の縮小再現。条件 `#{mascot.totalCount < N}`（N=2）を持つ
+/// Behavior が、生存数 N 未満では候補になり、N 以上では候補外になること
+/// （= conf/behaviors.xml の `#{mascot.totalCount < 50}` が機能すること）を pin。
+///
+/// 現在行動 "Loop" は has_next 1 回で完了し、次 tick の遷移で buildNextBehavior が
+/// 走る（遷移時の条件評価は配線済みの生存数を使う）。生存数 2 では Rare が候補外に
+/// なるため、乱数値 0.0（先頭候補に落ちる値）でも Rare は選ばれず Loop のままになる。
+#[test]
+fn manager_total_count_gates_threshold_condition_behavior_selection() {
+    let crowd_table = || {
+        table(vec![
+            // 条件 `#{mascot.totalCount < 2}` 付き（Rare は条件成立時のみ候補）
+            group_entry("#{mascot.totalCount < 2}", "Rare", 100),
+            // 現在行動（遷移を発火させる）
+            row("Loop", 100),
+            // 候補無しフォールバック先（frequency 0 なので候補にはならない）
+            row_entry("Fall", 0, false, false),
+        ])
+    };
+
+    // 生存 1 体（< 2）: 条件成立 → Rare が候補になり選択される
+    let (env, _) = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        crowd_table(),
+        ScriptedFactory::with_transitions(&["Loop"]),
+        fixed_rng(vec![0.0; 16]),
+    );
+    manager.add(mascot_of_set("TestSet", (500, 500)));
+    manager.tick(Instant::now());
+    manager.set_behavior_all("Loop");
+    manager.tick(Instant::now());
+    let snap = snapshot(&mut manager);
+    assert_eq!(
+        find_set(&snap, "TestSet").behavior.as_deref(),
+        Some("Rare"),
+        "生存数 1 < 2 → 条件成立で Rare が選択される"
+    );
+
+    // 生存 2 体（>= 2）: 条件不成立 → Rare は候補外 → Loop のまま（増殖上限が機能）
+    let (env, _) = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        crowd_table(),
+        ScriptedFactory::with_transitions(&["Loop"]),
+        fixed_rng(vec![0.0; 16]),
+    );
+    manager.add(mascot_of_set("TestSet", (500, 500)));
+    manager.add(mascot_of_set("TestSet", (700, 500)));
+    manager.tick(Instant::now());
+    manager.set_behavior_all("Loop");
+    manager.tick(Instant::now());
+    let snap = snapshot(&mut manager);
+    for view in &snap {
+        assert_eq!(
+            view.behavior.as_deref(),
+            Some("Loop"),
+            "生存数 2 >= 2 → Rare は候補外（totalCount 条件が増殖上限として機能）"
+        );
+    }
 }

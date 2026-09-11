@@ -782,8 +782,19 @@ impl Action for FallAction {
         self.base.init(mascot);
         // Java L62: scaling（FIXME コメント付きの無条件 scale 適用・L82-83 逐語）
         self.scaling = env.scaling();
-        self.velocity_x = self.base.f64_attr(mascot, env, "InitialVX", 0.0)? * self.scaling;
-        self.velocity_y = self.base.f64_attr(mascot, env, "InitialVY", 0.0)? * self.scaling;
+        // Java L82-83: getInitialVx()/getInitialVy() は intValue() で切り捨ててから scaling 乗算
+        self.velocity_x = f64::from(crate::config::script::to_java_int(self.base.f64_attr(
+            mascot,
+            env,
+            "InitialVX",
+            0.0,
+        )?)) * self.scaling;
+        self.velocity_y = f64::from(crate::config::script::to_java_int(self.base.f64_attr(
+            mascot,
+            env,
+            "InitialVY",
+            0.0,
+        )?)) * self.scaling;
         Ok(())
     }
 
