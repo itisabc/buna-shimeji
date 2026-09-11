@@ -2162,3 +2162,89 @@ fn settings_load_accepts_positive_finite_scale_without_upper_bound() {
     assert_eq!(settings.scales().get("B"), Some(&2.0));
     assert_eq!(settings.scales().get("C"), Some(&1e9), "上限は設けない");
 }
+
+// =====================================================================
+// タスク #23: トレイアイコンの Java 準拠化（Main.getIcon L764-792）
+// =====================================================================
+//
+// Java `Main.getIcon()`（.tmp/java-ref/Main.java L764-792）の仕様:
+// ① `img/icon.png` があればユーザーカスタムとして読込
+// ② 無ければ jar 同梱 `/icon.png`（16×16・32bpp ARGB）を使用
+// ③ 両方失敗時は空 16×16
+//
+// Rust 側の公開契約（coder が `src/tray.rs` に実装・シグネチャは本テストが固定）:
+//   pub fn load_tray_icon_rgba(custom_path: &Path) -> (Vec<u8>, u32, u32)
+//     - カスタム PNG が存在しデコード可能 → その RGBA8 と (幅, 高さ)
+//     - 存在しない / デコード失敗 → 埋め込み既定（assets/icon.png・16×16）の RGBA8
+//     - 常に有効な RGBA を返し panic しない
+//
+// ここで pin するのは「入力 → 戻り値」の振る舞いのみ:
+// - 有効なカスタム PNG（16×16 と区別できる 2×2・既知ピクセル）
+//   → その寸法とピクセルが返る（カスタム優先の証明）
+// - 存在しないパス → 既定 16×16・RGBA 長 1024
+// - 壊れた入力 → panic せず既定 16×16・RGBA 長 1024
+// エラーメッセージ・log 呼び出し・内部構造は検証しない（testing-guidelines §1）。
+
+/// カスタム tray アイコン用 PNG を temp dir 配下に書き、そのパスを返す。
+fn write_icon_png(home: &TempHome, name: &str, image: &image::RgbaImage) -> PathBuf {
+    let path = home.root.join(name);
+    image.save(&path).expect("テンポラリ PNG を書ける");
+    path
+}
+
+/// 有効なカスタム PNG（2×2・既知の異なるピクセル）→ その寸法とピクセルが返る。
+/// 既定は 16×16 のため、2×2 が返ることはカスタム優先の証明になる。
+#[test]
+fn tray_icon_uses_valid_custom_png_pixels_and_dimensions() {
+    let home = TempHome::new("icon_custom");
+    let mut custom = image::RgbaImage::new(2, 2);
+    custom.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+    custom.put_pixel(1, 0, image::Rgba([4, 5, 6, 255]));
+    custom.put_pixel(0, 1, image::Rgba([7, 8, 9, 128]));
+    custom.put_pixel(1, 1, image::Rgba([10, 11, 12, 0]));
+    let path = write_icon_png(&home, "icon.png", &custom);
+
+    let (rgba, width, height) = simeji::tray::load_tray_icon_rgba(&path);
+
+    assert_eq!(
+        (width, height),
+        (2, 2),
+        "カスタム PNG の寸法が返る（既定 16×16 と区別できる）"
+    );
+    assert_eq!(
+        rgba,
+        vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 128, 10, 11, 12, 0],
+        "カスタム PNG の RGBA8（行優先）が返る"
+    );
+}
+
+/// カスタムパスが存在しない → 埋め込み既定（16×16・RGBA 長 1024）が返る。
+/// 存在しないディレクトリ配下でも panic しない。
+#[test]
+fn tray_icon_missing_custom_falls_back_to_embedded_default() {
+    let home = TempHome::new("icon_missing");
+    let missing = home.root.join("no_such_dir").join("icon.png");
+
+    let (rgba, width, height) = simeji::tray::load_tray_icon_rgba(&missing);
+
+    assert_eq!((width, height), (16, 16), "既定アイコンは 16×16");
+    assert_eq!(rgba.len(), 16 * 16 * 4, "既定アイコンは RGBA 長 1024");
+}
+
+/// カスタムが壊れている（PNG でないバイト列）→ panic せず埋め込み既定
+/// （16×16・RGBA 長 1024）が返る（デコード失敗のフォールバック）。
+#[test]
+fn tray_icon_corrupt_custom_falls_back_without_panic() {
+    let home = TempHome::new("icon_corrupt");
+    let path = home.root.join("icon.png");
+    std::fs::write(&path, b"this is definitely not a PNG file").expect("壊れたバイト列を書ける");
+
+    let (rgba, width, height) = simeji::tray::load_tray_icon_rgba(&path);
+
+    assert_eq!((width, height), (16, 16), "デコード失敗 → 既定 16×16");
+    assert_eq!(
+        rgba.len(),
+        16 * 16 * 4,
+        "デコード失敗 → 既定の RGBA 長 1024"
+    );
+}

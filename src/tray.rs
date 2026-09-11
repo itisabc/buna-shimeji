@@ -46,6 +46,60 @@ use crate::app::manager::{BehaviorMenu, Manager};
 use crate::app::reload::load_materials;
 
 // =====================================================================
+// トレイアイコン: Java Main.getIcon()（.tmp/java-ref/Main.java L764-792）
+// =====================================================================
+
+/// 埋め込み既定トレイアイコン（Java `Main.class.getResourceAsStream("/icon.png")`
+/// 相当。上流 @dea8952 の `icon.png`・16×16）。
+const EMBEDDED_TRAY_ICON: &[u8] = include_bytes!("../assets/icon.png");
+
+/// トレイアイコンのピクセル（RGBA8 行優先）と寸法 (幅, 高さ) を返す。
+///
+/// Java `Main.getIcon()`（.tmp/java-ref/Main.java L764-792）の仕様:
+/// ① `custom_path` が存在しデコード可能 → その RGBA8（ユーザーカスタム優先）
+/// ② 存在しない（あるいはファイルでない）→ 無言で埋め込み既定
+///    [`EMBEDDED_TRAY_ICON`] の RGBA8（Java L770 `Files.isRegularFile` 逐語）
+/// ③ ファイルとして存在するがデコード失敗 → `log::warn!` のうえ埋め込み既定
+///    （Java L775-777 `Failed to load custom icon file`）
+/// ④ 埋め込み既定のデコードも失敗 → 16×16 透明 RGBA（固定フォールバック）
+///
+/// 常に有効な RGBA を返し panic しない。
+pub fn load_tray_icon_rgba(custom_path: &Path) -> (Vec<u8>, u32, u32) {
+    if custom_path.is_file() {
+        match image::open(custom_path) {
+            Ok(decoded) => {
+                let rgba = decoded.to_rgba8();
+                let (width, height) = rgba.dimensions();
+                return (rgba.into_raw(), width, height);
+            }
+            // Java L775-777: カスタム読み込みの例外時のみ warn
+            Err(err) => log::warn!(
+                "カスタムトレイアイコン {} を読み込めないため既定アイコンを使用します: {err}",
+                custom_path.display()
+            ),
+        }
+    } else {
+        // Java L770: isRegularFile で無ければ無言で既定へ（debug のみ）
+        log::debug!(
+            "カスタムトレイアイコン {} は存在しないため既定アイコンを使用します",
+            custom_path.display()
+        );
+    }
+    match image::load_from_memory(EMBEDDED_TRAY_ICON) {
+        Ok(decoded) => {
+            let rgba = decoded.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            (rgba.into_raw(), width, height)
+        }
+        Err(err) => {
+            log::error!("埋め込み既定トレイアイコンのデコードに失敗しました: {err}");
+            let (width, height) = (16u32, 16u32);
+            (vec![0; (width * height * 4) as usize], width, height)
+        }
+    }
+}
+
+// =====================================================================
 // 契約 A: 設定永続化（conf/settings.toml・design §3-14 形状）
 // =====================================================================
 

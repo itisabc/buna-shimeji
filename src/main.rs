@@ -58,7 +58,8 @@
 //! - [`tray_icon::menu::MenuEvent::receiver`] の `try_recv()` で毎 tick drain
 //! - トレイ本体: `TrayIconBuilder::with_menu / with_icon / with_tooltip / build`
 //!   （icon 無しは Shell_NotifyIcon が NIF_ICON 無しで通知領域に表示されないため、
-//!   既定は 16×16 マッシュルーム配色単色※指示「既定アイコンで可・Phase 1 対象外」の範囲）
+//!   アイコンは [`load_tray_icon_rgba`] で `img/icon.png` 優先 → 埋め込み既定。
+//!   Java `Main.getIcon()` L764-792 準拠）
 //!
 //! Reload 結線（tray.rs `apply_tray_command` の Reload 分岐は lib API として残し・
 //! wiring 側で自前処理）:
@@ -91,32 +92,14 @@ use simeji::mascot::action::factory::XmlBehaviorFactory;
 use simeji::mascot::rng::JavaRandom;
 use simeji::render::imageset::ImageSet;
 use simeji::render::MascotView;
-use simeji::tray::{apply_tray_command, Settings, TrayCommand, TrayContext, TrayMenuModel};
+use simeji::tray::{
+    apply_tray_command, load_tray_icon_rgba, Settings, TrayCommand, TrayContext, TrayMenuModel,
+};
 use simeji::win::os_source::Win32OsSource;
 use simeji::win::window::{SingleInstance, SingleInstanceError};
 
 /// 単一起動 mutex 名（ユーザーセッション内単一・`Local\` 名前空間）。
 const SINGLE_INSTANCE_MUTEX: &str = "Local\\SimejiSingleInstance";
-
-/// 既定トレイアイコン（Phase 1 は資産アイコン非対象のため 16×16・
-/// マッシュルーム断面配色）。`TrayIconAttributes::icon = None` では
-/// Shell_NotifyIcon が NIF_ICON 無しで通知領域に出ないため付与する。
-fn default_tray_icon() -> Result<tray_icon::Icon, tray_icon::BadIcon> {
-    let (width, height) = (16u32, 16u32);
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-    for y in 0..height {
-        for x in 0..width {
-            // 傘（上方 or 端側の8px幅）: 茶（Saddle Brown #8B4513）/ 柄: 明るいベージュ
-            let (r, g, b) = if y < 8 || !(4..12).contains(&x) {
-                (139, 69, 19)
-            } else {
-                (245, 233, 211)
-            };
-            rgba.extend_from_slice(&[r, g, b, 255]);
-        }
-    }
-    tray_icon::Icon::from_rgba(rgba, width, height)
-}
 
 /// [`Settings`] の走査 scale map を [`load_materials`] 入力の `HashMap` に変換する
 /// ([`Settings::scales`] BTreeMap 契約 → HashMap 化・tray.rs Reload 分岐と同一変換)。
@@ -588,11 +571,15 @@ fn main() -> anyhow::Result<()> {
     // 9. 起動時 1 体
     manager.request_spawn_random(&image_sets);
 
-    // 10. トレイ（icon / tooltip は既定値・資産アイコンは Phase 1 対象外）
+    // 10. トレイ（アイコンは img/icon.png 優先 → 埋め込み既定・Java Main.getIcon L764-792 準拠）
     let tray_model = TrayMenuModel::build_tray(&image_sets, &settings.allowed);
+    let (icon_rgba, icon_width, icon_height) = load_tray_icon_rgba(&img_dir.join("icon.png"));
     let tray_icon = tray_icon::TrayIconBuilder::new()
         .with_menu(Box::new(tray_model.menu().clone()))
-        .with_icon(default_tray_icon().context("トレイアイコンの生成に失敗しました")?)
+        .with_icon(
+            tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height)
+                .context("トレイアイコンの生成に失敗しました")?,
+        )
         .with_tooltip("しめじ")
         .build()
         .context("トレイアイコンの生成に失敗しました")?;
