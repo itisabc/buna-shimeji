@@ -6,7 +6,7 @@ Java 版（Shimeji-ee / Shimeji-Desktop 系）と同等の挙動（歩く・落�
 軽量実装で目指します（透過描画は CreateDIBSection + UpdateLayeredWindow。
 
 - 挙動: Java 版と同等（アクションの式・定数を Java ソースから逐語移植）
-- 軽量化: メモリ 5〜20MB / アイドル CPU ほぼ 0（tick 駆動・変化時のみ描画）
+- 軽量化: メモリ 5〜20MB / アイドル CPU ほぼ 0（tick 駆動・変化時のみ描画。実測: アイドル CPU 0.234%・Private 8.8MB・WorkingSet 22.4MB・スレッド 2）
 - 拡張性: Phase 2 で OpenAI 互換 API による LLM エージェント化（Think/Chat）
 - 画像差し替え容易: `img/<SetName>/` にフォルダを置くだけで新しい画像セットを利用可能
 

@@ -68,8 +68,13 @@
 //! [`Mascot::set_needs_repaint(true)`]（新資産で同一 pose なら set_image が同値
 //! no-op により needs_repaint が立たない経路の遮断・本タスクの lib 小改修）。
 
+// release は GUI サブシステム（コンソール非表示）。debug（cargo run）は
+// コンソール表示のまま（既定 false の show_console と整合）。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -82,6 +87,13 @@ use tao::platform::windows::WindowExtWindows;
 use tao::window::WindowId;
 use tray_icon::menu::{ContextMenu, MenuEvent};
 use tray_icon::TrayIcon;
+use windows::core::HSTRING;
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::Console::{
+    AllocConsole, AttachConsole, GetConsoleWindow, SetConsoleOutputCP, SetStdHandle,
+    ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+};
+use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
 use simeji::app::assets::{resolve_assets, AssetDirs};
 use simeji::app::environment::Environment;
@@ -466,23 +478,50 @@ fn handle_draws(
 // main
 // =====================================================================
 
-fn main() -> anyhow::Result<()> {
-    // 1. ログ（既定 info・RUST_LOG 尊重）
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+/// エントリポイント（エラー捕捉のみ・本体は [`try_main`]）。
+/// Err は [`report_fatal`] でコンソールまたは MessageBox に表示して非ゼロ終了する。
+fn main() {
+    if let Err(err) = try_main() {
+        report_fatal(&err);
+        std::process::exit(1);
+    }
+}
 
-    // 2. exe ディレクトリ → 資産ディレクトリ（欠落パス入りエラーで終了）
+fn try_main() -> anyhow::Result<()> {
+    // 1. exe ディレクトリ（欠落パス入りエラーで終了）
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
         .context("実行ファイルのディレクトリを特定できませんでした")?;
-    let AssetDirs { conf_dir, img_dir } = resolve_assets(&exe_dir)?;
 
-    // 3. settings.toml（パースエラー等はファイルパスを添えて終了・handoff ⑪）
-    let settings_path = conf_dir.join("settings.toml");
+    // 2. settings.toml（パースエラー等はファイルパスを添えて終了・handoff ⑪。
+    //    不在時は既定値が返る）
+    let settings_path = exe_dir.join("conf").join("settings.toml");
     let settings = Settings::load(&settings_path)
         .with_context(|| format!("{} の読み込みに失敗しました", settings_path.display()))?;
 
-    // 4. 単一起動（ドロップ防止のため _guard 束縛）
+    // 3. show_console = true のときだけコンソールを確保（既定 false = 非表示）
+    if settings.general.show_console {
+        attach_console();
+    }
+
+    // 4. ログ（既定 info・RUST_LOG 尊重）
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // 5. 資産ディレクトリ（欠落パス入りエラーで終了）
+    let AssetDirs { conf_dir, img_dir } = resolve_assets(&exe_dir)?;
+
+    // 6. settings.toml が無ければ既定設定で初回生成する（失敗しても起動は止めない）
+    match Settings::create_default_if_missing(&settings_path) {
+        Ok(true) => log::info!("{} を既定設定で生成しました", settings_path.display()),
+        Ok(false) => {}
+        Err(err) => log::warn!(
+            "{} の生成に失敗しました（既定設定で起動を続行します）: {err}",
+            settings_path.display()
+        ),
+    }
+
+    // 7. 単一起動（ドロップ防止のため _guard 束縛）
     let _guard = match SingleInstance::acquire(SINGLE_INSTANCE_MUTEX) {
         Ok(guard) => guard,
         Err(SingleInstanceError::AlreadyRunning) => {
@@ -491,10 +530,10 @@ fn main() -> anyhow::Result<()> {
         Err(err @ SingleInstanceError::CreateFailed(_)) => return Err(err.into()),
     };
 
-    // 5. tao EventLoop（UserEvent 型 = ()。構築は失敗時に panics・tao 仕様）
+    // 8. tao EventLoop（UserEvent 型 = ()。構築は失敗時に panics・tao 仕様）
     let event_loop = EventLoop::<()>::new();
 
-    // 6. 素材ロード（EventLoop 構築後・XML 破損等は行番号付きで終了）
+    // 9. 素材ロード（EventLoop 構築後・XML 破損等は行番号付きで終了）
     let scales = scales_of(&settings);
     let materials = match load_materials(&conf_dir, &img_dir, &scales) {
         Ok(materials) => materials,
@@ -507,7 +546,7 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // 7. resolver map（main 所有・Reload で差し替え・resolver は Rc/RefCell 参照）
+    // 10. resolver map（main 所有・Reload で差し替え・resolver は Rc/RefCell 参照）
     let resolver_map: Rc<RefCell<HashMap<String, Arc<ImageSet>>>> = Rc::new(RefCell::new(
         materials
             .iter()
@@ -559,7 +598,7 @@ fn main() -> anyhow::Result<()> {
         move |image_set_name| resolver_map.borrow().get(image_set_name).cloned()
     });
 
-    // 8. settings 初期適用（Sounds は Phase 1 no-op）
+    // 11. settings 初期適用（Sounds は Phase 1 no-op）
     manager.set_breeding_allowed(settings.allowed.breeding);
     manager.set_transients_enabled(settings.allowed.transients);
     manager.set_transformation_allowed(settings.allowed.transformation);
@@ -568,10 +607,10 @@ fn main() -> anyhow::Result<()> {
     // 無効 Behavior map（Manager passthrough・全体置換）
     manager.set_disabled_behaviors(settings.disabled_behaviors.clone());
 
-    // 9. 起動時 1 体
+    // 12. 起動時 1 体
     manager.request_spawn_random(&image_sets);
 
-    // 10. トレイ（アイコンは img/icon.png 優先 → 埋め込み既定・Java Main.getIcon L764-792 準拠）
+    // 13. トレイ（アイコンは img/icon.png 優先 → 埋め込み既定・Java Main.getIcon L764-792 準拠）
     let tray_model = TrayMenuModel::build_tray(&image_sets, &settings.allowed);
     let (icon_rgba, icon_width, icon_height) = load_tray_icon_rgba(&img_dir.join("icon.png"));
     let tray_icon = tray_icon::TrayIconBuilder::new()
@@ -599,7 +638,7 @@ fn main() -> anyhow::Result<()> {
         last_draw_warns: HashMap::new(),
     };
 
-    // 11. tao イベントループ（tick 1 本・描画/入力/トレイ受信は同じループ）
+    // 14. tao イベントループ（tick 1 本・描画/入力/トレイ受信は同じループ）
     event_loop.run(move |event, target, control_flow| {
         match event {
             Event::NewEvents(_) => app.on_new_events(target, control_flow),
@@ -618,4 +657,66 @@ fn main() -> anyhow::Result<()> {
             _ => {}
         }
     });
+}
+
+// =====================================================================
+// コンソール制御（起動時の表示制御・致命的エラー表示）
+// =====================================================================
+
+/// 起動時にコンソールを確保し、標準出力 / 標準エラーを繋ぐ（settings.toml の
+/// `general.show_console = true` 時のみ呼ぶ）。いずれの失敗も無視して続行する。
+///
+/// - 既にコンソールがある場合（debug ビルド・親コンソール継承時）は確保不要
+/// - 無い場合: 親プロセスのコンソールへ [`AttachConsole`] を試し、失敗したら
+///   [`AllocConsole`] で新規確保
+/// - `CONOUT$` を読み書きモードで開き、そのハンドルを [`SetStdHandle`] で
+///   `STD_OUTPUT_HANDLE` / `STD_ERROR_HANDLE` に設定する。ハンドルはプロセス
+///   終了まで有効に保つ（[`std::mem::forget`] で File を drop させない）
+/// - [`SetConsoleOutputCP`]`(65001)`（UTF-8）で日本語ログの文字化けを防ぐ
+fn attach_console() {
+    // 既存コンソール判定（GetConsoleWindow は無コンソール時 NULL）
+    let has_console = unsafe { !GetConsoleWindow().is_invalid() };
+    if !has_console {
+        // 親コンソールへ attach（GUI サブシステムからの起動時）。無ければ新規確保。
+        if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_err() {
+            let _ = unsafe { AllocConsole() };
+        }
+    }
+
+    // CONOUT$ を読み書きで開いて std ハンドルへ接続する（開けなければ無視）
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONOUT$")
+    {
+        let handle = HANDLE(file.as_raw_handle());
+        unsafe {
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, handle);
+            let _ = SetStdHandle(STD_ERROR_HANDLE, handle);
+        }
+        // ここで drop するとハンドルが閉じ std 出力が壊れる。プロセス終了まで保持する。
+        std::mem::forget(file);
+    }
+
+    // 出力コードページを UTF-8 に（日本語ログの文字化け防止）
+    let _ = unsafe { SetConsoleOutputCP(65001) };
+}
+
+/// 致命的起動エラーを表示する（[`main`] の Err 経路）。パニックしない。
+///
+/// - コンソールがある場合（[`GetConsoleWindow`] 非 null）: `eprintln!` で
+///   原因チェーン付き（`{:#}`）を表示
+/// - 無い場合（release 通常起動）: [`MessageBoxW`]（本文 = エラー、タイトル
+///   「しめじ」、`MB_OK | MB_ICONERROR`）
+fn report_fatal(err: &anyhow::Error) {
+    let has_console = unsafe { !GetConsoleWindow().is_invalid() };
+    if has_console {
+        eprintln!("{err:#}");
+    } else {
+        let text = HSTRING::from(format!("{err:#}"));
+        let caption = HSTRING::from("しめじ");
+        unsafe {
+            MessageBoxW(None, &text, &caption, MB_OK | MB_ICONERROR);
+        }
+    }
 }

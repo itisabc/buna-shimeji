@@ -120,8 +120,8 @@ use simeji::mascot::behavior::{
 use simeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
 use simeji::render::imageset::{Frame, ImageSet};
 use simeji::tray::{
-    apply_tray_command, AllowedKind, AllowedSettings, ImagesetsSettings, Settings, SettingsError,
-    TrayCommand, TrayContext, TrayMenuModel,
+    apply_tray_command, AllowedKind, AllowedSettings, GeneralSettings, ImagesetsSettings, Settings,
+    SettingsError, TrayCommand, TrayContext, TrayMenuModel,
 };
 use tray_icon::menu::{CheckMenuItem, MenuId, MenuItemKind, Submenu};
 
@@ -685,6 +685,10 @@ fn assert_settings_eq(expected: &Settings, actual: &Settings) {
     }
     assert_eq!(actual.disabled_behaviors, expected.disabled_behaviors);
     assert_eq!(actual.scales(), expected.scales());
+    assert_eq!(
+        actual.general.show_console, expected.general.show_console,
+        "general.show_console"
+    );
 }
 
 // =====================================================================
@@ -707,6 +711,10 @@ fn settings_default_is_all_true_with_empty_maps() {
     assert!(
         settings.scales().is_empty(),
         "scales() は imagesets.scale と同じ"
+    );
+    assert!(
+        !settings.general.show_console,
+        "general 既定は show_console false"
     );
 }
 
@@ -864,6 +872,7 @@ fn settings_round_trip_preserves_all_values() {
         allowed: allowed(false, true, false, true, false, true),
         disabled_behaviors: disabled,
         imagesets: ImagesetsSettings { scale },
+        general: GeneralSettings { show_console: true },
     };
 
     let path = home.settings_path();
@@ -899,6 +908,7 @@ fn settings_save_is_deterministic_with_sorted_keys() {
         allowed: allowed(true, true, true, true, true, true),
         disabled_behaviors: disabled,
         imagesets: ImagesetsSettings { scale },
+        general: GeneralSettings::default(),
     };
 
     let path = home.settings_path();
@@ -924,6 +934,109 @@ fn settings_save_is_deterministic_with_sorted_keys() {
 
     let reloaded = Settings::load(&path).expect("load できる");
     assert_settings_eq(&settings, &reloaded);
+}
+
+// =====================================================================
+// 契約 A-2: settings.toml の [general] show_console + 初回自動生成
+// =====================================================================
+
+/// 後方互換: 既存（旧形式）TOML には [general] セクションが無い。
+/// load すると show_console は既定 false に補完され、他セクションの解釈は不変。
+#[test]
+fn settings_load_without_general_section_defaults_show_console_false() {
+    let home = TempHome::new("settings_no_general");
+    let legacy = concat!(
+        "[allowed]\n",
+        "throwing = false\n",
+        "\n",
+        "[imagesets]\n",
+        "scale = { Shimeji = 0.5 }\n",
+    );
+    std::fs::write(home.settings_path(), legacy).expect("旧形式 TOML を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("旧形式 TOML を読める");
+    assert!(
+        !settings.general.show_console,
+        "general セクション欠落は既定 false（後方互換）"
+    );
+    assert!(
+        !settings.allowed.throwing,
+        "旧セクションは従来どおり解釈される"
+    );
+    assert_eq!(settings.scales().get("Shimeji"), Some(&0.5));
+}
+
+/// 手書き TOML の `[general] show_console = true` を load → true。
+/// （save→load の自己整合では TOML キー名の誤りを検出できないため、
+/// 実キー名を独立に固定する。）
+#[test]
+fn settings_load_general_show_console_true() {
+    let home = TempHome::new("settings_general_true");
+    std::fs::write(home.settings_path(), "[general]\nshow_console = true\n")
+        .expect("[general] TOML を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("[general] TOML を読める");
+    assert!(
+        settings.general.show_console,
+        "show_console = true が読み取られる"
+    );
+}
+
+/// create_default_if_missing: 不在パス → Ok(true) で既定値の settings.toml を
+/// 新規生成し、そのファイルが Settings::load で読める
+///（6 トグル true・空 map・show_console false）。
+#[test]
+fn create_default_if_missing_writes_readable_defaults() {
+    let home = TempHome::new("create_missing");
+    let path = home.settings_path();
+    assert!(!path.exists(), "前提: ファイルは不在");
+
+    let created = Settings::create_default_if_missing(&path).expect("不在パスへ生成できる");
+    assert!(created, "新規生成時は Ok(true)");
+    assert!(path.is_file(), "ファイルが実在する");
+
+    let loaded = Settings::load(&path).expect("生成されたファイルを load できる");
+    assert!(loaded.allowed.breeding);
+    assert!(loaded.allowed.transients);
+    assert!(loaded.allowed.transformation);
+    assert!(loaded.allowed.throwing);
+    assert!(loaded.allowed.sounds);
+    assert!(loaded.allowed.multiscreen);
+    assert!(
+        !loaded.general.show_console,
+        "生成既定は show_console false"
+    );
+    assert!(loaded.disabled_behaviors.is_empty(), "生成既定は空 map");
+    assert!(loaded.scales().is_empty(), "生成既定は空 map");
+}
+
+/// create_default_if_missing: 既存ファイル → Ok(false) かつ内容を一切変更しない
+///（手編集を上書きしない）。
+#[test]
+fn create_default_if_missing_leaves_existing_file_unchanged() {
+    let home = TempHome::new("create_existing");
+    let path = home.settings_path();
+    let hand_edited = "[general]\nshow_console = true\n";
+    std::fs::write(&path, hand_edited).expect("手編集済みファイルを書ける");
+    let before = std::fs::read_to_string(&path).expect("内容を読める");
+
+    let created = Settings::create_default_if_missing(&path).expect("既存ファイルでは Ok");
+    assert!(!created, "既存ファイルでは Ok(false)");
+
+    let after = std::fs::read_to_string(&path).expect("内容を再読できる");
+    assert_eq!(after, before, "既存ファイルの内容は不変（上書きしない）");
+}
+
+/// create_default_if_missing: 書き込み不能パス（親ディレクトリ不在）→ Err
+///（panic せず SettingsError を返す）。
+#[test]
+fn create_default_if_missing_errors_on_unwritable_path() {
+    let home = TempHome::new("create_unwritable");
+    let path = home.root.join("no_such_dir").join("settings.toml");
+
+    let err = Settings::create_default_if_missing(&path).expect_err("親ディレクトリ不在は Err");
+    assert!(!err.to_string().is_empty(), "Display は非空メッセージ");
+    assert!(!path.exists(), "失敗時にファイルを残さない");
 }
 
 // =====================================================================

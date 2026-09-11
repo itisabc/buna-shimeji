@@ -184,12 +184,25 @@ pub struct ImagesetsSettings {
     pub scale: BTreeMap<String, f64>,
 }
 
+/// 一般設定（design §3-14 の `[general]`）。TOML 出力で先頭セクションに置くため
+/// [`Settings`] の最初のフィールドに据える。欠落メンバは `#[serde(default)]` で
+/// 補完（`show_console` 既定 false・後方互換）。
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct GeneralSettings {
+    /// コンソール表示（既定 false。main が起動時の窓表示制御に参照）。
+    #[serde(default)]
+    pub show_console: bool,
+}
+
 /// settings.toml の強型（design §3-14 形状・Java `Settings` のうち Phase 1 が
 /// 持つ部分のみ）。`#[serde(default)]` で欠落セクション / フィールドを既定補完・
 /// 未知キーは無視（`deny_unknown_fields` は付けない・前方互換）。
 /// `Debug` はテストの `expect_err`（Ok 側表示）要件。
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Settings {
+    /// 一般設定（先頭 = TOML 出力の `[general]` を最初に出す・design §3-14）。
+    #[serde(default)]
+    pub general: GeneralSettings,
     /// 6 トグル（既定 true・[`AllowedSettings::default`]）。
     #[serde(default)]
     pub allowed: AllowedSettings,
@@ -238,6 +251,18 @@ impl Settings {
         let text = toml::to_string(settings)?;
         std::fs::write(path, text)?;
         Ok(())
+    }
+
+    /// settings.toml が無ければ既定値で新規生成する（初回起動時の土台作成）。
+    /// - 不在 → [`Settings::default`] を [`Settings::save`] して `Ok(true)`
+    /// - 既存 → 何もせず `Ok(false)`（手編集を上書きしない）
+    /// - 書込失敗 → [`Settings::save`] のエラーをそのまま伝播
+    pub fn create_default_if_missing(path: &Path) -> Result<bool, SettingsError> {
+        if path.is_file() {
+            return Ok(false);
+        }
+        Settings::save(path, &Settings::default())?;
+        Ok(true)
     }
 
     /// set 単位 scale の参照（[`load_materials`] 注入用・design §3-14）。
