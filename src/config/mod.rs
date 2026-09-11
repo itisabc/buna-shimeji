@@ -23,6 +23,11 @@ use script::Variable;
 /// XML 属性値のマップ（属性名 → [`Variable`]。Java の params 相当）。
 pub type VarMap = BTreeMap<String, Variable>;
 
+/// XML 要素のネスト深さ上限（#21）。再帰パース関数（inline Action / 入れ子 Condition）の
+/// スタックオーバーフローを防ぐ。超過時は ConfigError を返す（XML 破損 = Result 終了の
+/// 既存契約）。正常な conf のネストは十分浅い。
+const MAX_XML_NESTING: usize = 128;
+
 /// 設定読み込みエラー（Java `ConfigurationException` 相当。ファイル・行番号・理由を保持）。
 #[derive(Debug, Error)]
 #[error("{file}:{line}: {reason}")]
@@ -191,7 +196,7 @@ pub fn parse_actions(path: &Path) -> Result<ActionsConfig, ConfigError> {
     let mut actions = BTreeMap::new();
     for list in element_children(root, "ActionList") {
         for node in element_children(list, "Action") {
-            let (name, def) = parse_action_def(&cx, node, true)?;
+            let (name, def) = parse_action_def(&cx, node, true, 0)?;
             if actions.contains_key(&name) {
                 // Java: DuplicateActionErrorMessage 相当
                 return cx.error(node, format!("Action `{name}` が重複定義されています"));
@@ -221,7 +226,7 @@ pub fn parse_behaviors(path: &Path) -> Result<BehaviorsConfig, ConfigError> {
     for list in root.children().filter(|n| {
         n.is_element() && matches!(n.tag_name().name(), "BehaviorList" | "BehaviourList")
     }) {
-        parse_behavior_list(&cx, list, &[], &mut entries, &mut seen_names)?;
+        parse_behavior_list(&cx, list, &[], &mut entries, &mut seen_names, 0)?;
     }
     Ok(BehaviorsConfig { entries })
 }
@@ -270,12 +275,101 @@ fn read_file(path: &Path) -> Result<String, ConfigError> {
 }
 
 /// XML テキストを roxmltree ドキュメントへ。BOM（UTF-8）は roxmltree が自動処理する。
+/// 先に要素ネスト深さを事前スキャンして過深入力を弾く（#21）。
 fn parse_document<'a>(text: &'a str, path: &Path) -> Result<Document<'a>, ConfigError> {
+    check_xml_nesting(text, path)?;
     Document::parse(text).map_err(|e| ConfigError {
         file: path.display().to_string(),
         line: e.pos().row,
         reason: format!("XML として解釈できません: {e}"),
     })
+}
+
+/// 生 XML テキストの要素ネスト深さを事前スキャンし、上限超過なら ConfigError を返す（#21）。
+/// roxmltree 自身の `parse_element` / `parse_content` が要素ネストで再帰するため、
+/// `Document::parse` に渡す前に生テキスト段階で拒否しないとスタックオーバーフローする。
+/// コメント / CDATA / PI / DOCTYPE と引用符内は読み飛ばし、開始/終了タグで深さを数える。
+fn check_xml_nesting(text: &str, path: &Path) -> Result<(), ConfigError> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    let mut depth = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if bytes[i..].starts_with(b"<!--") {
+            i += 4;
+            while i < bytes.len() && !bytes[i..].starts_with(b"-->") {
+                i += 1;
+            }
+            i = (i + 3).min(bytes.len());
+            continue;
+        }
+        if bytes[i..].starts_with(b"<![CDATA[") {
+            i += 9;
+            while i < bytes.len() && !bytes[i..].starts_with(b"]]>") {
+                i += 1;
+            }
+            i = (i + 3).min(bytes.len());
+            continue;
+        }
+        if bytes[i..].starts_with(b"</") {
+            depth = depth.saturating_sub(1);
+            i = skip_tag(bytes, i + 2);
+            continue;
+        }
+        if bytes[i..].starts_with(b"<?") || bytes[i..].starts_with(b"<!") {
+            // 宣言 / PI / DOCTYPE は深さに数えない
+            i = skip_tag(bytes, i + 2);
+            continue;
+        }
+        // 開始タグ。`>` 直前の非空白が `/` なら自己閉じで深さは増えない。
+        let after = skip_tag(bytes, i + 1);
+        let mut k = after;
+        let mut self_closing = false;
+        while k > i + 1 {
+            k -= 1;
+            let b = bytes[k];
+            if b == b'>' || b.is_ascii_whitespace() {
+                continue;
+            }
+            self_closing = b == b'/';
+            break;
+        }
+        if !self_closing {
+            depth += 1;
+            if depth > MAX_XML_NESTING {
+                let line = bytes[..i].iter().filter(|b| **b == b'\n').count() as u32 + 1;
+                return Err(ConfigError {
+                    file: path.display().to_string(),
+                    line,
+                    reason: format!("XML 要素のネストが深すぎます（上限 {MAX_XML_NESTING} 段）"),
+                });
+            }
+        }
+        i = after;
+    }
+    Ok(())
+}
+
+/// `from` から引用符内を飛ばしつつ `>` まで読み飛ばし、`>` の次を返す（#21 事前スキャン用）。
+fn skip_tag(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'>' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    i
 }
 
 /// 直接の子要素のうちローカル名が一致するものを順に返す（名前空間はローカル名比較）。
@@ -321,6 +415,18 @@ impl<'doc, 'input> Cx<'doc, 'input> {
     ) -> Result<T, ConfigError> {
         Err(self.error_value(node, reason))
     }
+
+    /// #21: 要素ネスト深さの上限チェック。超過は ConfigError（panic しない）。
+    fn check_nesting(&self, node: Node<'doc, 'input>, depth: usize) -> Result<(), ConfigError> {
+        if depth > MAX_XML_NESTING {
+            Err(self.error_value(
+                node,
+                format!("XML 要素のネストが深すぎます（上限 {MAX_XML_NESTING} 段）"),
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 // =============================================================================
@@ -345,7 +451,9 @@ fn parse_action_def(
     cx: &Cx,
     node: Node,
     top_level: bool,
+    depth: usize,
 ) -> Result<(String, ActionDef), ConfigError> {
+    cx.check_nesting(node, depth)?;
     // Type 属性は必須。不正値は Err（Java: UnknownActionTypeErrorMessage 相当）
     let type_text = node
         .attribute("Type")
@@ -436,7 +544,7 @@ fn parse_action_def(
                         format!("{type_text} 型の Action は子アクションを持てません"),
                     );
                 }
-                let (_, inline) = parse_action_def(cx, child, false)?;
+                let (_, inline) = parse_action_def(cx, child, false, depth + 1)?;
                 children.push(SequenceChild::Inline(Box::new(inline)));
             }
             _ => {} // 未知の子要素は無視（Java 同様）
@@ -585,7 +693,9 @@ fn parse_behavior_list(
     inherited: &[Variable],
     entries: &mut Vec<BehaviorEntry>,
     seen_names: &mut HashSet<String>,
+    depth: usize,
 ) -> Result<(), ConfigError> {
+    cx.check_nesting(list, depth)?;
     for node in list.children().filter(|c| c.is_element()) {
         match node.tag_name().name() {
             "Condition" => {
@@ -593,7 +703,7 @@ fn parse_behavior_list(
                 if let Some(source) = node.attribute("Condition") {
                     conditions.push(parse_group_condition(source));
                 }
-                parse_behavior_list(cx, node, &conditions, entries, seen_names)?;
+                parse_behavior_list(cx, node, &conditions, entries, seen_names, depth + 1)?;
             }
             "Behavior" | "Behaviour" => {
                 // Behavior 自身の Condition 属性も Group.conditions へ AND 積み上げする
@@ -687,7 +797,7 @@ fn parse_behavior_def(
             }
             "ActionReference" => child_action = Some(parse_action_ref(cx, child)?),
             "Action" => {
-                let (_, inline) = parse_action_def(cx, child, false)?;
+                let (_, inline) = parse_action_def(cx, child, false, 0)?;
                 child_action = Some(SequenceChild::Inline(Box::new(inline)));
             }
             _ => {}
@@ -736,7 +846,7 @@ fn parse_next_behavior_list(cx: &Cx, node: Node) -> Result<NextBehaviorList, Con
         .ok_or_else(|| cx.error_value(node, "NextBehaviorList に Add 属性がありません"))?;
     let add = add_text.eq_ignore_ascii_case("true"); // Java Boolean.parseBoolean 相当
     let mut references = Vec::new();
-    parse_next_list_children(cx, node, &[], &mut references)?;
+    parse_next_list_children(cx, node, &[], &mut references, 0)?;
     Ok(NextBehaviorList { add, references })
 }
 
@@ -747,7 +857,9 @@ fn parse_next_list_children(
     list: Node,
     inherited: &[(String, bool)],
     references: &mut Vec<BehaviorRef>,
+    depth: usize,
 ) -> Result<(), ConfigError> {
+    cx.check_nesting(list, depth)?;
     for node in list.children().filter(|c| c.is_element()) {
         match node.tag_name().name() {
             "Condition" => {
@@ -757,7 +869,7 @@ fn parse_next_list_children(
                     // 参照条件は資産の記法（${} / #{}）をそのまま反映する。
                     conditions.push((source.to_string(), source.starts_with("#{")));
                 }
-                parse_next_list_children(cx, node, &conditions, references)?;
+                parse_next_list_children(cx, node, &conditions, references, depth + 1)?;
             }
             "BehaviorReference" | "BehaviourReference" => {
                 let name = node

@@ -21,9 +21,10 @@
 use std::path::{Path, PathBuf};
 
 use simeji::config::{parse_actions, ActionDef, ActionsConfig, Animation, Pose, SequenceChild};
+use simeji::render::compose_argb;
 use simeji::render::imageset::{
     available_refs, check_references, enumerate_sets, java_round, normalize_image_ref,
-    read_png_size, scale_anchor, scale_pose, scale_velocity, ImageSet,
+    read_png_size, scale_anchor, scale_pose, scale_velocity, Frame, ImageSet,
 };
 
 // =====================================================================
@@ -833,4 +834,110 @@ fn real_actions_xml_and_shimeji_set_are_fully_consistent() {
         report.disabled.len()
     );
     assert!(report.warnings.is_empty(), "警告 0 件");
+}
+
+// =====================================================================
+// タスク #20: PNG 寸法ガード + scale 検証（異常入力でプロセスを死なせない）
+// =====================================================================
+
+/// 契約: 0 幅 / 0 高の IHDR のみ PNG（デコード不能・ヘッダ代替経路）は
+/// panic せずフレーム欠落 + 警告になる。
+#[test]
+fn load_zero_dimension_png_is_omitted_with_warning() {
+    let img = TempImg::new("zero_dim");
+    img.write_bytes("SetA/zero_both.png", &truncated_png_bytes(0, 0));
+    img.write_bytes("SetA/zero_width.png", &truncated_png_bytes(0, 4));
+    img.write_bytes("SetA/zero_height.png", &truncated_png_bytes(4, 0));
+
+    let set = ImageSet::load(img.path(), "SetA", None).expect("0 寸法 PNG でも set 全体は Ok");
+    assert!(
+        set.frame("zero_both.png").is_none(),
+        "0x0 フレームは欠落する"
+    );
+    assert!(
+        set.frame("zero_width.png").is_none(),
+        "width=0 フレームは欠落する"
+    );
+    assert!(
+        set.frame("zero_height.png").is_none(),
+        "height=0 フレームは欠落する"
+    );
+    assert!(
+        !set.warnings.is_empty(),
+        "寸法不正は警告になる: {:?}",
+        set.warnings
+    );
+}
+
+/// 契約: 上限超過の巨大寸法 IHDR は panic（u32 乗算オーバーフロー / 巨大 alloc）
+/// せずフレーム欠落 + 警告になる。
+#[test]
+fn load_oversized_png_is_omitted_with_warning() {
+    let img = TempImg::new("oversized");
+    img.write_bytes("SetA/huge.png", &truncated_png_bytes(100_000, 100_000));
+
+    let set = ImageSet::load(img.path(), "SetA", None).expect("巨大寸法 PNG でも set 全体は Ok");
+    assert!(
+        set.frame("huge.png").is_none(),
+        "上限超過フレームは欠落する"
+    );
+    assert!(
+        !set.warnings.is_empty(),
+        "上限超過は警告になる: {:?}",
+        set.warnings
+    );
+}
+
+/// 契約: 小さな実 PNG（16x16）+ 有効寸法上限を超える過大 scale は resize せず
+/// panic せずフレーム欠落 + 警告になる。
+///
+/// RED 安全性: f64→u32 飽和域（1e9 等）は現行実装で `resize` が巨大 alloc を
+/// 試みて abort（プロセス全体を殺す）ため使わない。ここでは 16x16 × scale 129
+/// （= 2064² > 2048² のフレーム上限）で「上限超過」を作り、現行 RED でも
+/// 約 17MB の小さい alloc に留める。
+#[test]
+fn load_oversized_scale_skips_frame_without_panic() {
+    let img = TempImg::new("huge_scale");
+    img.write_png("SetA/small.png", 16, 16, OPAQUE_RED);
+
+    let set =
+        ImageSet::load(img.path(), "SetA", Some(129.0)).expect("過大 scale でも set 全体は Ok");
+    assert!(
+        set.frame("small.png").is_none(),
+        "上限超過 scale のフレームは欠落する"
+    );
+    assert!(
+        !set.warnings.is_empty(),
+        "過大 scale は警告になる: {:?}",
+        set.warnings
+    );
+}
+
+/// 契約（描画側の防御）: width=0 のフレームを compose_argb しても panic せず
+/// 空 Vec を返す（chunks_exact(0) の panic 回避）。
+#[test]
+fn compose_argb_zero_width_frame_returns_empty_without_panic() {
+    let frame = Frame {
+        width: 0,
+        height: 0,
+        rgba: Vec::new(),
+    };
+    assert!(compose_argb(&frame, false).is_empty(), "flip=false");
+    assert!(compose_argb(&frame, true).is_empty(), "flip=true");
+}
+
+/// 回帰: 通常寸法 PNG + 中程度 scale（2.0）は警告なしで正しくプリスケールされる
+/// （寸法ガードが正常系を誤って弾かないことの確認）。
+#[test]
+fn load_normal_png_with_moderate_scale_stays_warning_free() {
+    let img = TempImg::new("scale_regression");
+    img.write_png("SetA/img.png", 16, 16, OPAQUE_RED);
+
+    let set = ImageSet::load(img.path(), "SetA", Some(2.0)).expect("通常スケールは読める");
+    assert_eq!(dims_of(&set, "img.png"), (32, 32));
+    assert!(
+        set.warnings.is_empty(),
+        "通常系は警告なし: {:?}",
+        set.warnings
+    );
 }

@@ -55,6 +55,10 @@ pub enum DrawAction {
 /// 変換式は [`premultiply_rgba_to_argb`] を行スライスに適用するだけなので
 /// 全体一括と同一結果（flip とプレマルチプライはピクセル独立のため順序不変）。
 pub fn compose_argb(frame: &Frame, flip: bool) -> Vec<u32> {
+    // width=0 は chunks_exact(0) が panic するため空で返す（寸法ガードの最終防衛）
+    if frame.width == 0 {
+        return Vec::new();
+    }
     let mut out = Vec::with_capacity((frame.width * frame.height) as usize);
     let row_bytes = frame.width as usize * 4;
     let mut row_rgba: Vec<u8> = Vec::with_capacity(row_bytes);

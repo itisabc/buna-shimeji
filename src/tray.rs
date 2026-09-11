@@ -61,6 +61,12 @@ pub enum SettingsError {
     /// settings.toml の読み書き（io）に失敗（保存先ディレクトリ不在等）。
     #[error("settings.toml の入出力に失敗しました: {0}")]
     Io(#[from] std::io::Error),
+    /// imagesets.scale が非有限（NaN / ±inf）または 0 以下。
+    /// 設定不正として起動エラー経路に載せる（上限は設けない）。
+    #[error(
+        "settings.toml の imagesets.scale が不正です（{0} = {1}）: 正の有限値を指定してください"
+    )]
+    InvalidScale(String, f64),
 }
 
 /// Allowed Behaviours トグルの種別（トレイ「Allowed Behaviours」サブメニューの
@@ -147,6 +153,7 @@ impl Settings {
     /// ファイル不在は `Ok(既定値)`（Java L62 `Files.isRegularFile` 逐語・
     /// 読み飛ばし = 既定適用）。パース失敗は [`SettingsError::Parse`]。
     /// 欠落セクション / フィールドは既定補完・未知キーは無視。
+    /// `imagesets.scale` が非有限または 0 以下なら [`SettingsError::InvalidScale`]。
     pub fn load(path: &Path) -> Result<Settings, SettingsError> {
         // Java L62: if (Files.isRegularFile(path)) — 無ければ既定のまま
         if !path.is_file() {
@@ -154,7 +161,21 @@ impl Settings {
         }
         let text = std::fs::read_to_string(path)?;
         // 欠落補完は serde default・未知キーは serde が無視する
-        Ok(toml::from_str(&text)?)
+        let settings: Settings = toml::from_str(&text)?;
+        settings.validate_scales()?;
+        Ok(settings)
+    }
+
+    /// `imagesets.scale` の各値を検証する（異常入力の防御・タスク #20）。
+    /// 非有限（NaN / ±inf）または 0 以下は設定不正として Err。
+    /// 上限は設けない（巨大 scale はフレーム単位の寸法ガードで安全化）。
+    fn validate_scales(&self) -> Result<(), SettingsError> {
+        for (set, scale) in &self.imagesets.scale {
+            if !scale.is_finite() || *scale <= 0.0 {
+                return Err(SettingsError::InvalidScale(set.clone(), *scale));
+            }
+        }
+        Ok(())
     }
 
     /// settings.toml を上書き保存する（Java Settings.java save L194-267 相当）。

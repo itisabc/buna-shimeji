@@ -1441,6 +1441,90 @@ fn synthetic_validate_required_behaviors_missing_thrown() {
     validate_required_behaviors(&cfg).expect("必須 4 種が揃っていれば Ok");
 }
 
+// =====================================================================
+// #21: XML 要素ネスト深さガード（パーサ再帰で abort しない）
+//
+// 要素階層ごとに再帰する parse_action_def（Inline Action）/
+// parse_behavior_list（Condition）/ parse_next_list_children（NextBehaviorList 配下
+// の Condition）は、病的に深い XML でスタックオーバーフローする。深さ上限超過時は
+// ConfigError（Result）を返し、プロセスを落とさない（XML 破損 = Result 終了の既存契約）。
+// 正常な実 conf は depth が十分浅く従来どおりパースできる（既存テストで担保）。
+// =====================================================================
+
+/// 契約 4a: 深くネストした Inline Action は abort せず Err。
+#[test]
+fn deeply_nested_inline_actions_error_not_stack_overflow() {
+    const DEPTH: usize = 50_000;
+    let mut xml = String::with_capacity(DEPTH * 64);
+    xml.push_str(ACTIONS_XML_HEAD);
+    xml.push_str("<Action Name=\"A0\" Type=\"Sequence\">");
+    for _ in 0..DEPTH {
+        xml.push_str("<Action Type=\"Sequence\">");
+    }
+    xml.push_str("<ActionReference Name=\"X\"/>");
+    for _ in 0..DEPTH {
+        xml.push_str("</Action>");
+    }
+    xml.push_str("</Action></ActionList></Mascot>");
+
+    let path = temp_conf("deep_inline_actions", &xml);
+    let result = parse_actions(&path);
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        result.is_err(),
+        "5 万階層の Inline Action ネストは深さ上限超過で Err（abort しない）"
+    );
+}
+
+/// 契約 4b: 深くネストした Condition（behaviors）は abort せず Err。
+#[test]
+fn deeply_nested_behavior_conditions_error_not_stack_overflow() {
+    const DEPTH: usize = 50_000;
+    let mut xml = String::with_capacity(DEPTH * 40);
+    xml.push_str("<Mascot xmlns=\"http://www.group-finity.com/Mascot\">\n<BehaviorList>\n");
+    for _ in 0..DEPTH {
+        xml.push_str("<Condition>");
+    }
+    xml.push_str("<Behavior Name=\"B\" Frequency=\"1\"/>");
+    for _ in 0..DEPTH {
+        xml.push_str("</Condition>");
+    }
+    xml.push_str("</BehaviorList></Mascot>");
+
+    let path = temp_conf("deep_behavior_conditions", &xml);
+    let result = parse_behaviors(&path);
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        result.is_err(),
+        "5 万階層の Condition ネストは深さ上限超過で Err（abort しない）"
+    );
+}
+
+/// 契約 4c: 深くネストした Condition（NextBehaviorList 配下）は abort せず Err。
+#[test]
+fn deeply_nested_next_list_conditions_error_not_stack_overflow() {
+    const DEPTH: usize = 50_000;
+    let mut xml = String::with_capacity(DEPTH * 30);
+    xml.push_str("<Mascot xmlns=\"http://www.group-finity.com/Mascot\">\n<BehaviorList>\n");
+    xml.push_str("<Behavior Name=\"B\" Frequency=\"1\">\n<NextBehaviorList Add=\"true\">\n");
+    for _ in 0..DEPTH {
+        xml.push_str("<Condition>");
+    }
+    xml.push_str("<BehaviorReference Name=\"R\" Frequency=\"1\"/>");
+    for _ in 0..DEPTH {
+        xml.push_str("</Condition>");
+    }
+    xml.push_str("</NextBehaviorList></Behavior></BehaviorList></Mascot>");
+
+    let path = temp_conf("deep_next_list_conditions", &xml);
+    let result = parse_behaviors(&path);
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        result.is_err(),
+        "NextBehaviorList 配下の 5 万階層 Condition ネストは Err（abort しない）"
+    );
+}
+
 #[test]
 fn parsed_expressions_are_evaluable_via_public_api() {
     // パース結果の Variable がそのまま Variables::eval に流せること（config ↔ script の接続）

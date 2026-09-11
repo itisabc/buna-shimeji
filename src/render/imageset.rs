@@ -17,6 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -25,6 +26,23 @@ use crate::config::{ActionDef, ActionsConfig, Pose};
 
 /// PNG シグネチャ（8 バイト）。
 const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// フレーム寸法の 1 辺の上限（これを超えるフレームは欠落させる）。
+const MAX_FRAME_DIMENSION: u32 = 8192;
+/// フレームの最大ピクセル数（2048² = 4_194_304・最大 16MB/フレーム）。
+const MAX_FRAME_PIXELS: u64 = 4_194_304;
+
+/// フレーム寸法が有効範囲内か（0 超・1 辺 ≤ 8192・総ピクセル ≤ 4_194_304）。
+/// 乗算は u64 で行いオーバーフローを避ける。
+fn valid_frame_dimensions(width: u32, height: u32) -> bool {
+    let w = u64::from(width);
+    let h = u64::from(height);
+    width > 0
+        && height > 0
+        && w <= u64::from(MAX_FRAME_DIMENSION)
+        && h <= u64::from(MAX_FRAME_DIMENSION)
+        && w * h <= MAX_FRAME_PIXELS
+}
 
 /// 画像セット読み込みエラー。
 #[derive(Debug, Error)]
@@ -121,9 +139,12 @@ pub fn scale_pose(pose: &Pose, scale: f64) -> Pose {
 /// PNG シグネチャ + IHDR のみで寸法を読む（全体デコード不要）。
 /// width は先頭から 16 バイト目、height は 20 バイト目（u32 ビッグエンディアン）。
 /// IDAT 以降が壊れていても寸法は返す。シグネチャ不正 / 短すぎ / IHDR 不在は Err。
+/// ファイル全体は読まず先頭 24 バイトのみ読む。
 pub fn read_png_size(path: &Path) -> Result<(u32, u32), ImagesetError> {
-    let bytes = fs::read(path)?;
-    read_png_size_from(&bytes).ok_or_else(|| ImagesetError::NotPng(path.display().to_string()))
+    let mut file = fs::File::open(path)?;
+    let mut header = [0u8; 24];
+    file.read_exact(&mut header)?;
+    read_png_size_from(&header).ok_or_else(|| ImagesetError::NotPng(path.display().to_string()))
 }
 
 /// バイト列から PNG 寸法を解釈する（シグネチャ 8B + チャンク length 4B + type 4B
@@ -219,6 +240,12 @@ impl ImageSet {
                 Ok(decoded) => {
                     let rgba = decoded.to_rgba8();
                     let (width, height) = rgba.dimensions();
+                    if !valid_frame_dimensions(width, height) {
+                        warnings.push(format!(
+                            "{file_name}: 寸法 {width}x{height} が上限を超えるため読み飛ばしました"
+                        ));
+                        continue;
+                    }
                     frames.insert(
                         file_name,
                         Frame {
@@ -231,6 +258,12 @@ impl ImageSet {
                 Err(_) => match read_png_size(&path) {
                     // ヘッダが読める: IHDR 寸法の全透明フレームで代替
                     Ok((width, height)) => {
+                        if !valid_frame_dimensions(width, height) {
+                            warnings.push(format!(
+                                "{file_name}: 寸法 {width}x{height} が不正なため読み飛ばしました"
+                            ));
+                            continue;
+                        }
                         warnings.push(format!(
                             "{file_name}: デコードに失敗したため {width}x{height} の全透明フレームで代替しました"
                         ));
@@ -239,7 +272,7 @@ impl ImageSet {
                             Frame {
                                 width,
                                 height,
-                                rgba: vec![0; (width * height * 4) as usize],
+                                rgba: vec![0; (u64::from(width) * u64::from(height) * 4) as usize],
                             },
                         );
                     }
@@ -265,9 +298,15 @@ impl ImageSet {
 
         // scale 指定（1.0 以外）なら全フレームをプリスケール
         if let Some(s) = scale.filter(|&s| s != 1.0) {
-            for frame in frames.values_mut() {
+            let mut oversized: Vec<String> = Vec::new();
+            for (file_name, frame) in frames.iter_mut() {
                 let new_width = scaled_dimension(frame.width, s);
                 let new_height = scaled_dimension(frame.height, s);
+                // resize 実行前に上限検査（巨大 alloc / u32 オーバーフロー回避）
+                if !valid_frame_dimensions(new_width, new_height) {
+                    oversized.push(file_name.clone());
+                    continue;
+                }
                 let src = image::RgbaImage::from_raw(
                     frame.width,
                     frame.height,
@@ -283,6 +322,12 @@ impl ImageSet {
                 frame.width = dst.width();
                 frame.height = dst.height();
                 frame.rgba = dst.into_raw();
+            }
+            for file_name in oversized {
+                frames.remove(&file_name);
+                warnings.push(format!(
+                    "{file_name}: scale {s} 適用後の寸法が上限を超えるため読み飛ばしました"
+                ));
             }
         }
 

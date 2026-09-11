@@ -100,6 +100,17 @@ pub struct EvalError {
 /// Rust 側は Err へ落とす。AGENTS.md §5-1 例外条項）。正当な資産チェーンは 10 段程度。
 const MAX_EVAL_DEPTH: u32 = 64;
 
+/// 式 AST とパーサ再帰の深さ上限（#21）。深い括弧ネストや長大な左深チェーンは
+/// パース・評価・Drop の再帰でスタックオーバーフローを起こすため、構築時点で
+/// 上限を超えた式は Err にする（Java は StackOverflowError で破綻するが Rust 側は
+/// Err へ落とす。AGENTS.md §5-1 例外条項）。正当な資産式は数十ノード。
+const MAX_EXPR_DEPTH: usize = 256;
+
+/// 再帰下降パーサのネスト上限（#21）。1 段の括弧で優先順位チェーン約 9 段の
+/// スタックフレームを消費するため、AST 深さ上限より低く設定して実スタックを守る。
+/// 正当な資産式の括弧ネストは数段。
+const MAX_PARSE_DEPTH: usize = 64;
+
 /// アクション単位の評価状態。注入変数（FootX / TargetY / Gap 等）+ スクリプト値キャッシュ
 /// （Java `VariableMap` + `Script.value` 相当）。
 pub struct Variables {
@@ -423,6 +434,13 @@ fn lex(source: &str) -> Result<Vec<Tok>, String> {
     Ok(toks)
 }
 
+/// パース途中の式と、その AST の深さ（#21 深さガード用）。深さはリーフ = 1、
+/// 子を持つノードは max(子の深さ) + 1。構築のたびに上限を確認する。
+struct Node {
+    expr: Expr,
+    depth: usize,
+}
+
 /// 再帰下降パーサ。演算子の優先度・結合規則は Java（Nashorn JS）準拠:
 /// 単項（! -）> 乗除 > 加減 > 関係（< <= > >=）> 等価（== !=）> && > || > 三項（最低）。
 /// 二項演算は左結合、三項は右結合。
@@ -430,6 +448,8 @@ struct Parser<'s> {
     toks: Vec<Tok>,
     pos: usize,
     source: &'s str,
+    /// 再帰下降の現在深さ（#21）。括弧・単項・三項・引数の入れ子で増減する。
+    recursion: usize,
 }
 
 impl<'s> Parser<'s> {
@@ -469,50 +489,115 @@ impl<'s> Parser<'s> {
         }
     }
 
+    /// 深さ上限超過の共通エラー（#21）。
+    fn too_deep(&self) -> EvalError {
+        self.err(format!(
+            "式のネストが深すぎます（上限 {MAX_EXPR_DEPTH} 段）"
+        ))
+    }
+
+    /// 再帰下降ネスト上限超過の共通エラー（#21）。
+    fn recursion_too_deep(&self) -> EvalError {
+        self.err(format!(
+            "式の入れ子が深すぎます（パース上限 {MAX_PARSE_DEPTH} 段）"
+        ))
+    }
+
+    /// AST 深さの上限チェック。超過は panic せず既存の EvalError 経路で返す。
+    fn check_depth(&self, depth: usize) -> Result<(), EvalError> {
+        if depth > MAX_EXPR_DEPTH {
+            Err(self.too_deep())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// 左結合二項ノードを構築する。バンドル前後の深さを確認し、長大チェーンで
+    /// 上限を超えたら Err（AST を深くしすぎない = 評価・Drop の再帰も有界）。
+    fn binary(&self, op: BinOp, lhs: Node, rhs: Node) -> Result<Node, EvalError> {
+        let depth = lhs.depth.max(rhs.depth) + 1;
+        self.check_depth(depth)?;
+        Ok(Node {
+            expr: Expr::Bin {
+                op,
+                lhs: Box::new(lhs.expr),
+                rhs: Box::new(rhs.expr),
+            },
+            depth,
+        })
+    }
+
     /// 式全体をパースし、全トークンを消費できていることを確認する。
-    fn parse_expr(&mut self) -> Result<Expr, EvalError> {
-        let expr = self.parse_ternary()?;
+    fn parse_expr(&mut self) -> Result<Node, EvalError> {
+        let node = self.parse_ternary()?;
         if self.pos != self.toks.len() {
             return Err(self.err("式の後に余分なトークンがあります"));
         }
-        Ok(expr)
+        Ok(node)
     }
 
-    fn parse_ternary(&mut self) -> Result<Expr, EvalError> {
+    /// 再帰下降の深さを数える薄いラッパ（#21）。括弧・三項・引数はこの
+    /// `parse_ternary`（および `parse_unary`）を通るため、ここで上限を確認する。
+    fn parse_ternary(&mut self) -> Result<Node, EvalError> {
+        if self.recursion >= MAX_PARSE_DEPTH {
+            return Err(self.recursion_too_deep());
+        }
+        self.recursion += 1;
+        let result = self.parse_ternary_inner();
+        self.recursion -= 1;
+        result
+    }
+
+    fn parse_ternary_inner(&mut self) -> Result<Node, EvalError> {
         let cond = self.parse_or()?;
         if self.eat(Sym::Question) {
             let then = self.parse_ternary()?;
             self.expect(Sym::Colon, "三項演算子の `:`")?;
             let else_ = self.parse_ternary()?;
-            Ok(Expr::Ternary {
-                cond: Box::new(cond),
-                then: Box::new(then),
-                else_: Box::new(else_),
+            let depth = cond.depth.max(then.depth).max(else_.depth) + 1;
+            self.check_depth(depth)?;
+            Ok(Node {
+                expr: Expr::Ternary {
+                    cond: Box::new(cond.expr),
+                    then: Box::new(then.expr),
+                    else_: Box::new(else_.expr),
+                },
+                depth,
             })
         } else {
             Ok(cond)
         }
     }
 
-    fn parse_or(&mut self) -> Result<Expr, EvalError> {
+    fn parse_or(&mut self) -> Result<Node, EvalError> {
         let mut lhs = self.parse_and()?;
         while self.eat(Sym::OrOr) {
             let rhs = self.parse_and()?;
-            lhs = Expr::Or(Box::new(lhs), Box::new(rhs));
+            let depth = lhs.depth.max(rhs.depth) + 1;
+            self.check_depth(depth)?;
+            lhs = Node {
+                expr: Expr::Or(Box::new(lhs.expr), Box::new(rhs.expr)),
+                depth,
+            };
         }
         Ok(lhs)
     }
 
-    fn parse_and(&mut self) -> Result<Expr, EvalError> {
+    fn parse_and(&mut self) -> Result<Node, EvalError> {
         let mut lhs = self.parse_equality()?;
         while self.eat(Sym::AndAnd) {
             let rhs = self.parse_equality()?;
-            lhs = Expr::And(Box::new(lhs), Box::new(rhs));
+            let depth = lhs.depth.max(rhs.depth) + 1;
+            self.check_depth(depth)?;
+            lhs = Node {
+                expr: Expr::And(Box::new(lhs.expr), Box::new(rhs.expr)),
+                depth,
+            };
         }
         Ok(lhs)
     }
 
-    fn parse_equality(&mut self) -> Result<Expr, EvalError> {
+    fn parse_equality(&mut self) -> Result<Node, EvalError> {
         let mut lhs = self.parse_relational()?;
         loop {
             let op = match self.peek() {
@@ -522,16 +607,12 @@ impl<'s> Parser<'s> {
             };
             self.pos += 1;
             let rhs = self.parse_relational()?;
-            lhs = Expr::Bin {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = self.binary(op, lhs, rhs)?;
         }
         Ok(lhs)
     }
 
-    fn parse_relational(&mut self) -> Result<Expr, EvalError> {
+    fn parse_relational(&mut self) -> Result<Node, EvalError> {
         let mut lhs = self.parse_additive()?;
         loop {
             let op = match self.peek() {
@@ -543,16 +624,12 @@ impl<'s> Parser<'s> {
             };
             self.pos += 1;
             let rhs = self.parse_additive()?;
-            lhs = Expr::Bin {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = self.binary(op, lhs, rhs)?;
         }
         Ok(lhs)
     }
 
-    fn parse_additive(&mut self) -> Result<Expr, EvalError> {
+    fn parse_additive(&mut self) -> Result<Node, EvalError> {
         let mut lhs = self.parse_multiplicative()?;
         loop {
             let op = match self.peek() {
@@ -562,16 +639,12 @@ impl<'s> Parser<'s> {
             };
             self.pos += 1;
             let rhs = self.parse_multiplicative()?;
-            lhs = Expr::Bin {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = self.binary(op, lhs, rhs)?;
         }
         Ok(lhs)
     }
 
-    fn parse_multiplicative(&mut self) -> Result<Expr, EvalError> {
+    fn parse_multiplicative(&mut self) -> Result<Node, EvalError> {
         let mut lhs = self.parse_unary()?;
         loop {
             let op = match self.peek() {
@@ -581,34 +654,61 @@ impl<'s> Parser<'s> {
             };
             self.pos += 1;
             let rhs = self.parse_unary()?;
-            lhs = Expr::Bin {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = self.binary(op, lhs, rhs)?;
         }
         Ok(lhs)
     }
 
-    fn parse_unary(&mut self) -> Result<Expr, EvalError> {
+    fn parse_unary(&mut self) -> Result<Node, EvalError> {
+        if self.recursion >= MAX_PARSE_DEPTH {
+            return Err(self.recursion_too_deep());
+        }
+        self.recursion += 1;
+        let result = self.parse_unary_inner();
+        self.recursion -= 1;
+        result
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Node, EvalError> {
         if self.eat(Sym::Not) {
-            return Ok(Expr::Not(Box::new(self.parse_unary()?)));
+            let inner = self.parse_unary()?;
+            let depth = inner.depth + 1;
+            self.check_depth(depth)?;
+            return Ok(Node {
+                expr: Expr::Not(Box::new(inner.expr)),
+                depth,
+            });
         }
         if self.eat(Sym::Minus) {
-            return Ok(Expr::Neg(Box::new(self.parse_unary()?)));
+            let inner = self.parse_unary()?;
+            let depth = inner.depth + 1;
+            self.check_depth(depth)?;
+            return Ok(Node {
+                expr: Expr::Neg(Box::new(inner.expr)),
+                depth,
+            });
         }
         self.parse_primary()
     }
 
-    fn parse_primary(&mut self) -> Result<Expr, EvalError> {
+    fn parse_primary(&mut self) -> Result<Node, EvalError> {
         match self.bump() {
-            Some(Tok::Num(n)) => Ok(Expr::Num(n)),
+            Some(Tok::Num(n)) => Ok(Node {
+                expr: Expr::Num(n),
+                depth: 1,
+            }),
             Some(Tok::Ident(name)) => {
                 if name == "true" {
-                    return Ok(Expr::Bool(true));
+                    return Ok(Node {
+                        expr: Expr::Bool(true),
+                        depth: 1,
+                    });
                 }
                 if name == "false" {
-                    return Ok(Expr::Bool(false));
+                    return Ok(Node {
+                        expr: Expr::Bool(false),
+                        depth: 1,
+                    });
                 }
                 // ドットでつながった識別子列（mascot.environment.floor 等）。
                 // 末尾要素の直後に `(` が続けばメソッド呼び出し
@@ -623,26 +723,35 @@ impl<'s> Parser<'s> {
                 if self.eat(Sym::LParen) {
                     let name = segs.pop().unwrap_or_default();
                     let args = self.parse_args()?;
-                    Ok(Expr::Method {
-                        target: segs.join("."),
-                        name,
-                        args,
+                    let depth = args.iter().map(|a| a.depth).max().unwrap_or(0) + 1;
+                    self.check_depth(depth)?;
+                    Ok(Node {
+                        expr: Expr::Method {
+                            target: segs.join("."),
+                            name,
+                            args: args.into_iter().map(|a| a.expr).collect(),
+                        },
+                        depth,
                     })
                 } else {
-                    Ok(Expr::Path(segs.join(".")))
+                    Ok(Node {
+                        expr: Expr::Path(segs.join(".")),
+                        depth: 1,
+                    })
                 }
             }
             Some(Tok::Sym(Sym::LParen)) => {
-                let expr = self.parse_ternary()?;
+                // 括弧は AST ノードを増やさないため深さは加算しない。
+                let node = self.parse_ternary()?;
                 self.expect(Sym::RParen, "括弧を閉じる `)`")?;
-                Ok(expr)
+                Ok(node)
             }
             Some(tok) => Err(self.err(format!("予期しないトークン: {tok:?}"))),
             None => Err(self.err("式が必要ですが入力が終了しました")),
         }
     }
 
-    fn parse_args(&mut self) -> Result<Vec<Expr>, EvalError> {
+    fn parse_args(&mut self) -> Result<Vec<Node>, EvalError> {
         let mut args = Vec::new();
         if self.eat(Sym::RParen) {
             return Ok(args);
@@ -902,8 +1011,9 @@ fn evaluate(
         toks,
         pos: 0,
         source,
+        recursion: 0,
     };
-    let expr = parser.parse_expr()?;
+    let node = parser.parse_expr()?;
     let mut interp = Interp { source, vars, ctx };
-    interp.eval(&expr)
+    interp.eval(&node.expr)
 }

@@ -2109,3 +2109,56 @@ fn apply_individual_commands_out_of_range_are_noop() {
     assert!(!snap[0].paused);
     assert!(!snap[0].remove_pending);
 }
+
+// =====================================================================
+// タスク #20: settings.toml の scale 検証（非有限 / ≤ 0 → Err）
+// =====================================================================
+
+/// `[imagesets] scale = { Shimeji = <value> }` のみの settings.toml を書く。
+fn write_single_scale(home: &TempHome, value: &str) {
+    let text = format!("[imagesets]\nscale = {{ Shimeji = {value} }}\n");
+    std::fs::write(home.settings_path(), text).expect("settings.toml を書ける");
+}
+
+/// 契約: scale が 0 または負 → SettingsError（設定不正として起動エラー経路）。
+#[test]
+fn settings_load_rejects_non_positive_scale() {
+    for (index, value) in ["0.0", "-1.5", "-0.0"].iter().enumerate() {
+        let home = TempHome::new(&format!("scale_nonpos_{index}"));
+        write_single_scale(&home, value);
+        assert!(
+            Settings::load(&home.settings_path()).is_err(),
+            "scale {value} は Err になるべき"
+        );
+    }
+}
+
+/// 契約: scale が非有限（NaN / +inf / -inf）→ SettingsError。
+#[test]
+fn settings_load_rejects_non_finite_scale() {
+    for (index, value) in ["nan", "inf", "-inf"].iter().enumerate() {
+        let home = TempHome::new(&format!("scale_nonfinite_{index}"));
+        write_single_scale(&home, value);
+        assert!(
+            Settings::load(&home.settings_path()).is_err(),
+            "scale {value}（非有限）は Err になるべき"
+        );
+    }
+}
+
+/// 回帰: 正の有限 scale（0.5 / 2.0）は Ok で値も保持される。
+/// 上限は設けない仕様のため巨大な有限値（1e9）も Ok（フレーム単位スキップで安全化）。
+#[test]
+fn settings_load_accepts_positive_finite_scale_without_upper_bound() {
+    let home = TempHome::new("scale_ok");
+    let text = concat!(
+        "[imagesets]\n",
+        "scale = { A = 0.5, B = 2.0, C = 1000000000.0 }\n",
+    );
+    std::fs::write(home.settings_path(), text).expect("settings.toml を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("正の有限 scale は Ok");
+    assert_eq!(settings.scales().get("A"), Some(&0.5));
+    assert_eq!(settings.scales().get("B"), Some(&2.0));
+    assert_eq!(settings.scales().get("C"), Some(&1e9), "上限は設けない");
+}

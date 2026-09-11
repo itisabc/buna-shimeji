@@ -919,6 +919,72 @@ fn attrs_overly_deep_chain_is_error_not_overflow() {
 }
 
 // =====================================================================
+// #21: 式 AST 深さガード（評価・パースの再帰で abort しない）
+//
+// #16 の MAX_EVAL_DEPTH は attrs 相互再帰（eval_quiet）専用。式そのものの AST が
+// 深い場合（長大な加算チェーンの左深 AST・深い括弧ネスト）は、評価器 Interp::eval
+// やパーサ Parser の再帰がスタックオーバーフローを起こす。深さ上限超過は
+// 既存の EvalError 経路で Err を返し、プロセスを落とさない（公開 API は不変）。
+// 通常規模の式は従来どおり成功する。
+// =====================================================================
+
+/// 契約 1: 長大な加算チェーン（左深 AST）は abort せず Err。
+/// pre-fix は評価の再帰が項数分だけ深くなり、スタックオーバーフローで abort する。
+#[test]
+fn long_additive_chain_is_error_not_stack_overflow() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+
+    const TERMS: usize = 200_000;
+    let mut source = String::with_capacity(TERMS * 2);
+    source.push('1');
+    for _ in 1..TERMS {
+        source.push_str("+1");
+    }
+
+    let var = script_var(&source, true);
+    assert!(
+        vars.eval(&var, &ctx).is_err(),
+        "20 万項の加算チェーンは深さ上限超過で Err（abort しない）"
+    );
+}
+
+/// 契約 2: 深い括弧ネストはパース段の再帰で abort せず Err。
+#[test]
+fn deep_parenthesis_nesting_is_error_not_stack_overflow() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+
+    const DEPTH: usize = 50_000;
+    let source = format!("{}1{}", "(".repeat(DEPTH), ")".repeat(DEPTH));
+
+    let var = script_var(&source, true);
+    assert!(
+        vars.eval(&var, &ctx).is_err(),
+        "5 万段の括弧ネストはパース段の深さ上限超過で Err（abort しない）"
+    );
+}
+
+/// 契約 3: 通常規模（数十ノード）の式は従来どおり Ok（ガードが誤検知しない回帰）。
+#[test]
+fn normal_sized_expression_still_evaluates() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+
+    // 50 項の加算（数十ノード）。1+2+...+50 = 1275
+    let source = (1..=50)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join("+");
+    let var = script_var(&source, true);
+    match vars.eval(&var, &ctx) {
+        Ok(EvalValue::Number(n)) => assert_eq!(n, 1275.0),
+        Ok(other) => panic!("数値のはずが {}", describe_value(&other)),
+        Err(e) => panic!("通常規模の式は Ok のはずが Err: {e:?}"),
+    }
+}
+
+// =====================================================================
 // attrs テスト用ヘルパ（このセクション専用）
 // =====================================================================
 
