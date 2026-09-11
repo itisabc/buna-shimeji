@@ -155,10 +155,14 @@ pub(crate) struct Base {
 
 impl Base {
     pub(crate) fn new(attrs: VarMap, animations: Vec<Animation>) -> Base {
+        let mut vars = crate::config::script::Variables::new();
+        // ActionReference の全属性を子アクションの識別子空間へ載せる
+        // （Java ActionRef.java L66 / ActionBuilder.createVariables L486-507）。
+        vars.set_attrs(attrs.clone());
         Base {
             attrs,
             animations,
-            vars: crate::config::script::Variables::new(),
+            vars,
             start_time: 0,
         }
     }

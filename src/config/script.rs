@@ -20,6 +20,8 @@ use std::hash::{BuildHasher, Hasher};
 
 use thiserror::Error;
 
+use crate::config::VarMap;
+
 /// Java `Variable` 相当（式 or 定数）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Variable {
@@ -97,6 +99,9 @@ pub struct EvalError {
 /// （Java `VariableMap` + `Script.value` 相当）。
 pub struct Variables {
     injected: HashMap<String, f64>,
+    /// ActionReference 由来の属性（Java `ActionRef` / `ActionBuilder.createVariables`
+    /// が子アクションの VariableMap へ載せる全属性）。式の識別子として解決される。
+    attrs: VarMap,
     // キー = (式ソース, allow_value_reset)。値は直近の評価結果。
     cache: HashMap<(String, bool), EvalValue>,
 }
@@ -111,8 +116,15 @@ impl Variables {
     pub fn new() -> Self {
         Variables {
             injected: HashMap::new(),
+            attrs: VarMap::new(),
             cache: HashMap::new(),
         }
+    }
+
+    /// 属性マップを識別子空間へ載せる（Java ActionBuilder.createVariables L486-507
+    /// / ActionRef.java L66 相当）。同名識別子は injected が優先される。
+    pub fn set_attrs(&mut self, attrs: VarMap) {
+        self.attrs = attrs;
     }
 
     /// 注入変数を設定する（FootX / TargetY / Gap 等。同名なら上書き）。
@@ -166,7 +178,7 @@ impl Variables {
                 if let Some(cached) = self.cache.get(&key) {
                     return Ok(*cached);
                 }
-                match evaluate(source, &self.injected, ctx) {
+                match evaluate(self, source, ctx) {
                     Ok(value) => {
                         self.cache.insert(key, value);
                         Ok(value)
@@ -629,7 +641,7 @@ impl<'s> Parser<'s> {
 
 struct Interp<'a> {
     source: &'a str,
-    injected: &'a HashMap<String, f64>,
+    vars: &'a mut Variables,
     ctx: &'a dyn EvalContext,
 }
 
@@ -651,7 +663,7 @@ impl<'a> Interp<'a> {
         ))
     }
 
-    fn eval(&self, expr: &Expr) -> Result<EvalValue, EvalError> {
+    fn eval(&mut self, expr: &Expr) -> Result<EvalValue, EvalError> {
         match expr {
             Expr::Num(n) => Ok(EvalValue::Number(*n)),
             Expr::Bool(b) => Ok(EvalValue::Bool(*b)),
@@ -693,21 +705,21 @@ impl<'a> Interp<'a> {
         }
     }
 
-    fn eval_bool(&self, expr: &Expr, what: &str) -> Result<bool, EvalError> {
+    fn eval_bool(&mut self, expr: &Expr, what: &str) -> Result<bool, EvalError> {
         match self.eval(expr)? {
             EvalValue::Bool(b) => Ok(b),
             got => Err(self.type_err(what, "ブール", got)),
         }
     }
 
-    fn eval_num(&self, expr: &Expr, what: &str) -> Result<f64, EvalError> {
+    fn eval_num(&mut self, expr: &Expr, what: &str) -> Result<f64, EvalError> {
         match self.eval(expr)? {
             EvalValue::Number(n) => Ok(n),
             got => Err(self.type_err(what, "数値", got)),
         }
     }
 
-    fn eval_bin(&self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<EvalValue, EvalError> {
+    fn eval_bin(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<EvalValue, EvalError> {
         use BinOp::{Add, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Sub};
         match op {
             Add | Sub | Mul | Div => {
@@ -747,8 +759,8 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// 識別子パスの解決。優先順位は Math（括弧抜け参照）/ mascot.* / 注入変数。
-    fn eval_path(&self, path: &str) -> Result<EvalValue, EvalError> {
+    /// 識別子パスの解決。優先順位は Math（括弧抜け参照）/ mascot.* / 注入変数 / 属性。
+    fn eval_path(&mut self, path: &str) -> Result<EvalValue, EvalError> {
         if path.starts_with("Math.") {
             // 括弧の無い `Math.random` 等は JS では関数オブジェクト参照となり、
             // 数値演算では NaN になる。資産の括弧抜け式 2 件
@@ -765,14 +777,25 @@ impl<'a> Interp<'a> {
             }
             return Err(self.err(format!("不明な mascot 変数: {path}")));
         }
-        if let Some(n) = self.injected.get(path) {
+        if let Some(n) = self.vars.injected.get(path) {
             return Ok(EvalValue::Number(*n));
+        }
+        // 属性（ActionReference 由来）は Script の再帰評価・キャッシュ意味論を
+        // そのまま踏襲する（同名は injected が優先・上で解決済み）。
+        if let Some(var) = self.vars.attrs.get(path).cloned() {
+            let ctx = self.ctx;
+            return self.vars.eval_quiet(&var, ctx);
         }
         Err(self.err(format!("不明な識別子: {path}")))
     }
 
     /// メソッド呼び出し。対応範囲は Math.random/abs/min と isOn のみ（資産で使用の全種）。
-    fn eval_method(&self, target: &str, name: &str, args: &[Expr]) -> Result<EvalValue, EvalError> {
+    fn eval_method(
+        &mut self,
+        target: &str,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<EvalValue, EvalError> {
         if target == "Math" {
             return match (name, args.len()) {
                 ("random", 0) => Ok(EvalValue::Number(random_unit())),
@@ -803,7 +826,7 @@ impl<'a> Interp<'a> {
 
     /// isOn の引数点。`mascot.anchor` はアンカー点 (anchor.x, anchor.y) に展開する
     /// （資産 21 式すべてがこの形式）。それ以外は評価値を x / y 両方に使う。
-    fn eval_point(&self, arg: &Expr) -> Result<(f64, f64), EvalError> {
+    fn eval_point(&mut self, arg: &Expr) -> Result<(f64, f64), EvalError> {
         if let Expr::Path(path) = arg {
             if path == "mascot.anchor" {
                 let x = self
@@ -844,8 +867,8 @@ fn random_unit() -> f64 {
 
 /// 式 1 本を評価する（パース → AST 評価）。
 fn evaluate(
+    vars: &mut Variables,
     source: &str,
-    injected: &HashMap<String, f64>,
     ctx: &dyn EvalContext,
 ) -> Result<EvalValue, EvalError> {
     let toks = lex(source).map_err(|message| EvalError {
@@ -858,10 +881,6 @@ fn evaluate(
         source,
     };
     let expr = parser.parse_expr()?;
-    let interp = Interp {
-        source,
-        injected,
-        ctx,
-    };
+    let mut interp = Interp { source, vars, ctx };
     interp.eval(&expr)
 }

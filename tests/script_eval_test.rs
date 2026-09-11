@@ -13,6 +13,8 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::{
     describe_value, describe_value_from, eval_bool, eval_bool_injected, eval_num,
     eval_num_injected, eval_ok, norm_ws, script_var, standard_vars, MockCtx,
@@ -20,6 +22,7 @@ use common::{
 use simeji::config::script::{
     to_java_int, ConstantValue, EvalContext, EvalValue, Variable, Variables,
 };
+use simeji::config::VarMap;
 
 // =====================================================================
 // to_java_int（Java (int) キャスト準拠 / JLS 5.1.3）
@@ -678,4 +681,134 @@ fn bake_all_194_asset_expressions_evaluate_without_error() {
         actions.len() + behaviors.len(),
         failures.len()
     );
+}
+
+// =====================================================================
+// ActionReference 属性（attrs）の識別子空間
+//
+// Java ActionRef.java L66 / ActionBuilder.createVariables L486-507:
+// ActionReference の全属性を子アクションの VariableMap（= 式評価の識別子空間）
+// へ載せる。これにより ChaseMouse の Dash 参照が持つ Gap 属性
+// （conf/actions.xml L668-671）を `#{mascot.environment.cursor.x+Gap}` から
+// 解決できる。識別子解決順: Math.* → mascot.* → injected → attrs → 不明エラー。
+// =====================================================================
+
+/// Script 属性（例: "${X+1}"）を attrs に載せ、識別子 A が
+/// attrs → Script → injected 変数 X と再帰解決される。
+#[test]
+fn attrs_script_attribute_resolves_through_injected() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+    vars.inject("X", 1.0);
+    vars.set_attrs(attr_map(&[("A", "${X+1}")]));
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "A"), 2.0);
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "A+1"), 3.0);
+}
+
+/// Constant 属性（数値 / ブール）はその値を識別子として返す。
+#[test]
+fn attrs_constant_attributes_resolve_to_their_values() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+    vars.set_attrs(attr_map(&[("N", "2.5"), ("B", "true")]));
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "N"), 2.5);
+    assert!(eval_attr_bool(&mut vars, &ctx, "B"));
+}
+
+/// 文字列定数（Constant::Text）は評価値（数値 / ブール）にできないため Err。
+#[test]
+fn attrs_text_constant_is_error() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+    vars.set_attrs(attr_map(&[("T", "hello")]));
+    assert!(
+        vars.eval(&script_var("T+1", true), &ctx).is_err(),
+        "文字列定数の attrs は Err（数値 / ブールとして扱えない）"
+    );
+}
+
+/// Java Script.java の needsReevaluation モデルを attrs 経由でも保つ:
+/// `${X+1}` 由来は injected X を変えても reset まで同値、
+/// `#{}` 属性は reset_values() 後に再評価、init() で全再評価。
+#[test]
+fn attrs_honor_java_reset_and_init_cache_semantics() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+    vars.inject("X", 1.0);
+    vars.set_attrs(attr_map(&[("Dollar", "${X+1}"), ("Hash", "#{X+1}")]));
+
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "Dollar"), 2.0);
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "Hash"), 2.0);
+
+    // injected を変えても reset / init を呼ぶまでどちらもキャッシュが返る
+    vars.inject("X", 10.0);
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "Dollar"), 2.0);
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "Hash"), 2.0);
+
+    // reset_values()（フレーム開始）: #{} のみ再評価、${} はキャッシュ維持
+    vars.reset_values();
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "Hash"), 11.0);
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "Dollar"), 2.0);
+
+    // init()（アクション開始）: ${} も再評価
+    vars.init();
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "Dollar"), 11.0);
+    assert_eq!(eval_attr_num(&mut vars, &ctx, "Hash"), 11.0);
+}
+
+/// 回帰: attrs を設定しても、injected にも attrs にも無い識別子は従来通り Err。
+#[test]
+fn attrs_unknown_identifier_still_errors() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+    vars.set_attrs(attr_map(&[("A", "${1+1}")]));
+    assert!(
+        vars.eval(&script_var("Nope+1", true), &ctx).is_err(),
+        "未知識別子は attrs 導入後も Err"
+    );
+}
+
+/// 回帰: 同名の識別子は injected が attrs に優先する。
+#[test]
+fn injected_takes_priority_over_attrs() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+    vars.inject("X", 5.0);
+    vars.set_attrs(attr_map(&[("X", "${1+1}")]));
+    assert_eq!(
+        eval_attr_num(&mut vars, &ctx, "X"),
+        5.0,
+        "同名は injected が attrs より優先される"
+    );
+}
+
+// =====================================================================
+// attrs テスト用ヘルパ（このセクション専用）
+// =====================================================================
+
+/// (名前, 生の属性値) から VarMap を作る（Variable::parse で Script/Constant 化）。
+fn attr_map(pairs: &[(&str, &str)]) -> VarMap {
+    let mut map = BTreeMap::new();
+    for (name, value) in pairs {
+        map.insert((*name).to_string(), Variable::parse(value));
+    }
+    map
+}
+
+/// 永続 `Variables` で式を数値評価する（トップレベルは #{} として評価）。
+fn eval_attr_num(vars: &mut Variables, ctx: &MockCtx, source: &str) -> f64 {
+    match vars.eval(&script_var(source, true), ctx) {
+        Ok(EvalValue::Number(n)) => n,
+        Ok(EvalValue::Bool(_)) => panic!("式 {source:?} は数値のはずが Bool"),
+        Err(e) => panic!("式 {source:?} の評価が Err: {e:?}"),
+    }
+}
+
+/// 永続 `Variables` で式をブール評価する。
+fn eval_attr_bool(vars: &mut Variables, ctx: &MockCtx, source: &str) -> bool {
+    match vars.eval(&script_var(source, true), ctx) {
+        Ok(EvalValue::Bool(b)) => b,
+        Ok(EvalValue::Number(_)) => panic!("式 {source:?} はブールのはずが Number"),
+        Err(e) => panic!("式 {source:?} の評価が Err: {e:?}"),
+    }
 }

@@ -2094,3 +2094,90 @@ fn inline_top_level_action_caller_params_win() {
         "caller params（true）が Inline 自身の属性（false）を上書きする"
     );
 }
+
+// =====================================================================
+// ActionReference 属性の子アクションへの伝播（Java ActionRef.java L66 /
+// ActionBuilder.createVariables L486-507）
+//
+// ChaseMouse 実資産の Dash 参照は Ref 側属性 `TargetX`
+// （#{mascot.environment.cursor.x+Gap}）と `Gap`（${...}）を持つ
+// （conf/actions.xml L668-671）。Ref の全属性は子アクションの識別子空間
+// （VariableMap）へ載る必要があり、Gap が解決できないと式評価エラー →
+// Mascot dispose になる（本修正の再現経路）。
+// =====================================================================
+
+/// ActionDef を再帰的に辿り、指定名の ActionReference が持つ attrs を返す
+/// （`required_attr` を持つ Ref のみ）。実資産からの Ref 属性取り出し用。
+fn find_ref_attrs(def: &ActionDef, ref_name: &str, required_attr: &str) -> Option<VarMap> {
+    let children = match def {
+        ActionDef::Sequence { children, .. } | ActionDef::Select { children, .. } => children,
+        _ => return None,
+    };
+    for child in children {
+        match child {
+            SequenceChild::Ref { name, attrs }
+                if name == ref_name && attrs.contains_key(required_attr) =>
+            {
+                return Some(attrs.clone());
+            }
+            SequenceChild::Inline(inner) => {
+                if let Some(found) = find_ref_attrs(inner, ref_name, required_attr) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 実資産統合: ChaseMouse の Gap 付き Dash 参照を実パースから取り出して
+/// build_action で構築 → init がエラーにならない（現状は Gap 未解決で RED）。
+/// 続けて tick させ、カーソル（左）方向へ anchor.x が動き、Gap = ±数百 px の
+/// 有限値に由来する TargetX へ収束することを観測する（Math.random の値そのものは
+/// pin せず範囲で検証）。
+#[test]
+fn chase_mouse_gap_dash_from_real_assets_resolves_and_moves() {
+    let cfg = real_actions_config();
+    let chase = cfg
+        .actions
+        .get("ChaseMouse")
+        .expect("実資産に ChaseMouse が存在する");
+    let ref_attrs =
+        find_ref_attrs(chase, "Dash", "Gap").expect("ChaseMouse に Gap 付き Dash 参照が存在する");
+    assert!(ref_attrs.contains_key("TargetX"), "Ref 側に TargetX を持つ");
+    assert!(ref_attrs.contains_key("Gap"), "Ref 側に Gap を持つ");
+
+    let env = SynthEnv::new(); // cursor (300, 200) / work area bottom 1040
+    let mut rng = FakeRng::repeated(0.5, 400);
+    let mut m = mascot_at((1000, 1040)); // 床上
+
+    let mut action = build_action(&cfg, "Dash", &ref_attrs, 1.0)
+        .expect("実資産 Dash 定義 + Ref 側 Gap/TargetX を build_action で構築できる");
+
+    // init が TargetX="#{mascot.environment.cursor.x+Gap}" を評価する。
+    // Gap が attrs として解決されなければ Err（現状 RED）。
+    action
+        .init(&mut m, &env, &mut rng)
+        .expect("Gap 属性が識別子として解決され init がエラーにならない");
+
+    let start_x = m.anchor().0;
+    let cursor_x = env.cursor.x;
+    for _ in 0..150 {
+        action
+            .next(&mut m, &env, &mut rng)
+            .expect("tick がエラーにならない");
+    }
+
+    let final_x = m.anchor().0;
+    assert!(
+        final_x < start_x,
+        "カーソルが左にあるため anchor.x は減少する（{start_x} -> {final_x}）"
+    );
+    assert!(
+        (cursor_x..cursor_x + 200).contains(&final_x),
+        "Gap は有限（anchor.x > cursor.x 側は [0,200)）→ TargetX=cursor.x+Gap は \
+         [cursor.x, cursor.x+200) に収束する（cursor={cursor_x}, anchor.x={final_x}）"
+    );
+    assert_eq!(m.anchor().1, 1040, "床境界（Floor）に留まる");
+}
