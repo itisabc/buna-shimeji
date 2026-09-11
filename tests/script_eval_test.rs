@@ -783,6 +783,142 @@ fn injected_takes_priority_over_attrs() {
 }
 
 // =====================================================================
+// #16: 再帰深さガード（自己参照 / 相互参照 / 過深チェーン）
+//
+// attrs の式は eval_path → Variables::eval_quiet を相互再帰して解決されるため、
+// 循環参照があるとガード無しでは無限再帰しスタックオーバーフローで abort する
+// （Java の StackOverflowError 相当）。深さ上限 64 超過時は既存の EvalError 経路で
+// Err を返し、プロセスを落とさない。公開 API のシグネチャは不変。
+// =====================================================================
+
+/// 契約 1: 自己参照 attrs（`${X}` / `${X+1}`）はクラッシュせず Err。
+#[test]
+fn attrs_self_reference_errors_without_stack_overflow() {
+    let ctx = MockCtx::new();
+
+    let mut direct = Variables::new();
+    direct.set_attrs(attr_map(&[("X", "${X}")]));
+    assert!(
+        direct.eval(&script_var("X", true), &ctx).is_err(),
+        "自己参照 attrs X = ${{X}} は Err（無限再帰しない）"
+    );
+
+    let mut plus = Variables::new();
+    plus.set_attrs(attr_map(&[("X", "${X+1}")]));
+    assert!(
+        plus.eval(&script_var("X", true), &ctx).is_err(),
+        "自己参照 attrs X = ${{X+1}} は Err（無限再帰しない）"
+    );
+}
+
+/// 契約 2: 相互参照 attrs（A → B → A）は Err。
+#[test]
+fn attrs_mutual_reference_errors_without_stack_overflow() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+    vars.set_attrs(attr_map(&[("A", "${B}"), ("B", "${A}")]));
+    assert!(
+        vars.eval(&script_var("A", true), &ctx).is_err(),
+        "相互参照 attrs A=${{B}}, B=${{A}} は Err（無限再帰しない）"
+    );
+}
+
+/// 契約 3: 正当な参照チェーンは従来どおり解決する（回帰）。
+/// attrs 10 段連鎖と、attrs → injected / mascot への参照を確認する。
+#[test]
+fn attrs_valid_chain_still_resolves() {
+    let ctx = MockCtx::new();
+
+    // A0=${A1+1}, A1=${A2+1}, ..., A8=${A9+1}, A9=${X}（injected X=1）→ A0 = 10
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for i in 0..9 {
+        pairs.push((format!("A{i}"), format!("${{A{}+1}}", i + 1)));
+    }
+    pairs.push(("A9".to_string(), "${X}".to_string()));
+    let refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    let mut vars = Variables::new();
+    vars.inject("X", 1.0);
+    vars.set_attrs(attr_map(&refs));
+    assert_eq!(
+        eval_attr_num(&mut vars, &ctx, "A0"),
+        10.0,
+        "10 段の attrs 連鎖が解決される"
+    );
+
+    // attrs から mascot 変数への参照（injected 経由は上の連鎖と既存テストで担保）
+    let mut vars2 = Variables::new();
+    vars2.set_attrs(attr_map(&[("Pos", "${mascot.anchor.x+1}")]));
+    assert_eq!(
+        eval_attr_num(&mut vars2, &ctx, "Pos"),
+        101.0,
+        "attrs → mascot 参照が解決される"
+    );
+}
+
+/// 契約 4: 深さ超過 Err の後でも同じ Variables が壊れない。
+/// 深いチェーン（上限超過）を一度評価した直後、同じ Variables で別式を正常評価できる
+/// ことを pin する（再帰深さカウンタが復元され、状態が壊れない）。
+#[test]
+fn variables_recover_after_depth_limit_error() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+    vars.inject("X", 1.0);
+
+    // 200 段チェーン（上限 64 超過）。ガード実装後は Err、未実装なら Ok だが、
+    // 結果自体は問わず「直後の評価が成功すること」が本テストの契約。
+    let depth = 200usize;
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for i in 0..depth - 1 {
+        pairs.push((format!("D{i}"), format!("${{D{}+1}}", i + 1)));
+    }
+    pairs.push((format!("D{}", depth - 1), "${X}".to_string()));
+    let refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    vars.set_attrs(attr_map(&refs));
+
+    let _ = vars.eval(&script_var("D0", true), &ctx);
+
+    // カウンタが復元されていなければ、以降の評価も深さ超過で Err になる。
+    assert_eq!(
+        eval_attr_num(&mut vars, &ctx, "1+1"),
+        2.0,
+        "深さ超過 Err の後も別式を正常評価できる（カウンタ復元）"
+    );
+}
+
+/// 契約 5: 過度に深いチェーン（500 段）は上限 64 超過として Err を返す
+/// （スタックオーバーフローで abort しない）。
+#[test]
+fn attrs_overly_deep_chain_is_error_not_overflow() {
+    let ctx = MockCtx::new();
+    let mut vars = Variables::new();
+    vars.inject("X", 1.0);
+
+    let depth = 500usize;
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for i in 0..depth - 1 {
+        pairs.push((format!("D{i}"), format!("${{D{}+1}}", i + 1)));
+    }
+    pairs.push((format!("D{}", depth - 1), "${X}".to_string()));
+    let refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    vars.set_attrs(attr_map(&refs));
+
+    assert!(
+        vars.eval(&script_var("D0", true), &ctx).is_err(),
+        "500 段チェーンは深さ上限超過で Err（abort しない）"
+    );
+}
+
+// =====================================================================
 // attrs テスト用ヘルパ（このセクション専用）
 // =====================================================================
 

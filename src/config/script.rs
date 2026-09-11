@@ -95,6 +95,11 @@ pub struct EvalError {
     pub message: String,
 }
 
+/// attrs 式が `eval_quiet` → `eval_path` → `eval_quiet` と相互再帰する際の深さ上限。
+/// 自己参照 / 相互参照による無限再帰を防ぐ（Java は StackOverflowError で破綻するが、
+/// Rust 側は Err へ落とす。AGENTS.md §5-1 例外条項）。正当な資産チェーンは 10 段程度。
+const MAX_EVAL_DEPTH: u32 = 64;
+
 /// アクション単位の評価状態。注入変数（FootX / TargetY / Gap 等）+ スクリプト値キャッシュ
 /// （Java `VariableMap` + `Script.value` 相当）。
 pub struct Variables {
@@ -104,6 +109,8 @@ pub struct Variables {
     attrs: VarMap,
     // キー = (式ソース, allow_value_reset)。値は直近の評価結果。
     cache: HashMap<(String, bool), EvalValue>,
+    /// `eval_quiet` の現在の再帰深さ。エラー経路を含む全経路で復元する。
+    eval_depth: u32,
 }
 
 impl Default for Variables {
@@ -118,6 +125,7 @@ impl Variables {
             injected: HashMap::new(),
             attrs: VarMap::new(),
             cache: HashMap::new(),
+            eval_depth: 0,
         }
     }
 
@@ -168,7 +176,18 @@ impl Variables {
         var: &Variable,
         ctx: &dyn EvalContext,
     ) -> Result<EvalValue, EvalError> {
-        match var {
+        if self.eval_depth >= MAX_EVAL_DEPTH {
+            return Err(EvalError {
+                expr: match var {
+                    Variable::Script { source, .. } => source.clone(),
+                    Variable::Constant(ConstantValue::Text(t)) => t.clone(),
+                    Variable::Constant(_) => String::new(),
+                },
+                message: format!("式評価の再帰が深すぎます（上限 {MAX_EVAL_DEPTH} 段）"),
+            });
+        }
+        self.eval_depth += 1;
+        let result = match var {
             Variable::Constant(value) => const_eval(value),
             Variable::Script {
                 source,
@@ -176,17 +195,21 @@ impl Variables {
             } => {
                 let key = (source.clone(), *allow_value_reset);
                 if let Some(cached) = self.cache.get(&key) {
-                    return Ok(*cached);
-                }
-                match evaluate(self, source, ctx) {
-                    Ok(value) => {
-                        self.cache.insert(key, value);
-                        Ok(value)
+                    Ok(*cached)
+                } else {
+                    match evaluate(self, source, ctx) {
+                        Ok(value) => {
+                            self.cache.insert(key, value);
+                            Ok(value)
+                        }
+                        Err(err) => Err(err),
                     }
-                    Err(err) => Err(err),
                 }
             }
-        }
+        };
+        // 早期 return はせず全経路で復元する（Err 直後の正常評価を保証）。
+        self.eval_depth -= 1;
+        result
     }
 }
 
