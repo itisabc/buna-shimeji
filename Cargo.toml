@@ -32,3 +32,7 @@ anyhow = "1"
 # ログ
 log = "0.4"
 env_logger = "0.11"
+
+[build-dependencies]
+# exe アイコン埋め込み（Java 版 icon.ico 準拠、タスク #24）
+winresource = "0.1"
