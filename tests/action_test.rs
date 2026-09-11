@@ -16,8 +16,8 @@
 //! - EnvironmentView 追加 4 メソッド（§1.8(f)）: `breeding_allowed() -> bool` /
 //!   `transients_enabled() -> bool` / `transformation_allowed() -> bool` /
 //!   `queue_spawn(image_set_name: &str, anchor: (i32, i32), look_right: bool,
-//!   behavior_name: &str)`（**#8 で 4 引数化**: Breed が BornBehaviour 名を
-//!   第 4 引数で queue へ渡す契約・design §1.8(f) 補完）
+//!   behavior_name: &str)`（**#8 で 4 引数化**: Breed が実 XML 属性 BornBehavior の
+//!   名を第 4 引数で queue へ渡す契約・design §1.8(f) 補完）
 //! - config 変更: `Animation { condition, poses, is_turn }` /
 //!   `ActionDef::Sequence/Select { …, is_loop: bool }`（design §1.8(g)・Rust 予約語
 //!   `loop` のため `is_loop`）/ `ActionDef::* { border: Option<BorderType> }`
@@ -34,8 +34,8 @@ use std::sync::Arc;
 
 use simeji::config::script::{EvalContext, Variable};
 use simeji::config::{
-    ActionDef, ActionsConfig, Animation, BehaviorDef, BehaviorEntry, BorderType, Pose,
-    SequenceChild, VarMap,
+    parse_actions, ActionDef, ActionsConfig, Animation, BehaviorDef, BehaviorEntry, BorderType,
+    Pose, SequenceChild, VarMap,
 };
 use simeji::mascot::action::{build_action, create, ActionKind};
 use simeji::mascot::behavior::{
@@ -49,7 +49,7 @@ use simeji::render::imageset::{Frame, ImageSet};
 // 合成モニタ状態の test-double
 // =====================================================================
 
-/// queue_spawn の呼び出し記録（#8: 第 4 引数 = BornBehaviour 名を pin）。
+/// queue_spawn の呼び出し記録（#8: 第 4 引数 = 実 XML 属性 BornBehavior 名を pin）。
 #[derive(Debug, Clone, PartialEq)]
 struct SpawnRec {
     image_set_name: String,
@@ -891,6 +891,65 @@ fn fall_initial_velocity_and_gravity_scale_with_env_scaling() {
     );
 }
 
+/// Fall の抵抗値は実資産 Falling と同じ米綴り属性 `RegistanceX` / `RegistanceY` で
+/// 与える。非既定値を渡すと減衰式（Fall.java L107-108）に反映され、既定値
+/// 0.05 / 0.1 の誤読では導かれない移動量になる。
+///
+/// X: InitialVX=10・RegistanceX=0.5・Gravity=0 → vX = 10 − 10*0.5 = 5 → dx=5 →
+///    (1000,500) → (1005,500)（旧キー "ResistanceX" 誤読時は vX=9.5・dx=10）
+/// Y: InitialVY=10・RegistanceY=0.5・Gravity=0 → vY = 10 − 10*0.5 = 5 → dy=5 →
+///    (500,500) → (500,505)（旧キー "ResistanceY" 誤読時は vY=9・dy=9）
+#[test]
+fn fall_registance_attributes_are_read_and_applied() {
+    // X 成分: 水平減衰
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((1000, 500));
+    let table = single_table("X", 1);
+    let action = create(
+        ActionKind::Fall,
+        &attrs(&[
+            ("InitialVX", "10"),
+            ("RegistanceX", "0.5"),
+            ("Gravity", "0"),
+        ]),
+        vec![anim(None, false, vec![pose("p.png", (64, 64), (0, 0), 5)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(
+        m.anchor(),
+        (1005, 500),
+        "RegistanceX=0.5: vX = 10 - 10*0.5 = 5（ResistanceX 誤読なら既定 0.05 → dx=10）"
+    );
+
+    // Y 成分: 垂直減衰
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((500, 500));
+    let table = single_table("X", 1);
+    let action = create(
+        ActionKind::Fall,
+        &attrs(&[
+            ("InitialVY", "10"),
+            ("RegistanceY", "0.5"),
+            ("Gravity", "0"),
+        ]),
+        vec![anim(None, false, vec![pose("p.png", (64, 64), (0, 0), 5)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(
+        m.anchor(),
+        (500, 505),
+        "RegistanceY=0.5: vY = 10 - 10*0.5 = 5（ResistanceY 誤読なら既定 0.1 → dy=9）"
+    );
+}
+
 // =====================================================================
 // Jump 契約（Jump.java L43-97）
 // =====================================================================
@@ -1470,11 +1529,7 @@ fn breed_spawns_once_at_penultimate_frame() {
     // アニメ duration 2 → 最終フレーム（time 1）で breed
     let action = create(
         ActionKind::Breed,
-        &attrs(&[
-            ("BornX", "16"),
-            ("BornY", "32"),
-            ("BornBehaviour", "PullUp"),
-        ]),
+        &attrs(&[("BornX", "16"), ("BornY", "32"), ("BornBehavior", "PullUp")]),
         vec![anim(None, false, vec![pose("p.png", (64, 64), (0, 0), 2)])],
         1.0,
     );
@@ -1496,7 +1551,7 @@ fn breed_spawns_once_at_penultimate_frame() {
             behavior_name: "PullUp".to_string(),
         }],
         "lookRight=true → BornX を減算（L84-89）・BornY を加算・親の lookRight を引継・\
-         BornBehaviour 名（\"PullUp\"）が queue の第 4 引数で伝播する（#8）"
+         実 XML 属性 BornBehavior 名（\"PullUp\"）が queue の第 4 引数で伝播する（#8）"
     );
 }
 
@@ -1610,8 +1665,63 @@ fn breed_gates_breeding_and_transient_settings() {
     assert_eq!(
         env.spawns.borrow()[0].behavior_name,
         "",
-        "BornBehaviour 属性省略時は既定値（空文字列・BorderedAction BREED_DEFAULT_BORN_BEHAVIOR）\
-         が第 4 引数で渡る（#8）"
+        "実 XML 属性 BornBehavior 省略時は既定値（空文字列・BorderedAction \
+         BREED_DEFAULT_BORN_BEHAVIOR）が第 4 引数で渡る（#8）"
+    );
+}
+
+/// 実資産 conf/actions.xml をパースする（Breed の「実資産パース → 構築 → spawn 名」
+/// 統合経路用。合成属性だけでは属性名の取り違えを検出できない穴を塞ぐ）。
+fn real_actions_config() -> ActionsConfig {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("conf")
+        .join("actions.xml");
+    parse_actions(&path).expect("conf/actions.xml をパースできる")
+}
+
+/// 実資産から構築した Breed を完走させ、spawn キューに積まれた子 behavior 名を返す。
+fn real_breed_child_behavior_name(action_name: &str) -> String {
+    let cfg = real_actions_config();
+    let env = SynthEnv::new();
+    let action = build_action(&cfg, action_name, &VarMap::new(), 1.0)
+        .unwrap_or_else(|e| panic!("実資産 {action_name} を構築できる: {e:?}"));
+    let mut m = mascot_at((1000, 500));
+    let mut rng = FakeRng::repeated(0.5, 256);
+    set_action(&mut m, &env, action_name, Ok(action), &mut rng).unwrap();
+    let table = single_table(action_name, 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+    // 実資産 Breed のアニメ長は最大 140 tick（PullUpShimeji1）。余裕を持って回す。
+    for _ in 0..200 {
+        m.tick(&env, &table, &mut factory, &mut rng);
+        if !env.spawns.borrow().is_empty() {
+            break;
+        }
+    }
+    let spawns = env.spawns.borrow();
+    assert_eq!(
+        spawns.len(),
+        1,
+        "実資産 {action_name} は子を 1 体 spawn する"
+    );
+    spawns[0].behavior_name.clone()
+}
+
+/// 実資産の Breed アクションは実 XML 属性 BornBehavior を子 behavior 名として
+/// spawn キューへ伝播する（Breed.java L93 getBornBehavior 相当）:
+/// - Divide1: BornBehavior="Divided" → "Divided"
+/// - PullUpShimeji1: BornBehavior="PullUp" → "PullUp"
+/// 論理キー BornBehaviour を生 XML 名として誤読すると空文字になり RED。
+#[test]
+fn breed_from_real_actions_spawns_declared_born_behavior_name() {
+    assert_eq!(
+        real_breed_child_behavior_name("Divide1"),
+        "Divided",
+        "実資産 Divide1 の BornBehavior=\"Divided\" が子 behavior 名として伝播する"
+    );
+    assert_eq!(
+        real_breed_child_behavior_name("PullUpShimeji1"),
+        "PullUp",
+        "実資産 PullUpShimeji1 の BornBehavior=\"PullUp\" が子 behavior 名として伝播する"
     );
 }
 

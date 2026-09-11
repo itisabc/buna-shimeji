@@ -876,7 +876,8 @@ impl BreedAction {
         let born_behavior = self
             .bordered
             .base
-            .text_attr("BornBehaviour")
+            // Java 論理キー BornBehaviour は schema により生 XML 名 BornBehavior へ変換される
+            .text_attr("BornBehavior")
             .unwrap_or_else(|| BREED_DEFAULT_BORN_BEHAVIOR.to_string());
         let born_interval = self.bordered.base.num_attr(
             mascot,

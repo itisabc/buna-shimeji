@@ -713,8 +713,8 @@ pub(crate) fn fall_tick(
     }
 
     // Java L107-108 逐語（velocity は init で scale 済みのため gravity のみ scale）
-    let rx = a.base.f64_attr(mascot, env, "ResistanceX", 0.05)?;
-    let ry = a.base.f64_attr(mascot, env, "ResistanceY", 0.1)?;
+    let rx = a.base.f64_attr(mascot, env, "RegistanceX", 0.05)?;
+    let ry = a.base.f64_attr(mascot, env, "RegistanceY", 0.1)?;
     let gravity = a.base.f64_attr(mascot, env, "Gravity", 2.0)?;
     a.velocity_x -= a.velocity_x * rx; // L107
     a.velocity_y = a.velocity_y - a.velocity_y * ry + gravity * a.scaling; // L108
