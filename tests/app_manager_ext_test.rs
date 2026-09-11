@@ -119,6 +119,7 @@ fn empty_image_set(name: &str) -> Arc<ImageSet> {
         name: name.to_string(),
         frames: BTreeMap::new(),
         warnings: Vec::new(),
+        scale: 1.0,
     })
 }
 

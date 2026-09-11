@@ -123,7 +123,7 @@ struct SynthEnv {
 }
 
 fn union_area(areas: &[AreaState]) -> AreaState {
-    let mut u = areas[0].clone();
+    let mut u = areas[0];
     for a in &areas[1..] {
         u.left = u.left.min(a.left);
         u.top = u.top.min(a.top);
@@ -231,9 +231,9 @@ impl EnvironmentView for SynthEnv {
 
     fn work_area_state(&self, slot: AreaSlot) -> AreaState {
         match slot {
-            AreaSlot::WorkArea(i) => self.work_areas[i].clone(),
-            AreaSlot::Screen(i) => self.screens[i].clone(),
-            AreaSlot::ActiveWindow => self.active_window.clone(),
+            AreaSlot::WorkArea(i) => self.work_areas[i],
+            AreaSlot::Screen(i) => self.screens[i],
+            AreaSlot::ActiveWindow => self.active_window,
             AreaSlot::Invisible => AreaState {
                 left: 0,
                 top: 0,
@@ -249,7 +249,7 @@ impl EnvironmentView for SynthEnv {
     }
 
     fn active_window(&self) -> AreaState {
-        self.active_window.clone()
+        self.active_window
     }
 
     fn active_window_id(&self) -> i64 {

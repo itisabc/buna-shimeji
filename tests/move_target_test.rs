@@ -152,7 +152,7 @@ impl EnvironmentView for SynthEnv {
     }
 
     fn work_area_at(&self, x: i32, y: i32) -> AreaSlot {
-        if x >= 0 && x <= 1920 && y >= 0 && y <= 1040 {
+        if (0..=1920).contains(&x) && (0..=1040).contains(&y) {
             AreaSlot::WorkArea(0)
         } else {
             AreaSlot::Invisible
@@ -161,7 +161,7 @@ impl EnvironmentView for SynthEnv {
 
     fn work_area_state(&self, slot: AreaSlot) -> AreaState {
         match slot {
-            AreaSlot::WorkArea(0) => self.work_area.borrow().clone(),
+            AreaSlot::WorkArea(0) => *self.work_area.borrow(),
             AreaSlot::Screen(0) => area(0, 0, 1920, 1080, 0),
             _ => AreaState {
                 left: 0,
@@ -178,7 +178,7 @@ impl EnvironmentView for SynthEnv {
     }
 
     fn active_window(&self) -> AreaState {
-        self.active_window.clone()
+        self.active_window
     }
 
     fn active_window_id(&self) -> i64 {
@@ -272,6 +272,7 @@ fn image_set_with(frames: &[(&str, u32, u32)]) -> Arc<ImageSet> {
         name: "TestSet".to_string(),
         frames: map,
         warnings: Vec::new(),
+        scale: 1.0,
     })
 }
 

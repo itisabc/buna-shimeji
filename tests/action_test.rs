@@ -172,7 +172,7 @@ impl EnvironmentView for SynthEnv {
     }
 
     fn work_area_at(&self, x: i32, y: i32) -> AreaSlot {
-        if x >= 0 && x <= 1920 && y >= 0 && y <= 1040 {
+        if (0..=1920).contains(&x) && (0..=1040).contains(&y) {
             AreaSlot::WorkArea(0)
         } else {
             AreaSlot::Invisible
@@ -181,7 +181,7 @@ impl EnvironmentView for SynthEnv {
 
     fn work_area_state(&self, slot: AreaSlot) -> AreaState {
         match slot {
-            AreaSlot::WorkArea(0) => self.work_area.borrow().clone(),
+            AreaSlot::WorkArea(0) => *self.work_area.borrow(),
             AreaSlot::Screen(0) => area(0, 0, 1920, 1080, 0),
             _ => AreaState {
                 left: 0,
@@ -198,7 +198,7 @@ impl EnvironmentView for SynthEnv {
     }
 
     fn active_window(&self) -> AreaState {
-        self.active_window.clone()
+        self.active_window
     }
 
     fn active_window_id(&self) -> i64 {
@@ -305,15 +305,26 @@ impl BehaviorFactory for FnFactory {
     }
 }
 
+#[allow(dead_code)]
 fn empty_image_set() -> Arc<ImageSet> {
+    empty_image_set_with_scale(1.0)
+}
+
+/// 解決済み scale を保持する空 ImageSet（`ImageSet.scale` 契約・既定 1.0）。
+fn empty_image_set_with_scale(scale: f64) -> Arc<ImageSet> {
     Arc::new(ImageSet {
         name: "TestSet".to_string(),
         frames: BTreeMap::new(),
         warnings: Vec::new(),
+        scale,
     })
 }
 
 fn image_set_with(frames: &[(&str, u32, u32)]) -> Arc<ImageSet> {
+    image_set_with_scale(frames, 1.0)
+}
+
+fn image_set_with_scale(frames: &[(&str, u32, u32)], scale: f64) -> Arc<ImageSet> {
     let mut map = BTreeMap::new();
     for (name, width, height) in frames {
         map.insert(
@@ -329,11 +340,22 @@ fn image_set_with(frames: &[(&str, u32, u32)]) -> Arc<ImageSet> {
         name: "TestSet".to_string(),
         frames: map,
         warnings: Vec::new(),
+        scale,
     })
 }
 
 fn mascot_at(anchor: (i32, i32)) -> Mascot {
-    Mascot::new("TestSet", empty_image_set(), anchor)
+    mascot_at_scale(anchor, 1.0)
+}
+
+/// set scale（`ImageSet.scale`）付きのマスコット（空画像セット）。
+fn mascot_at_scale(anchor: (i32, i32), scale: f64) -> Mascot {
+    Mascot::new("TestSet", empty_image_set_with_scale(scale), anchor)
+}
+
+/// set scale（`ImageSet.scale`）付きのマスコット（フレームあり）。
+fn mascot_with_scale(anchor: (i32, i32), frames: &[(&str, u32, u32)], scale: f64) -> Mascot {
+    Mascot::new("TestSet", image_set_with_scale(frames, scale), anchor)
 }
 
 /// 画面内 bounds を保証する合成フレーム状態（128x128・center (64,64)）。
@@ -858,8 +880,10 @@ fn fall_lands_on_floor_exactly_and_completes() {
     assert_eq!(m.anchor(), (500, 1040), "遷移後も床に置かれたまま");
 }
 
-/// 初速は init の scale で拡大（Fall.java L82-83: velocityX = InitialVX * scaling）。
-/// scaling(=env.scaling) 2.0・InitialVX=-2 → velocityX -4・gravity も scale 済み
+/// 初速は init のマスコット set scale で拡大（Fall.java L82-83:
+/// velocityX = InitialVX * scaling）。scale は env.scaling ではなく
+/// `Mascot::scale()`（= ImageSet.scale）から取る（env.scaling=7.0 でも不変）。
+/// set scale 2.0・InitialVX=-2 → velocityX -4・gravity も scale 済み
 /// （2*2=4）→ Java 手計算（Fall.java L107-121 逐語・modX/modY 残差込み）:
 ///   velocityX = -4 - (-4)*0.05 = -3.8
 ///   modX = 0 + (-3.8 % 1) = -0.8（Java `%` は符号保持）
@@ -867,11 +891,11 @@ fn fall_lands_on_floor_exactly_and_completes() {
 ///   velocityY = 4・modY = 4%1 = 0 → dy = 4
 ///   → (500 + round(-4.6), 500 + 4) = (495, 504)
 #[test]
-fn fall_initial_velocity_and_gravity_scale_with_env_scaling() {
+fn fall_initial_velocity_and_gravity_scale_with_mascot_set_scale() {
     let mut env = SynthEnv::new();
-    env.scaling_value = 2.0;
+    env.scaling_value = 7.0; // 非依存 pin（set scale 2.0 が採用される）
     let mut rng = FakeRng::repeated(0.5, 16);
-    let mut m = mascot_at((500, 500));
+    let mut m = mascot_at_scale((500, 500), 2.0);
     let table = single_table("X", 1);
 
     let action = create(
@@ -993,8 +1017,8 @@ fn fall_initial_vx_non_integer_truncates_before_scaling() {
     );
 }
 
-/// 契約 2: scaling ≠ 1 でも適用順序は「切り捨て → scaling」。
-/// InitialVX=`${-15.7}`・scale 2.0:
+/// 契約 2: マスコット set scale ≠ 1 でも適用順序は「切り捨て → scaling」。
+/// InitialVX=`${-15.7}`・set scale 2.0（env.scaling=7.0 で非依存を pin）:
 ///   正: vX = (int)(-15.7) * 2.0 = -30
 ///       tick1: vX = -30 - (-30*0.05) = -28.5・modX = -0.5
 ///              dx = Java round(-29.0) = -29 → (500-29, 500+4) = (471, 504)
@@ -1004,9 +1028,9 @@ fn fall_initial_vx_non_integer_truncates_before_scaling() {
 #[test]
 fn fall_initial_vx_truncates_before_scaling_order() {
     let mut env = SynthEnv::new();
-    env.scaling_value = 2.0;
+    env.scaling_value = 7.0; // 非依存 pin（set scale 2.0 が採用される）
     let mut rng = FakeRng::repeated(0.5, 16);
-    let mut m = mascot_at((500, 500));
+    let mut m = mascot_at_scale((500, 500), 2.0);
     let table = single_table("X", 1);
 
     let action = create(
@@ -1409,16 +1433,17 @@ fn dragged_offset_type_origin_uses_pre_apply_image_center() {
 /// が null だと NPE（正本では到達不能経路・apply が必ず画像を用意するため）。
 /// Rust は契約として「image None なら Origin 補正をスキップし raw offset×scaling
 /// を使う」を pin する（防御的フォールバック・Java NPE 相当経路の替わり）。
-/// scaling=2.0・OffsetX=5・OffsetY=10 → raw offset = (round(10), round(20)) = (10, 20)
+/// set scale 2.0（env.scaling=7.0 で非依存を pin）・OffsetX=5・OffsetY=10 →
+/// raw offset = (round(10), round(20)) = (10, 20)
 /// → anchor = cursor + (10, 20) = (110, 120)。
 #[test]
 fn dragged_offset_type_origin_skips_center_correction_when_image_none() {
     let mut env = SynthEnv::new();
-    env.scaling_value = 2.0;
+    env.scaling_value = 7.0; // 非依存 pin（set scale 2.0 が採用される）
     env.cursor.x = 100;
     env.cursor.y = 100;
     // 空 image set → 画像は最初から None・アニメ pose も欠落フレームで None のまま
-    let mut m = mascot_at((100, 100));
+    let mut m = mascot_at_scale((100, 100), 2.0);
     assert!(m.image().is_none(), "fixture: 画像 None");
 
     let mut rng = FakeRng::repeated(0.5, 8);
@@ -1843,6 +1868,7 @@ fn real_breed_child_behavior_name(action_name: &str) -> String {
 /// spawn キューへ伝播する（Breed.java L93 getBornBehavior 相当）:
 /// - Divide1: BornBehavior="Divided" → "Divided"
 /// - PullUpShimeji1: BornBehavior="PullUp" → "PullUp"
+///
 /// 論理キー BornBehaviour を生 XML 名として誤読すると空文字になり RED。
 #[test]
 fn breed_from_real_actions_spawns_declared_born_behavior_name() {
@@ -2313,4 +2339,197 @@ fn chase_mouse_gap_dash_from_real_assets_resolves_and_moves() {
          [cursor.x, cursor.x+200) に収束する（cursor={cursor_x}, anchor.x={final_x}）"
     );
     assert_eq!(m.anchor().1, 1040, "床境界（Floor）に留まる");
+}
+
+// =====================================================================
+// mascot set scale（ImageSet.scale）由来の物理量・位置
+//
+// 修正契約: アクション init の scale 取得元は env.scaling() ではなく
+// `Mascot::scale()`（= 自分が保持する ImageSet.scale）。env.scaling を別値に
+// しても結果が変わらないことで非依存を pin する。
+// =====================================================================
+
+/// Mascot::scale() は保持 ImageSet の解決済み scale を返し、rebind（Reload）後も
+/// 新しい ImageSet の scale に自動追随する。
+#[test]
+fn mascot_scale_reflects_image_set_scale_and_rebind() {
+    assert_eq!(mascot_at_scale((0, 0), 0.5).scale(), 0.5);
+    assert_eq!(mascot_at((0, 0)).scale(), 1.0, "未指定は等倍");
+
+    let mut m = mascot_at_scale((0, 0), 1.0);
+    m.rebind_image_set(
+        "TestSet",
+        image_set_with_scale(&[("p.png", 128, 128)], 0.25),
+    );
+    assert_eq!(m.scale(), 0.25, "rebind 後の ImageSet.scale に追随");
+}
+
+/// Jump 初速（VelocityParam * scaling・Jump.java L81）はマスコットの set scale で
+/// 決まり、env.scaling には依存しない。
+/// set scale 2.0・env.scaling 7.0・VelocityParam 10・Target(300,500)・anchor(100,500):
+///   velocity = 20
+///   distanceX=200・distanceY=-100・distance=√50000
+///   velocityX = 20*200/√50000 = 17.888… → dx=18
+///   velocityY = 20*(-100)/√50000 = -8.944… → dy=-9
+///   → (118, 491)
+#[test]
+fn jump_velocity_scales_with_mascot_set_scale() {
+    let mut env = SynthEnv::new();
+    env.scaling_value = 7.0; // 非依存 pin（set scale 2.0 が採用される）
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at_scale((100, 500), 2.0);
+    let table = single_table("X", 1);
+
+    let action = create(
+        ActionKind::Jump,
+        &attrs(&[
+            ("TargetX", "300"),
+            ("TargetY", "500"),
+            ("VelocityParam", "10"),
+        ]),
+        vec![anim(None, false, vec![pose("p.png", (0, 0), (0, 0), 5)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(
+        m.anchor(),
+        (118, 491),
+        "VelocityParam*2.0 由来（env.scaling=7.0 に依存しない）"
+    );
+}
+
+/// Dragged の offset（round(OffsetX/Y * scaling)・Java L73-74/L102）は
+/// マスコットの set scale で決まり、env.scaling には依存しない。
+/// set scale 2.0・env.scaling 7.0・OffsetX=5・OffsetY=10・cursor(1000,200):
+///   offset = (round(10), round(20)) = (10, 20) → anchor = (1010, 220)
+#[test]
+fn dragged_offset_scales_with_mascot_set_scale() {
+    let mut env = SynthEnv::new();
+    env.scaling_value = 7.0; // 非依存 pin
+    env.cursor.x = 1000;
+    env.cursor.y = 200;
+    let mut m = mascot_at_scale((1000, 500), 2.0);
+    let mut rng = FakeRng::repeated(0.5, 8);
+
+    let mut action = create(
+        ActionKind::Dragged,
+        &attrs(&[("OffsetX", "5"), ("OffsetY", "10")]),
+        vec![anim(None, false, vec![pose("p.png", (0, 0), (0, 0), 5)])],
+        1.0,
+    )
+    .unwrap();
+    action.init(&mut m, &env, &mut rng).unwrap();
+    action.next(&mut m, &env, &mut rng).unwrap();
+    assert_eq!(
+        m.anchor(),
+        (1010, 220),
+        "offset = round((5,10)*2.0) = (10,20)（env.scaling=7.0 に依存しない）"
+    );
+}
+
+/// Regist の hold 判定（|cursor.x − anchor.x + offsetX| < 5・Java L61）の offsetX は
+/// マスコットの set scale で決まる。cursor.x=100・anchor.x=110・OffsetX=5:
+///   set scale 2.0 → offsetX=10 → |100-110+10|=0 < 5 → 継続
+///   scale 1.0（回帰）→ offsetX=5 → |100-110+5|=5 → 失敗
+#[test]
+fn regist_offset_scales_with_mascot_set_scale() {
+    let mut env = SynthEnv::new();
+    env.scaling_value = 7.0; // 非依存 pin
+    env.cursor.x = 100;
+    let mut rng = FakeRng::repeated(0.5, 8);
+    let mut m = mascot_at_scale((110, 500), 2.0);
+    let mut action = create(
+        ActionKind::Regist,
+        &attrs(&[("OffsetX", "5")]),
+        vec![anim(None, false, vec![pose("p.png", (0, 0), (0, 0), 5)])],
+        1.0,
+    )
+    .unwrap();
+    action.init(&mut m, &env, &mut rng).unwrap();
+    assert!(
+        action.has_next(&mut m, &env, &mut rng).unwrap(),
+        "set scale 2.0: offsetX=10 → 距離 0 → hold 継続（env.scaling=7.0 非依存）"
+    );
+
+    // 回帰: 未指定（scale 1.0）では従来どおり offsetX=5 で hold 失敗
+    let mut env1 = SynthEnv::new();
+    env1.cursor.x = 100;
+    let mut rng1 = FakeRng::repeated(0.5, 8);
+    let mut m1 = mascot_at((110, 500));
+    let mut action1 = create(
+        ActionKind::Regist,
+        &attrs(&[("OffsetX", "5")]),
+        vec![anim(None, false, vec![pose("p.png", (0, 0), (0, 0), 5)])],
+        1.0,
+    )
+    .unwrap();
+    action1.init(&mut m1, &env1, &mut rng1).unwrap();
+    assert!(
+        !action1.has_next(&mut m1, &env1, &mut rng1).unwrap(),
+        "scale 1.0: offsetX=5 → 距離 5 → hold 失敗（従来どおり）"
+    );
+}
+
+/// ThrowIE のウィンドウ投擲（Java L67-75: round(InitialV * scaling)）は
+/// マスコットの set scale で決まり、env.scaling には依存しない。
+/// set scale 2.0・env.scaling 7.0・既定 InitialVX=32 / InitialVY=-10 /
+/// lookRight=true → dx=round(32*2)=64・dy=round(-10*2)=-20 →
+/// IE(300,200) → (364, 180)。
+#[test]
+fn throwie_window_throw_scales_with_mascot_set_scale() {
+    let mut env = SynthEnv::new();
+    env.scaling_value = 7.0; // 非依存 pin
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at_scale((100, 500), 2.0);
+    m.set_look_right(true);
+    let table = single_table("X", 1);
+
+    let action = create(
+        ActionKind::ThrowIE,
+        &attrs(&[]),
+        vec![anim(None, false, vec![pose("p.png", (64, 64), (0, 0), 5)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(
+        *env.moved_to.borrow(),
+        [(300 + 64, 200 - 20)],
+        "dx=round(32*2.0)=64・dy=round(-10*2.0)=-20（env.scaling=7.0 非依存）"
+    );
+}
+
+/// Breed の出生位置（Java L83-90: round(BornX/Y * scaling) を lookRight 分岐）は
+/// マスコットの set scale で決まり、env.scaling には依存しない。
+/// set scale 2.0・env.scaling 7.0・lookRight=true・BornX=16・BornY=32・
+/// anchor(1000,500) → (1000 - round(32), 500 + round(64)) = (968, 564)。
+#[test]
+fn breed_born_position_scales_with_mascot_set_scale() {
+    let mut env = SynthEnv::new();
+    env.scaling_value = 7.0; // 非依存 pin
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_with_scale((1000, 500), &[("p.png", 128, 128)], 2.0);
+    m.set_look_right(true);
+    let table = single_table("X", 1);
+
+    let action = create(
+        ActionKind::Breed,
+        &attrs(&[("BornX", "16"), ("BornY", "32")]),
+        vec![anim(None, false, vec![pose("p.png", (64, 64), (0, 0), 2)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+    m.tick(&env, &table, &mut factory, &mut rng); // time 0（最終フレームでない）
+    m.tick(&env, &table, &mut factory, &mut rng); // time 1 == duration-1 → breed
+    let spawns = env.spawns.borrow();
+    assert_eq!(spawns.len(), 1, "penultimate frame で 1 体 spawn");
+    assert_eq!(
+        spawns[0].anchor,
+        (968, 564),
+        "BornX/Y を round(*2.0)（env.scaling=7.0 非依存）"
+    );
 }

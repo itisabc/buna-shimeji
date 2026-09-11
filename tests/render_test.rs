@@ -97,7 +97,7 @@ fn compose_argb_output_length_and_row_major_layout() {
     );
     for y in 0..height {
         for x in 0..width {
-            let expected = 0xFF00_0000u32 | (u32::from(x) << 16) | (u32::from(y) << 8);
+            let expected = 0xFF00_0000u32 | (x << 16) | (y << 8);
             assert_eq!(out[(y * width + x) as usize], expected, "(x={x}, y={y})");
         }
     }

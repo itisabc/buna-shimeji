@@ -144,7 +144,7 @@ impl EnvironmentView for SynthEnv {
     }
 
     fn work_area_at(&self, x: i32, y: i32) -> AreaSlot {
-        if x >= 0 && x <= 1920 && y >= 0 && y <= 1040 {
+        if (0..=1920).contains(&x) && (0..=1040).contains(&y) {
             AreaSlot::WorkArea(0)
         } else {
             AreaSlot::Invisible
@@ -277,10 +277,15 @@ fn empty_image_set() -> Arc<ImageSet> {
         name: "TestSet".to_string(),
         frames: BTreeMap::new(),
         warnings: Vec::new(),
+        scale: 1.0,
     })
 }
 
 fn image_set_with(frames: &[(&str, u32, u32)]) -> Arc<ImageSet> {
+    image_set_with_scale(frames, 1.0)
+}
+
+fn image_set_with_scale(frames: &[(&str, u32, u32)], scale: f64) -> Arc<ImageSet> {
     let mut map = BTreeMap::new();
     for (name, width, height) in frames {
         map.insert(
@@ -296,6 +301,7 @@ fn image_set_with(frames: &[(&str, u32, u32)]) -> Arc<ImageSet> {
         name: "TestSet".to_string(),
         frames: map,
         warnings: Vec::new(),
+        scale,
     })
 }
 
@@ -305,6 +311,10 @@ fn mascot_at(anchor: (i32, i32)) -> Mascot {
 
 fn mascot_with(anchor: (i32, i32), frames: &[(&str, u32, u32)]) -> Mascot {
     Mascot::new("TestSet", image_set_with(frames), anchor)
+}
+
+fn mascot_with_scale(anchor: (i32, i32), frames: &[(&str, u32, u32)], scale: f64) -> Mascot {
+    Mascot::new("TestSet", image_set_with_scale(frames, scale), anchor)
 }
 
 fn pose(image: &str, anchor: (i32, i32), velocity: (i32, i32), duration: i32) -> Pose {
@@ -454,7 +464,7 @@ fn tick_image_ref(m: &mut Mascot, env: &dyn EnvironmentView) -> Option<String> {
 #[test]
 fn factory_builds_ref_child_with_same_motion_as_existing_build_action() {
     let env = SynthEnv::new();
-    let mut factory = XmlBehaviorFactory::new(fixture_walk_stare(), 1.0, &[]);
+    let mut factory = XmlBehaviorFactory::new(fixture_walk_stare(), &[]);
 
     // "Walk"（velocity (1,0)）: tick1 で anchor += (1,0)
     let action = factory
@@ -503,7 +513,7 @@ fn factory_builds_ref_child_with_same_motion_as_existing_build_action() {
 #[test]
 fn factory_builds_inline_child_with_same_motion_as_direct_def() {
     let env = SynthEnv::new();
-    let mut factory = XmlBehaviorFactory::new(fixture_walk_stare(), 1.0, &[]);
+    let mut factory = XmlBehaviorFactory::new(fixture_walk_stare(), &[]);
 
     let inline = animate_def(vec![anim(
         None,
@@ -537,14 +547,19 @@ fn factory_builds_inline_child_with_same_motion_as_direct_def() {
 
 // =====================================================================
 // 契約 2: scale 注入（構築時 scale_pose）
+//
+// 構築 scale の注入経路は 2 つ: `BehaviorFactory::set_scale(scale)` を直接呼ぶ
+// 経路と、`BehaviorTable::build_behavior_direct(name, factory, scale)` が構築前に
+// `factory.set_scale(scale)` を適用する経路。`XmlBehaviorFactory::new` は scale
+// 引数を取らず初期値 1.0（未注入 = 等倍）で始まる。
 // =====================================================================
 
-/// scale≠1.0 で構築すると既存 create/scale 経由と同水準でアンカー / velocity の
-/// scale 変換が効く（action_test.rs `pose_scale_applied_at_action_construction`
-/// 契約踏襲・java_round half-up）。scale=2.0: velocity (2,1)→(4,2)・anchor
-/// (32,48)→(64,96)。
+/// `set_scale(2.0)` 後に構築すると既存 create/scale 経由と同水準でアンカー /
+/// velocity の scale 変換が効く（action_test.rs
+/// `pose_scale_applied_at_action_construction` 契約踏襲・java_round half-up）。
+/// scale=2.0: velocity (2,1)→(4,2)・anchor (32,48)→(64,96)。
 #[test]
-fn factory_applies_scale_to_anchor_and_velocity() {
+fn factory_applies_scale_via_set_scale_to_anchor_and_velocity() {
     let env = SynthEnv::new();
     let actions = config_from(vec![(
         "Walk",
@@ -554,7 +569,8 @@ fn factory_applies_scale_to_anchor_and_velocity() {
             vec![pose("p.png", (32, 48), (2, 1), 5)],
         )]),
     )]);
-    let mut factory = XmlBehaviorFactory::new(actions, 2.0, &[]);
+    let mut factory = XmlBehaviorFactory::new(actions, &[]);
+    factory.set_scale(2.0);
 
     let action = factory
         .build_action(&ref_child("Walk"))
@@ -585,6 +601,50 @@ fn factory_applies_scale_to_anchor_and_velocity() {
     );
 }
 
+/// `BehaviorTable::build_behavior_direct(name, factory, scale)` は構築前に
+/// `factory.set_scale(scale)` を適用する。scale 未注入の factory（初期値 1.0）でも
+/// scale 引数で構築物の pose が scale される。マスコットの `scale()`
+/// （= 保持 ImageSet.scale）を渡す経路で検証する。
+#[test]
+fn build_behavior_direct_applies_mascot_scale_to_pose() {
+    let env = SynthEnv::new();
+    let actions = config_from(vec![(
+        "Walk",
+        animate_def(vec![anim(
+            None,
+            false,
+            vec![pose("p.png", (32, 48), (2, 1), 5)],
+        )]),
+    )]);
+    // scale 未注入の factory（初期値 1.0）でも build_behavior_direct が set_scale する
+    let mut factory = XmlBehaviorFactory::new(actions, &[]);
+    let table = single_table("Walk");
+
+    let mut m = mascot_with_scale((1000, 500), &[("p.png", 128, 128)], 2.0);
+    assert_eq!(m.scale(), 2.0, "ImageSet.scale を保持");
+    let runner = table
+        .build_behavior_direct("Walk", &mut factory, m.scale())
+        .expect("scale 引数付きで構築できる");
+    m.set_behavior(
+        Some(runner),
+        &env,
+        &table,
+        &mut FnFactory::constant(make_idle_fallback),
+        &mut FakeRng::repeated(0.5, 16),
+    )
+    .expect("set_behavior 成功");
+
+    m.tick(
+        &env,
+        &table,
+        &mut FnFactory::constant(make_idle_fallback),
+        &mut FakeRng::repeated(0.5, 16),
+    );
+    assert_eq!(m.anchor(), (1004, 502), "velocity (2,1)*2 = (4,2)");
+    let img = m.image().expect("フレームは存在する");
+    assert_eq!(img.center, (64, 96), "anchor (32,48)*2 = (64,96)");
+}
+
 // =====================================================================
 // 契約 3+4: disabled 適用（該当アニメ除去）+ 不該当は無影響
 // =====================================================================
@@ -604,7 +664,7 @@ fn factory_excludes_disabled_animation_and_keeps_others_intact() {
     ];
 
     // 対照: 空 disabled → A の最初のアニメ #0（a.png・velocity (1,0)）
-    let mut clean = XmlBehaviorFactory::new(actions.clone(), 1.0, &[]);
+    let mut clean = XmlBehaviorFactory::new(actions.clone(), &[]);
     let action = clean.build_action(&ref_child("A")).expect("対照構築");
     let mut m = mascot_with((1000, 500), &frames);
     set_action(
@@ -622,7 +682,7 @@ fn factory_excludes_disabled_animation_and_keeps_others_intact() {
     assert_eq!(m.anchor(), (1001, 500), "対照: #0 の velocity (1,0)");
 
     // 本命: ("A", 0) を disabled → #0 が除去され #1（b.png・velocity (0,0)）が適用
-    let mut filtered = XmlBehaviorFactory::new(actions, 1.0, &[("A".to_string(), 0)]);
+    let mut filtered = XmlBehaviorFactory::new(actions, &[("A".to_string(), 0)]);
     let action = filtered
         .build_action(&ref_child("A"))
         .expect("disabled 付き構築");
@@ -688,7 +748,7 @@ fn factory_filter_propagates_through_sequence_ref_children() {
             ]),
         ),
     ]);
-    let mut factory = XmlBehaviorFactory::new(actions, 1.0, &[("A".to_string(), 0)]);
+    let mut factory = XmlBehaviorFactory::new(actions, &[("A".to_string(), 0)]);
 
     let action = factory
         .build_action(&ref_child("Seq"))

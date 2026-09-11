@@ -517,7 +517,7 @@ impl Action for ThrowIEAction {
         _rng: &mut dyn Rng,
     ) -> Result<(), ActionError> {
         self.bordered.init_common(mascot, env)?;
-        self.scaling = env.scaling(); // Java L45
+        self.scaling = mascot.scale(); // Java L45
         self.active_window_id = env.active_window_id(); // Java L46
         Ok(())
     }
@@ -932,7 +932,7 @@ impl Action for BreedAction {
     ) -> Result<(), ActionError> {
         self.bordered.init_common(mascot, env)?;
         // Java L154-155: initScaling + validateBornCount
-        self.scaling = env.scaling();
+        self.scaling = mascot.scale();
         let born_count =
             self.bordered
                 .base

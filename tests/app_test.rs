@@ -147,6 +147,7 @@ fn empty_image_set(name: &str) -> Arc<ImageSet> {
         name: name.to_string(),
         frames: BTreeMap::new(),
         warnings: Vec::new(),
+        scale: 1.0,
     })
 }
 
@@ -314,6 +315,7 @@ fn attrs(pairs: &[(&str, &str)]) -> VarMap {
 /// 合成 actions.xml 相当:
 /// - "Walk"  : velocity (1,0)・Affordance "mark"（同 tick 適用観測用タグ）
 /// - "Stare" : velocity (3,0)・Affordance "stare"
+///
 /// （空 image set のため apply_pose は anchor 移動のみ観測可能）
 fn fixture_actions() -> ActionsConfig {
     let mut map = BTreeMap::new();

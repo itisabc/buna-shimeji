@@ -70,6 +70,9 @@ pub struct ImageSet {
     pub frames: BTreeMap<String, Frame>,
     /// ロード時に検出した問題（日本語・1 行）。ログ出力は呼び出し側の責務。
     pub warnings: Vec<String>,
+    /// 解決済みの per-set scale（`None` → 1.0）。ポーズの anchor/velocity 変換
+    /// （action 構築）がこの値を参照する。
+    pub scale: f64,
 }
 
 /// conf↔set 整合チェックの結果。
@@ -225,6 +228,8 @@ impl ImageSet {
     ) -> Result<ImageSet, ImagesetError> {
         let mut frames = BTreeMap::new();
         let mut warnings = Vec::new();
+        // 解決済み scale（None → 1.0）。フレームのプリスケール判定と保持に共用する。
+        let resolved_scale = scale.unwrap_or(1.0);
 
         for entry in fs::read_dir(set_dir(img_dir, set_name))? {
             let entry = entry?;
@@ -335,6 +340,7 @@ impl ImageSet {
             name: set_name.to_string(),
             frames,
             warnings,
+            scale: resolved_scale,
         })
     }
 

@@ -569,19 +569,15 @@ fn try_main() -> anyhow::Result<()> {
     };
     // factory は Manager が 1 個のみ保持する（manager.rs 既存設計追従・差し替え API 無し）。
     // per-set DisabledAnimation（check_references は set 毎列挙に依存）は
-    // 既定 set（= materials[0]）の分を factory に適用する。scale も既定 set の値
-    //（未指定 = 1.0 = 等倍・同資産では scale 未指定で挙動互換）
+    // 既定 set（= materials[0]）の分を factory に適用する。scale は構築の都度
+    // BehaviorTable::build_behavior_direct がマスコットの ImageSet.scale を
+    // factory.set_scale で注入する（per-set scale を行動へ反映）
     let default_disables: Vec<(String, usize)> = materials[0]
         .disabled_animations
         .iter()
         .map(|disabled| (disabled.action.clone(), disabled.animation_index))
         .collect();
-    let default_scale = settings
-        .scales()
-        .get(&materials[0].name)
-        .copied()
-        .unwrap_or(1.0);
-    let factory = XmlBehaviorFactory::new(actions, default_scale, &default_disables);
+    let factory = XmlBehaviorFactory::new(actions, &default_disables);
 
     let mut manager = Manager::new(
         Environment::new(Win32OsSource),

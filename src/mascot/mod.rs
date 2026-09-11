@@ -662,6 +662,13 @@ impl Mascot {
         Arc::clone(&self.image_set)
     }
 
+    /// 保持中の画像セットの解決済み scale（Java `Mascot.getScaling()` /
+    /// `ImagePairs.getScaling()` 相当）。action の init は env ではなくこの値を
+    /// 参照する（per-set scale を行動・物理へ反映・Reload 後の rebind にも追随）。
+    pub fn scale(&self) -> f64 {
+        self.image_set.scale
+    }
+
     pub fn sound(&self) -> Option<&str> {
         self.sound.as_deref()
     }

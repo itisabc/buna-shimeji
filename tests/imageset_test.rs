@@ -609,6 +609,30 @@ fn load_scale_follows_java_round_dimensions() {
 }
 
 #[test]
+fn load_retains_resolved_scale_while_preserving_frame_prescale() {
+    // 契約: ImageSet::load は解決済み scale（None → 1.0 / Some(s) → s）を保持する。
+    // ポーズの ImageAnchor / velocity は呼び出し側（action 構築 / Mascot）がこの
+    // scale で変換するため、未スケール anchor が混入すると浮き・ズレになる。
+    // 画像フレームのプリスケールは従来どおり行われる（回帰確認込み）。
+    let img = TempImg::new("retain_scale");
+    img.write_png("SetA/four.png", 4, 4, OPAQUE_RED);
+
+    let none = ImageSet::load(img.path(), "SetA", None).expect("None ロード");
+    assert_eq!(none.scale, 1.0, "None は 1.0 に解決して保持");
+
+    let one = ImageSet::load(img.path(), "SetA", Some(1.0)).expect("Some(1.0) ロード");
+    assert_eq!(one.scale, 1.0, "Some(1.0) は 1.0 を保持");
+
+    let half = ImageSet::load(img.path(), "SetA", Some(0.5)).expect("Some(0.5) ロード");
+    assert_eq!(half.scale, 0.5, "Some(0.5) の解決値を保持");
+    assert_eq!(
+        dims_of(&half, "four.png"),
+        (2, 2),
+        "画像フレームのプリスケールは既存挙動のまま"
+    );
+}
+
+#[test]
 fn load_scale_uses_nearest_neighbour_sampling() {
     // Java 既定フィルタ NEAREST_NEIGHBOUR の契約: 補間による中間色ピクセルを生成しない
     let img = TempImg::new("scale_nearest");

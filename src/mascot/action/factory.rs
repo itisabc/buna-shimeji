@@ -34,7 +34,8 @@ pub struct XmlBehaviorFactory {
     /// disabled 除去済みの定義集合（new 以後は不変）。
     actions: ActionsConfig,
     /// 構築時 scale（[`scale_pose`](crate::render::imageset::scale_pose) 適用用・
-    /// Java AnimationBuilder L206-211 相当）。
+    /// Java AnimationBuilder L206-211 相当）。[`BehaviorFactory::set_scale`] で
+    /// 更新され、`build_action` 呼び出し時に全ポーズへ適用される。初期値は 1.0。
     scale: f64,
 }
 
@@ -42,14 +43,14 @@ impl XmlBehaviorFactory {
     /// `disabled` の (action 名, animation_index) に該当するアニメを
     /// `actions` から除去済みのファクトリを構築する。フィルタはここで 1 回だけ
     /// 行い、`build_action` 呼び出し毎には行わない。
-    pub fn new(
-        actions: ActionsConfig,
-        scale: f64,
-        disabled: &[(String, usize)],
-    ) -> XmlBehaviorFactory {
+    /// scale は [`BehaviorFactory::set_scale`] で構築前に注入される（初期値 1.0）。
+    pub fn new(actions: ActionsConfig, disabled: &[(String, usize)]) -> XmlBehaviorFactory {
         let mut actions = actions;
         strip_disabled(&mut actions, disabled);
-        XmlBehaviorFactory { actions, scale }
+        XmlBehaviorFactory {
+            actions,
+            scale: 1.0,
+        }
     }
 }
 
@@ -86,6 +87,10 @@ fn strip_disabled(actions: &mut ActionsConfig, disabled: &[(String, usize)]) {
 }
 
 impl BehaviorFactory for XmlBehaviorFactory {
+    fn set_scale(&mut self, scale: f64) {
+        self.scale = scale;
+    }
+
     fn build_action(&mut self, child: &SequenceChild) -> Result<Box<dyn Action>, BehaviorError> {
         match child {
             // Ref 子: 既存 build_action 経由（Ref 側 attrs 優先マージ込み）

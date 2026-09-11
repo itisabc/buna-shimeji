@@ -10,6 +10,7 @@
 //!   完了遷移 / LostGround 処理 / Eval 伝播
 //! - 再配置式（Java (int) キャスト = 切り捨て）: ((rng * (area_width - 2)) as i32)
 //!   + area_left + 1, area_top - 256。area は multiscreen ? screen（全画面 union）:
+//!
 //!   Java `MascotEnvironment.getWorkArea()` = アンカーが属する作業領域
 //!   （MascotEnvironment.java L66-114。全モニタ外は invisibleScreen 0×0 の quirk）
 //! - 頻度選択（Configuration.java L459-524 逐語）: random = rng * total_frequency、
@@ -493,6 +494,7 @@ fn empty_image_set() -> Arc<ImageSet> {
         name: "TestSet".to_string(),
         frames: BTreeMap::new(),
         warnings: Vec::new(),
+        scale: 1.0,
     })
 }
 
@@ -512,6 +514,7 @@ fn image_set_with(frames: &[(&str, u32, u32)]) -> Arc<ImageSet> {
         name: "TestSet".to_string(),
         frames: map,
         warnings: Vec::new(),
+        scale: 1.0,
     })
 }
 
@@ -1148,7 +1151,9 @@ fn build_behavior_builds_named_runner_and_errors_on_unknown() {
         .unwrap();
     assert_eq!(runner.name, "Walk");
 
-    let runner = t.build_behavior_direct("Walk", &mut factory).unwrap();
+    let runner = t
+        .build_behavior_direct("Walk", &mut factory, m.scale())
+        .unwrap();
     assert_eq!(runner.name, "Walk");
 
     match t.build_behavior("Nope", &mut m, &env, &mut factory, &mut rng) {
@@ -1157,7 +1162,7 @@ fn build_behavior_builds_named_runner_and_errors_on_unknown() {
         Err(_) => panic!("エラー種別は UnknownBehavior が期待されます"),
     }
 
-    match t.build_behavior_direct("Nope", &mut factory) {
+    match t.build_behavior_direct("Nope", &mut factory, m.scale()) {
         Err(BehaviorError::UnknownBehavior(n)) => assert_eq!(n, "Nope"),
         Ok(_) => panic!("存在しない Behavior への build_behavior_direct は Err が期待されます"),
         Err(_) => panic!("エラー種別は UnknownBehavior が期待されます"),

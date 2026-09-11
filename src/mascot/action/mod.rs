@@ -577,11 +577,11 @@ impl Action for JumpAction {
     fn init(
         &mut self,
         mascot: &mut Mascot,
-        env: &dyn EnvironmentView,
+        _env: &dyn EnvironmentView,
         _rng: &mut dyn Rng,
     ) -> Result<(), ActionError> {
         self.base.init(mascot);
-        self.scaling = env.scaling(); // Java L47
+        self.scaling = mascot.scale(); // Java L47
         Ok(())
     }
 
@@ -781,7 +781,7 @@ impl Action for FallAction {
     ) -> Result<(), ActionError> {
         self.base.init(mascot);
         // Java L62: scaling（FIXME コメント付きの無条件 scale 適用・L82-83 逐語）
-        self.scaling = env.scaling();
+        self.scaling = mascot.scale();
         // Java L82-83: getInitialVx()/getInitialVy() は intValue() で切り捨ててから scaling 乗算
         self.velocity_x = f64::from(crate::config::script::to_java_int(self.base.f64_attr(
             mascot,
@@ -871,7 +871,7 @@ impl Action for DraggedAction {
     ) -> Result<(), ActionError> {
         self.base.init(mascot);
         // Java L54: scaling
-        self.scaling = env.scaling();
+        self.scaling = mascot.scale();
         // Java L56 逐語: footX = cursor.x + (int) Math.round(offsetX * scaling)
         let offset_x = self.base.num_attr(mascot, env, "OffsetX", 0)?;
         self.foot_x = f64::from(env.cursor().x + java_round(f64::from(offset_x) * self.scaling));
@@ -1028,11 +1028,11 @@ impl Action for RegistAction {
     fn init(
         &mut self,
         mascot: &mut Mascot,
-        env: &dyn EnvironmentView,
+        _env: &dyn EnvironmentView,
         _rng: &mut dyn Rng,
     ) -> Result<(), ActionError> {
         self.base.init(mascot);
-        self.scaling = env.scaling(); // Java L41
+        self.scaling = mascot.scale(); // Java L41
         Ok(())
     }
 

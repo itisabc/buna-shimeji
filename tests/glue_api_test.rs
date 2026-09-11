@@ -93,6 +93,7 @@ fn empty_image_set(name: &str) -> Arc<ImageSet> {
         name: name.to_string(),
         frames: BTreeMap::new(),
         warnings: Vec::new(),
+        scale: 1.0,
     })
 }
 
@@ -114,6 +115,7 @@ fn image_set_with(name: &str, frames: &[(&str, u32, u32)]) -> Arc<ImageSet> {
         name: name.to_string(),
         frames: map,
         warnings: Vec::new(),
+        scale: 1.0,
     })
 }
 
@@ -444,7 +446,7 @@ fn take_removed_reports_index_after_dispose_and_tick() {
 fn take_removed_returns_all_indices_ascending_for_simultaneous_removals() {
     let mut manager = make_manager(single_monitor_env(), ScriptedFactory);
     for index in 0..5 {
-        manager.add(mascot_of_set("SetA", (index as i32 * 100, 500)));
+        manager.add(mascot_of_set("SetA", (index * 100, 500)));
     }
     manager.tick(Instant::now());
     assert_eq!(manager.count(), 5);
@@ -483,7 +485,7 @@ fn take_removed_is_empty_when_nothing_was_removed() {
 fn take_removed_is_drained_by_each_call() {
     let mut manager = make_manager(single_monitor_env(), ScriptedFactory);
     for index in 0..3 {
-        manager.add(mascot_of_set("SetA", (index as i32 * 100, 500)));
+        manager.add(mascot_of_set("SetA", (index * 100, 500)));
     }
     manager.tick(Instant::now());
 

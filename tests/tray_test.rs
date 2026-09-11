@@ -144,6 +144,7 @@ fn empty_image_set(name: &str) -> Arc<ImageSet> {
         name: name.to_string(),
         frames: BTreeMap::new(),
         warnings: Vec::new(),
+        scale: 1.0,
     })
 }
 
@@ -160,6 +161,7 @@ fn image_set_with(name: &str, file: &str, width: u32, height: u32) -> Arc<ImageS
             },
         )]),
         warnings: Vec::new(),
+        scale: 1.0,
     })
 }
 
@@ -1102,7 +1104,7 @@ fn environment_disabled_behaviors_flow_into_manager_menu_gating() {
     disabled.insert("TestSet".to_string(), vec!["Pose".to_string()]);
     env.set_disabled_behaviors(disabled);
 
-    let mut manager = make_manager(
+    let manager = make_manager(
         env,
         table(vec![row("Walk", 100), row_entry("Pose", 100, false, true)]),
         ScriptedFactory::new(),
@@ -1148,6 +1150,7 @@ fn manager_request_spawn_random_with_empty_slice_is_noop_without_rng() {
 /// - 1 体目: 選択 0.999 → (0.999*4) as usize = 3（四捨五入なら 4 で範囲外 panic）→ "Delta"
 ///   ・look_right 0.3 → true（0.3 < 0.5）
 /// - 2 体目: 選択 0.0 → "Alpha"・look_right 0.6 → false（0.6 は 0.5 未満でない）
+///
 /// 固定値 4 個（+tick 分の 0.5）で過剰消費があれば枯渇 panic で失敗する。
 /// action は transition_once（app_manager_ext_test 踏襲）: 2 回目の has_next で
 /// 遷移経路に分岐させ、spawn 直後 tick の画面外再配置

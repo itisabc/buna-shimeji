@@ -183,7 +183,7 @@ fn cond_source(v: &Variable) -> String {
 
 /// 全 Behavior を (所属条件群の参照, BehaviorDef) に展開。
 /// Single は条件なし、Group はその conditions スライスを共有して返す。
-fn walk_behaviors<'a>(cfg: &'a BehaviorsConfig) -> Vec<(Option<&'a [Variable]>, &'a BehaviorDef)> {
+fn walk_behaviors(cfg: &BehaviorsConfig) -> Vec<(Option<&[Variable]>, &BehaviorDef)> {
     let mut out = Vec::new();
     for entry in &cfg.entries {
         match entry {
@@ -454,7 +454,7 @@ fn real_actions_attr_constants_bool_number_text() {
     // Fall（Sequence, Loop="false"）→ Constant(Bool(false))
     match find_action(&cfg, "Fall") {
         ActionDef::Sequence { attrs, .. } => {
-            assert_eq!(expect_const_bool(attrs.get("Loop"), "Fall@Loop"), false);
+            assert!(!expect_const_bool(attrs.get("Loop"), "Fall@Loop"));
         }
         _ => panic!("Fall は Sequence"),
     }
@@ -545,10 +545,10 @@ fn real_actions_attr_constants_bool_number_text() {
             _ => None,
         })
         .expect("WalkLeftAlongFloorAndSit の Look 参照");
-    assert_eq!(
-        expect_const_bool(look_ref.get("LookRight"), "Look@LookRight"),
-        true
-    );
+    assert!(expect_const_bool(
+        look_ref.get("LookRight"),
+        "Look@LookRight"
+    ));
 }
 
 #[test]
@@ -1232,7 +1232,7 @@ fn synthetic_explicit_wall_and_omission_means_none() {
     let _ = std::fs::remove_file(&path);
     let cfg = result.expect("Border 属性付き actions.xml をパースできる");
     // A = BorderType 省略 → None（省略時 Floor 折り畳み廃止・design §1.8(g)）
-    assert!(matches!(border_of(cfg.actions.get("A").unwrap()), None));
+    assert!(border_of(cfg.actions.get("A").unwrap()).is_none());
     // B = 明示 BorderType="Wall" → Some(Wall)（未知値はエラーのまま・別契約）
     assert!(matches!(
         border_of(cfg.actions.get("B").unwrap()),

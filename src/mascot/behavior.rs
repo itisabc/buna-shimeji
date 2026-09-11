@@ -113,6 +113,12 @@ pub trait Action {
 /// #7/#8 が actions.xml から実装を組み立てる。
 pub trait BehaviorFactory {
     fn build_action(&mut self, child: &SequenceChild) -> Result<Box<dyn Action>, BehaviorError>;
+
+    /// 構築物へ適用する per-set scale を設定する（既定は no-op）。
+    /// [`BehaviorTable::build_behavior_direct`] が構築前にマスコットの
+    /// [`Mascot::scale`] を渡す。XML 資産駆動の実装がこれを構築時
+    /// [`scale_pose`](crate::render::imageset::scale_pose) に反映する。
+    fn set_scale(&mut self, _scale: f64) {}
 }
 
 /// next() 内部の流れ制御（Java next の catch 節の対応を明示するための内部表現）。
@@ -255,7 +261,8 @@ impl BehaviorRunner {
             Err(NextFlow::LostGround) => {
                 mascot.set_cursor_position(None);
                 mascot.set_dragging(false);
-                let fall = table.build_behavior_direct(BEHAVIORNAME_FALL, factory)?;
+                let fall =
+                    table.build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot.scale())?;
                 set_behavior_and_init(fall, mascot, env, table, factory, rng)
             }
         }
@@ -326,7 +333,7 @@ impl BehaviorRunner {
                     log::info!("画面外に移動しました ({bounds_x}, {bounds_y})");
                     reposition_above_area(mascot, env, rng);
                     let fall = table
-                        .build_behavior_direct(BEHAVIORNAME_FALL, factory)
+                        .build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot.scale())
                         .map_err(NextFlow::Fatal)?;
                     set_behavior_and_init(fall, mascot, env, table, factory, rng)
                         .map_err(NextFlow::Fatal)?;
@@ -379,7 +386,8 @@ impl BehaviorRunner {
 
         // Java L279-286: ドラッグ開始
         if !handled {
-            let dragged = table.build_behavior_direct(BEHAVIORNAME_DRAGGED, factory)?;
+            let dragged =
+                table.build_behavior_direct(BEHAVIORNAME_DRAGGED, factory, mascot.scale())?;
             set_behavior_and_init(dragged, mascot, env, table, factory, rng)?;
         }
         Ok(())
@@ -400,7 +408,8 @@ impl BehaviorRunner {
         // ドラッグ中でなければ何もしない（Java コメント踏襲）
         if mascot.is_dragging() {
             mascot.set_dragging(false);
-            let thrown = table.build_behavior_direct(BEHAVIORNAME_THROWN, factory)?;
+            let thrown =
+                table.build_behavior_direct(BEHAVIORNAME_THROWN, factory, mascot.scale())?;
             set_behavior_and_init(thrown, mascot, env, table, factory, rng)?;
         }
         Ok(())
@@ -550,14 +559,14 @@ impl BehaviorTable {
             for (name, frequency) in &candidates {
                 random -= *frequency as f64;
                 if random < 0.0 {
-                    return self.build_behavior_direct(name, factory);
+                    return self.build_behavior_direct(name, factory, mascot.scale());
                 }
             }
         }
 
         // Java L517-523: 候補無し → 再配置して Fall へ
         reposition_above_area(mascot, env, rng);
-        self.build_behavior_direct(BEHAVIORNAME_FALL, factory)
+        self.build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot.scale())
     }
 
     /// 名前で Behavior を構築する（Java Configuration.buildBehavior(name, mascot)
@@ -579,20 +588,24 @@ impl BehaviorTable {
             return Err(BehaviorError::UnknownBehavior(name.to_string()));
         };
         if Self::is_behavior_enabled(row, mascot.image_set_name(), env) {
-            self.build_behavior_direct(name, factory)
+            self.build_behavior_direct(name, factory, mascot.scale())
         } else {
             log::warn!("Behavior `{name}` は無効化されているため Fall へフォールバックします");
             reposition_above_area(mascot, env, rng);
-            self.build_behavior_direct(BEHAVIORNAME_FALL, factory)
+            self.build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot.scale())
         }
     }
 
     /// 名前で Behavior を構築する（Java Configuration.buildBehavior(name) L566-573 逐語）。
+    /// 構築前に `factory.set_scale(scale)` を適用する（per-set scale を
+    /// 構築時 [`scale_pose`](crate::render::imageset::scale_pose) へ伝える）。
     pub fn build_behavior_direct(
         &self,
         name: &str,
         factory: &mut dyn BehaviorFactory,
+        scale: f64,
     ) -> Result<BehaviorRunner, BehaviorError> {
+        factory.set_scale(scale);
         let row = self
             .find(name)
             .ok_or_else(|| BehaviorError::UnknownBehavior(name.to_string()))?;
