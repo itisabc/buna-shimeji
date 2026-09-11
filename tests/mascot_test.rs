@@ -9,7 +9,9 @@
 //!   false なら直ちに次行動へ遷移。next は hotspot scan → off-screen 再配置+Fall /
 //!   完了遷移 / LostGround 処理 / Eval 伝播
 //! - 再配置式（Java (int) キャスト = 切り捨て）: ((rng * (area_width - 2)) as i32)
-//!   + area_left + 1, area_top - 256。area は multiscreen ? screen : work_area
+//!   + area_left + 1, area_top - 256。area は multiscreen ? screen（全画面 union）:
+//!   Java `MascotEnvironment.getWorkArea()` = アンカーが属する作業領域
+//!   （MascotEnvironment.java L66-114。全モニタ外は invisibleScreen 0×0 の quirk）
 //! - 頻度選択（Configuration.java L459-524 逐語）: random = rng * total_frequency、
 //!   候補は XML 順で random -= frequency; random < 0 で選択。total == 0 は
 //!   再配置 + Fall フォールバック。条件の評価エラーは Err にせず候補をスキップ
@@ -48,6 +50,7 @@ use simeji::mascot::animation::{
 use simeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
+use simeji::mascot::env::{AreaSlot, AreaState};
 use simeji::mascot::{EnvironmentView, EvalSnapshot, ImageState, Mascot, MascotContext, Rect, Rng};
 use simeji::render::imageset::{Frame, ImageSet};
 
@@ -286,15 +289,45 @@ struct SpawnRecord {
     behavior_name: String,
 }
 
-/// EnvironmentView モック。既定: work_area=(0,0,1920,1040) / screen=(0,0,1920,1080) /
-/// multiscreen=false。
+/// 合成モニタ 1 つ分の AreaState（deltas 0・visible 指定。Area.java 既定相当）。
+fn area_state(left: i32, top: i32, right: i32, bottom: i32, visible: bool) -> AreaState {
+    AreaState {
+        left,
+        top,
+        right,
+        bottom,
+        dleft: 0,
+        dtop: 0,
+        dright: 0,
+        dbottom: 0,
+        visible,
+    }
+}
+
+/// 複数モニタの screen union（Java `Environment.getScreen()` 相当）。
+fn union_area(areas: &[AreaState]) -> AreaState {
+    let mut u = areas[0];
+    for a in &areas[1..] {
+        u.left = u.left.min(a.left);
+        u.top = u.top.min(a.top);
+        u.right = u.right.max(a.right);
+        u.bottom = u.bottom.max(a.bottom);
+    }
+    u
+}
+
+/// EnvironmentView モック。既定: work area=(0,0,1920,1040) / screen=(0,0,1920,1080) /
+/// multiscreen=false の単一モニタ。
 ///
 /// queue_spawn は 4 引数（#8 拡張・BornBehaviour 名が queue に伝播する契約）で
-/// 観測可能にした。それ以外の拡張メソッドは default todo!("app impl at #8") のまま
-/// （これらの検証は tests/env_test.rs / tests/app_test.rs が担う）。
+/// 観測可能にした。複数モニタのアンカー基準 work area 解決（`resolve_work_area`）を
+/// 決定的に検証するため、#7a 拡張メソッドのうち `screens` / `work_area_at` /
+/// `work_area_state` / `screen_area` だけを実装する（残りは default のまま）。
 struct MockEnv {
-    work_area: Rect,
-    screen: Rect,
+    /// monitor index 順の作業領域（`screens` と 1:1）。
+    work_areas: Vec<AreaState>,
+    /// monitor index 順の画面矩形。
+    screens: Vec<AreaState>,
     multiscreen: bool,
     ctx: MockEvalCtx,
     spawns: RefCell<Vec<SpawnRecord>>,
@@ -307,18 +340,8 @@ struct MockEnv {
 impl MockEnv {
     fn new() -> Self {
         MockEnv {
-            work_area: Rect {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1040,
-            },
-            screen: Rect {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
+            work_areas: vec![area_state(0, 0, 1920, 1040, true)],
+            screens: vec![area_state(0, 0, 1920, 1080, true)],
             multiscreen: false,
             ctx: MockEvalCtx {
                 is_on_calls: RefCell::new(Vec::new()),
@@ -338,23 +361,37 @@ impl MockEnv {
     /// multiscreen = true に切り替え、screen を 2560 幅の仮想画面へ変える。
     fn with_multiscreen(mut self) -> Self {
         self.multiscreen = true;
-        self.screen = Rect {
-            left: 0,
-            top: 0,
-            right: 2560,
-            bottom: 1080,
-        };
+        self.screens = vec![area_state(0, 0, 2560, 1080, true)];
+        self
+    }
+
+    /// 複数モニタ構成へ差し替える（`screens` / `work_areas` は monitor index 順で 1:1）。
+    fn with_monitors(mut self, screens: Vec<AreaState>, work_areas: Vec<AreaState>) -> Self {
+        self.screens = screens;
+        self.work_areas = work_areas;
         self
     }
 }
 
 impl EnvironmentView for MockEnv {
     fn work_area(&self) -> Rect {
-        self.work_area
+        let a = self.work_areas[0];
+        Rect {
+            left: a.left,
+            top: a.top,
+            right: a.right,
+            bottom: a.bottom,
+        }
     }
 
     fn screen(&self) -> Rect {
-        self.screen
+        let u = union_area(&self.screens);
+        Rect {
+            left: u.left,
+            top: u.top,
+            right: u.right,
+            bottom: u.bottom,
+        }
     }
 
     fn multiscreen(&self) -> bool {
@@ -363,6 +400,32 @@ impl EnvironmentView for MockEnv {
 
     fn eval_context(&self) -> &dyn EvalContext {
         &self.ctx
+    }
+
+    fn screen_area(&self) -> AreaState {
+        union_area(&self.screens)
+    }
+
+    fn screens(&self) -> Vec<AreaState> {
+        self.screens.clone()
+    }
+
+    fn work_area_at(&self, x: i32, y: i32) -> AreaSlot {
+        // AbstractEnvironment.getWorkAreaAt（L186-193）: 点を含む work area を
+        // monitor index 順に探し、無ければ invisibleScreen。
+        match self.work_areas.iter().position(|a| a.contains(x, y)) {
+            Some(i) => AreaSlot::WorkArea(i),
+            None => AreaSlot::Invisible,
+        }
+    }
+
+    fn work_area_state(&self, slot: AreaSlot) -> AreaState {
+        match slot {
+            AreaSlot::WorkArea(i) => self.work_areas[i],
+            AreaSlot::Screen(i) => self.screens[i],
+            AreaSlot::Invisible => area_state(0, 0, 0, 0, false),
+            AreaSlot::ActiveWindow => todo!("MockEnv は ActiveWindow を使わない"),
+        }
     }
 
     fn behavior_disabled(&self, image_set: &str, behavior_name: &str) -> bool {
@@ -943,6 +1006,134 @@ fn build_next_behavior_falls_back_repositioning_above_area() {
     assert_eq!(m.anchor(), (1280, -256)); // screen=(0,0,2560,1080): (int)(0.5*2558)+1
 }
 
+/// 契約: multiscreen=false の再配置 area は `env.work_area()`（プライマリ固定）ではなく
+/// Java `MascotEnvironment.getWorkArea()` = **アンカーが属する作業領域**
+/// （MascotEnvironment.java L66-114 の決定木）。アンカーが副モニタ内なら副モニタの
+/// 作業領域で式を評価する。
+#[test]
+fn build_next_behavior_reposition_uses_anchor_monitor_work_area_when_multiscreen_off() {
+    // 横並び 2 モニタ（x=1920 共有）。プライマリ = index 0。
+    let env = MockEnv::new().with_monitors(
+        vec![
+            area_state(0, 0, 1920, 1080, true),
+            area_state(1920, 0, 3840, 1080, true),
+        ],
+        vec![
+            area_state(0, 0, 1920, 1040, true),
+            area_state(1920, 0, 3840, 1040, true),
+        ],
+    );
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let t = table(vec![
+        BehaviorEntry::Single(def("Walk", 0, Some(next_list(false, &[("Fall", 0)])))),
+        single("Fall", 100),
+    ]);
+
+    let mut m = mascot_at((2000, 500)); // 副モニタ (1920..3840) の作業領域内
+    let mut rng = FakeRng::new(&[0.5]);
+    let runner = t
+        .build_next_behavior(Some("Walk"), &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Fall");
+    // 副モニタ作業領域 (1920,0,3840,1040): (int)(0.5*(1920-2)) + 1920 + 1 = 959+1921 = 2880
+    // （プライマリ基準の現行実装なら (int)(0.5*1918)+1 = 960 になり FAIL する値）
+    assert_eq!(m.anchor(), (2880, -256));
+    assert_eq!(rng.consumed(), 1);
+}
+
+/// 契約: multiscreen=false かつアンカーが全モニタ外 → `resolve_work_area` は
+/// invisibleScreen（0×0・visible=false）を返し、Java quirk どおり式が
+/// `(int)(rng * -2) + 1` になる（x ∈ {0,1}）。プライマリ幅の乱択にはならない。
+#[test]
+fn build_next_behavior_reposition_uses_invisible_area_when_anchor_offscreen() {
+    let env = MockEnv::new();
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let t = table(vec![
+        BehaviorEntry::Single(def("Walk", 0, Some(next_list(false, &[("Fall", 0)])))),
+        single("Fall", 100),
+    ]);
+
+    // rng 0.5 → (int)(0.5*(0-2)) + 0 + 1 = (int)(-1.0) + 1 = 0
+    let mut m = mascot_at((5000, 5000)); // 全モニタ外
+    let mut rng = FakeRng::new(&[0.5]);
+    let _runner = t
+        .build_next_behavior(Some("Walk"), &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(m.anchor(), (0, -256));
+
+    // rng 0.0 → (int)(0*(-2)) + 0 + 1 = 1（x ∈ {0,1} の上端）
+    let mut m = mascot_at((5000, 5000));
+    let mut rng = FakeRng::new(&[0.0]);
+    let _runner = t
+        .build_next_behavior(Some("Walk"), &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(m.anchor(), (1, -256));
+}
+
+/// 契約: multiscreen=false でもアンカーが「画面内だが作業領域外」
+/// （タスクバー帯相当）なら、getWorkArea の決定木③以前のフォールバック
+/// （MascotEnvironment.java L104-109）で**スクリーン領域**が使われる。
+#[test]
+fn build_next_behavior_reposition_uses_screen_when_anchor_in_taskbar_band() {
+    // 左タスクバー: screen=(0,0,1920,1080) / 作業領域=(100,0,1820,1080)
+    let env = MockEnv::new().with_monitors(
+        vec![area_state(0, 0, 1920, 1080, true)],
+        vec![area_state(100, 0, 1820, 1080, true)],
+    );
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let t = table(vec![
+        BehaviorEntry::Single(def("Walk", 0, Some(next_list(false, &[("Fall", 0)])))),
+        single("Fall", 100),
+    ]);
+
+    let mut m = mascot_at((50, 500)); // 画面内 (0..1920)・作業領域外 (x < 100)
+    let mut rng = FakeRng::new(&[0.9999]);
+    let _runner = t
+        .build_next_behavior(Some("Walk"), &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    // screen=(0,0,1920,1080): (int)(0.9999*1918) + 0 + 1 = 1917+1 = 1918
+    // （作業領域 (100,0,1820,1080) 基準の現行実装なら (int)(0.9999*1718)+101 = 1818 で FAIL）
+    assert_eq!(m.anchor(), (1918, -256));
+}
+
+/// 契約（回帰）: multiscreen=true は従来どおり `env.screen()`（全画面 union）を使い、
+/// アンカーが副モニタ内でもアンカー基準の作業領域には切り替わらない。
+#[test]
+fn build_next_behavior_reposition_uses_screen_union_when_multiscreen_on() {
+    let env = MockEnv::new().with_monitors(
+        vec![
+            area_state(0, 0, 1920, 1080, true),
+            area_state(1920, 0, 3840, 1080, true),
+        ],
+        vec![
+            area_state(0, 0, 1920, 1040, true),
+            area_state(1920, 0, 3840, 1040, true),
+        ],
+    );
+    let env = MockEnv {
+        multiscreen: true,
+        ..env
+    };
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let t = table(vec![
+        BehaviorEntry::Single(def("Walk", 0, Some(next_list(false, &[("Fall", 0)])))),
+        single("Fall", 100),
+    ]);
+
+    let mut m = mascot_at((2000, 500));
+    let mut rng = FakeRng::new(&[0.5]);
+    let _runner = t
+        .build_next_behavior(Some("Walk"), &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    // screen union=(0,0,3840,1080): (int)(0.5*3838) + 1 = 1919+1 = 1920
+    // （誤ってアンカー基準の副モニタ作業領域を使うと 2880 になり FAIL）
+    assert_eq!(m.anchor(), (1920, -256));
+}
+
 #[test]
 fn build_behavior_builds_named_runner_and_errors_on_unknown() {
     let env = MockEnv::new();
@@ -1327,8 +1518,11 @@ fn tick_repositions_and_falls_when_off_screen() {
     let mut rng = FakeRng::new(&[0.5]);
     m.tick(&env, &t, &mut factory, &mut rng);
 
-    // off-screen → 再配置式の焼き込み + Fall 遷移
-    assert_eq!(m.anchor(), (960, -256));
+    // off-screen → 再配置式の焼き込み + Fall 遷移。
+    // anchor=(5000,100) は全モニタ外のため、Java 準拠（MascotEnvironment.java L104-113）では
+    // invisibleScreen 0×0 にフォールバックし、x = (int)(0.5 * -2) + 0 + 1 = 0, y = -256。
+    // （旧期待値 (960,-256) は #22 でプライマリ固定の work_area を解消する前の stale pin）
+    assert_eq!(m.anchor(), (0, -256));
     assert_eq!(m.behavior_name(), Some("Fall"));
     assert_eq!(rng.consumed(), 1); // 再配置でのみ消費（Fall 構築では消費しない）
 }

@@ -24,6 +24,7 @@
 //!   hotspot 経路の isBehaviorEnabled は [`BehaviorTable::build_behavior`] 経由で適用済み
 //! - isHidden フィルタは buildNextBehavior には存在しない（Java 正本確認済み）
 
+use super::env::resolve_work_area;
 use super::{EnvironmentView, Mascot, MascotContext, Rng};
 use crate::config::script::{EvalContext, EvalError, EvalValue, Variable, Variables};
 use crate::config::{BehaviorEntry, BehaviorRef, BehaviorsConfig, NextBehaviorList, SequenceChild};
@@ -167,19 +168,29 @@ pub(crate) fn set_behavior_and_init(
 }
 
 /// 再配置式（Java Configuration.java L519-522 / L545-548 逐語）。
-/// area は multiscreen ? screen : work_area。乱数を 1 回消費する。
+/// area は multiscreen ? screen(union) : アンカー基準の work area
+/// （[`resolve_work_area`] = Java MascotEnvironment.getWorkArea(boolean) L66-114 の
+/// 決定木）。乱数を 1 回消費する。
+/// - multiscreen=true: `env.screen()`（全画面 union。Java
+///   MascotEnvironment.getScreen L127-134 と一致）
+/// - multiscreen=false: アンカーが属する作業領域（含む画面が無ければ invisibleScreen）。
+///   design §1.9 に記録した「プライマリ固定」の意図的差異は本対応で解消。
+///
 /// anchor = ((rng * (area.width - 2)) as i32) + area.left + 1, area.top - 256
 /// （Java (int) キャスト = 0 への切り捨て。rng.unit() ∈ [0,1) なので正）。
 /// 幅から 2 を引き左端に 1 を足すのは、壁登りではなく落下を開始させるため
 /// （Java コメント踏襲）。
 fn reposition_above_area(mascot: &mut Mascot, env: &dyn EnvironmentView, rng: &mut dyn Rng) {
-    let area = if env.multiscreen() {
-        env.screen()
+    let (left, top, width) = if env.multiscreen() {
+        let area = env.screen();
+        (area.left, area.top, area.width())
     } else {
-        env.work_area()
+        let slot = resolve_work_area(env, mascot.anchor());
+        let area = env.work_area_state(slot);
+        (area.left, area.top, area.width())
     };
-    let x = (rng.unit() * f64::from(area.width() - 2)) as i32 + area.left + 1;
-    mascot.set_anchor((x, area.top - 256));
+    let x = (rng.unit() * f64::from(width - 2)) as i32 + left + 1;
+    mascot.set_anchor((x, top - 256));
 }
 
 /// XML の `<Behavior>` 1 つ = 1 実行器（Java `UserBehavior` 相当）。
