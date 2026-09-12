@@ -62,7 +62,7 @@ pub fn animation_is_effective(
         EvalValue::Bool(effective) => Ok(effective),
         EvalValue::Number(value) => Err(EvalError {
             expr: format!("{condition:?}"),
-            message: format!("アニメーション条件はブールである必要があります（数値 {value}）"),
+            message: format!("animation condition must be a boolean (got number {value})"),
         }),
     }
 }

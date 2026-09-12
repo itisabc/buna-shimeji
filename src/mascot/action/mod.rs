@@ -193,7 +193,7 @@ impl Base {
         match self.attrs.get(key) {
             Some(Variable::Constant(ConstantValue::Text(text))) => Some(text.clone()),
             Some(_) => {
-                log::warn!("属性 `{key}` を文字列として評価できません（既定値を使用します）");
+                log::warn!("attribute `{key}` cannot be evaluated as a string (using the default)");
                 None
             }
             None => None,
@@ -248,7 +248,7 @@ impl Base {
             // Java (Number.class) キャスト失敗相当
             EvalValue::Bool(_) => Err(ActionError::Eval(EvalError {
                 expr: key.to_string(),
-                message: format!("属性 `{key}` を数値として評価できません"),
+                message: format!("attribute `{key}` cannot be evaluated as a number"),
             })),
         }
     }
@@ -275,7 +275,7 @@ impl Base {
             // Java (Boolean.class) キャスト失敗相当
             EvalValue::Number(_) => Err(ActionError::Eval(EvalError {
                 expr: key.to_string(),
-                message: format!("属性 `{key}` をブールとして評価できません"),
+                message: format!("attribute `{key}` cannot be evaluated as a boolean"),
             })),
         }
     }
@@ -362,7 +362,7 @@ impl Base {
         }
         Err(ActionError::Eval(EvalError {
             expr: "(Animation)".to_string(),
-            message: "有効なアニメーションが存在しません（Java は null 参照相当で停止）"
+            message: "no effective animation exists (Java stops as if by a null reference)"
                 .to_string(),
         }))
     }
@@ -448,7 +448,7 @@ impl Base {
                         EvalValue::Number(_) => {
                             return Err(EvalError {
                                 expr: "Animation".to_string(),
-                                message: "アニメ条件はブールである必要があります".to_string(),
+                                message: "animation condition must be a boolean".to_string(),
                             })
                         }
                     },
@@ -478,7 +478,7 @@ impl Base {
         let anim = self.get_animation(mascot, env)?.ok_or_else(|| {
             ActionError::Eval(EvalError {
                 expr: "(Animation)".to_string(),
-                message: "適用できるアニメーションが存在しません（Java は null 参照相当）"
+                message: "no applicable animation exists (Java's equivalent of a null reference)"
                     .to_string(),
             })
         })?;
@@ -510,7 +510,7 @@ impl Action for StubAction {
     ) -> Result<(), ActionError> {
         self.base.init(mascot);
         log::warn!(
-            "アクション種別 `{:?}` は本バージョンでは未実装のため即完了します",
+            "action kind `{:?}` is not implemented in this version; completing immediately",
             self.kind
         );
         Ok(())
@@ -1280,8 +1280,7 @@ pub fn create(
         // ComplexAction 系は子アクションが必要なため直接構築不可
         ActionKind::Sequence | ActionKind::Select => {
             return Err(BehaviorError::UnknownBehavior(
-                "Sequence/Select は子アクションを持つため build_action 経由で構築してください"
-                    .to_string(),
+                "Sequence/Select have child actions; build them via build_action".to_string(),
             ));
         }
     };

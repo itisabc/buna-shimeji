@@ -39,10 +39,10 @@ pub struct ReloadMaterial {
 #[derive(Debug, Error)]
 pub enum MaterialError {
     /// conf（actions.xml / behaviors.xml / 必須 4 種 Behavior）の読み込み失敗。
-    #[error("設定の読み込みに失敗しました: {0}")]
+    #[error("failed to load configuration: {0}")]
     Config(#[from] ConfigError),
     /// 画像 set の列挙失敗（img_dir 不在等）。
-    #[error("画像セットの列挙に失敗しました: {0}")]
+    #[error("failed to enumerate image sets: {0}")]
     Imageset(#[from] ImagesetError),
 }
 
@@ -83,7 +83,7 @@ pub fn load_materials(
         let image_set = match ImageSet::load(img_dir, &set, scales.get(&set).copied()) {
             Ok(image_set) => Arc::new(image_set),
             Err(err) => {
-                log::warn!("画像セット `{set}` の読み込みに失敗したためスキップします: {err}");
+                log::warn!("skipping image set `{set}`: failed to load it: {err}");
                 continue;
             }
         };
@@ -92,7 +92,7 @@ pub fn load_materials(
         let refs = match available_refs(img_dir, &set) {
             Ok(refs) => refs,
             Err(err) => {
-                log::warn!("画像セット `{set}` の画像列挙に失敗したためスキップします: {err}");
+                log::warn!("skipping image set `{set}`: failed to enumerate its images: {err}");
                 continue;
             }
         };

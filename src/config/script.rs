@@ -89,7 +89,7 @@ pub trait EvalContext {
 /// ※ thiserror が `source` という名のフィールドをエラー連鎖用と特別扱いするため、
 /// 式ソースのフィールド名は `expr` にしている。
 #[derive(Debug, Clone, PartialEq, Error)]
-#[error("式評価エラー: {message}（式: `{expr}`）")]
+#[error("expression evaluation error: {message} (expression: `{expr}`)")]
 pub struct EvalError {
     pub expr: String,
     pub message: String,
@@ -171,7 +171,11 @@ impl Variables {
         self.eval_quiet(var, ctx).map_err(|err| {
             // warn は Script 式のみ（Constant の評価失敗は旧実装から warn 無し）
             if let Variable::Script { source, .. } = var {
-                log::warn!("スクリプト式を評価できません: {{{}}}（{}）", source, err);
+                log::warn!(
+                    "failed to evaluate script expression: {{{}}} ({})",
+                    source,
+                    err
+                );
             }
             err
         })
@@ -194,7 +198,9 @@ impl Variables {
                     Variable::Constant(ConstantValue::Text(t)) => t.clone(),
                     Variable::Constant(_) => String::new(),
                 },
-                message: format!("式評価の再帰が深すぎます（上限 {MAX_EVAL_DEPTH} 段）"),
+                message: format!(
+                    "expression evaluation recursion too deep (limit {MAX_EVAL_DEPTH})"
+                ),
             });
         }
         self.eval_depth += 1;
@@ -232,7 +238,7 @@ fn const_eval(value: &ConstantValue) -> Result<EvalValue, EvalError> {
         ConstantValue::Number(n) => Ok(EvalValue::Number(*n)),
         ConstantValue::Text(t) => Err(EvalError {
             expr: t.clone(),
-            message: "文字列定数は評価値として扱えません".to_string(),
+            message: "a string constant cannot be used as an evaluated value".to_string(),
         }),
     }
 }
@@ -375,7 +381,7 @@ fn lex(source: &str) -> Result<Vec<Tok>, String> {
             let text: String = chars[start..i].iter().collect();
             let n = text
                 .parse::<f64>()
-                .map_err(|_| format!("数値として解釈できません: {text}"))?;
+                .map_err(|_| format!("not a valid number: {text}"))?;
             toks.push(Tok::Num(n));
             continue;
         }
@@ -428,7 +434,7 @@ fn lex(source: &str) -> Result<Vec<Tok>, String> {
                 toks.push(Tok::Sym(sym));
                 i += 1;
             }
-            None => return Err(format!("未知の文字: {c}")),
+            None => return Err(format!("unknown character: {c}")),
         }
     }
     Ok(toks)
@@ -485,21 +491,21 @@ impl<'s> Parser<'s> {
         if self.eat(sym) {
             Ok(())
         } else {
-            Err(self.err(format!("{what} が必要ですが見つかりません")))
+            Err(self.err(format!("{what} is required but not found")))
         }
     }
 
     /// 深さ上限超過の共通エラー（#21）。
     fn too_deep(&self) -> EvalError {
         self.err(format!(
-            "式のネストが深すぎます（上限 {MAX_EXPR_DEPTH} 段）"
+            "expression nesting too deep (limit {MAX_EXPR_DEPTH})"
         ))
     }
 
     /// 再帰下降ネスト上限超過の共通エラー（#21）。
     fn recursion_too_deep(&self) -> EvalError {
         self.err(format!(
-            "式の入れ子が深すぎます（パース上限 {MAX_PARSE_DEPTH} 段）"
+            "expression nesting too deep (parse limit {MAX_PARSE_DEPTH})"
         ))
     }
 
@@ -531,7 +537,7 @@ impl<'s> Parser<'s> {
     fn parse_expr(&mut self) -> Result<Node, EvalError> {
         let node = self.parse_ternary()?;
         if self.pos != self.toks.len() {
-            return Err(self.err("式の後に余分なトークンがあります"));
+            return Err(self.err("unexpected token after expression"));
         }
         Ok(node)
     }
@@ -552,7 +558,7 @@ impl<'s> Parser<'s> {
         let cond = self.parse_or()?;
         if self.eat(Sym::Question) {
             let then = self.parse_ternary()?;
-            self.expect(Sym::Colon, "三項演算子の `:`")?;
+            self.expect(Sym::Colon, "ternary `:`")?;
             let else_ = self.parse_ternary()?;
             let depth = cond.depth.max(then.depth).max(else_.depth) + 1;
             self.check_depth(depth)?;
@@ -717,7 +723,7 @@ impl<'s> Parser<'s> {
                 while self.eat(Sym::Dot) {
                     match self.bump() {
                         Some(Tok::Ident(seg)) => segs.push(seg),
-                        _ => return Err(self.err("`.` の後は識別子である必要があります")),
+                        _ => return Err(self.err("expected an identifier after `.`")),
                     }
                 }
                 if self.eat(Sym::LParen) {
@@ -743,11 +749,11 @@ impl<'s> Parser<'s> {
             Some(Tok::Sym(Sym::LParen)) => {
                 // 括弧は AST ノードを増やさないため深さは加算しない。
                 let node = self.parse_ternary()?;
-                self.expect(Sym::RParen, "括弧を閉じる `)`")?;
+                self.expect(Sym::RParen, "closing `)`")?;
                 Ok(node)
             }
-            Some(tok) => Err(self.err(format!("予期しないトークン: {tok:?}"))),
-            None => Err(self.err("式が必要ですが入力が終了しました")),
+            Some(tok) => Err(self.err(format!("unexpected token: {tok:?}"))),
+            None => Err(self.err("expression required but input ended")),
         }
     }
 
@@ -761,7 +767,7 @@ impl<'s> Parser<'s> {
             if self.eat(Sym::Comma) {
                 continue;
             }
-            self.expect(Sym::RParen, "引数リストを閉じる `)`")?;
+            self.expect(Sym::RParen, "closing `)` of argument list")?;
             return Ok(args);
         }
     }
@@ -787,12 +793,10 @@ impl<'a> Interp<'a> {
 
     fn type_err(&self, what: &str, expected: &str, got: EvalValue) -> EvalError {
         let got_name = match got {
-            EvalValue::Number(_) => "数値",
-            EvalValue::Bool(_) => "ブール",
+            EvalValue::Number(_) => "number",
+            EvalValue::Bool(_) => "boolean",
         };
-        self.err(format!(
-            "{what} には{expected}が必要ですが {got_name} でした"
-        ))
+        self.err(format!("{what} requires {expected} but got {got_name}"))
     }
 
     fn eval(&mut self, expr: &Expr) -> Result<EvalValue, EvalError> {
@@ -803,32 +807,36 @@ impl<'a> Interp<'a> {
             Expr::Method { target, name, args } => self.eval_method(target, name, args),
             Expr::Not(inner) => match self.eval(inner)? {
                 EvalValue::Bool(b) => Ok(EvalValue::Bool(!b)),
-                got => Err(self.type_err("論理否定 `!`", "ブール", got)),
+                got => Err(self.type_err("logical not `!`", "boolean", got)),
             },
             Expr::Neg(inner) => match self.eval(inner)? {
                 EvalValue::Number(n) => Ok(EvalValue::Number(-n)),
-                got => Err(self.type_err("単項 `-`", "数値", got)),
+                got => Err(self.type_err("unary `-`", "number", got)),
             },
             Expr::Bin { op, lhs, rhs } => self.eval_bin(*op, lhs, rhs),
             Expr::And(lhs, rhs) => {
                 // Java && に従い短絡評価する
-                if !self.eval_bool(lhs, "&& の左辺")? {
+                if !self.eval_bool(lhs, "left operand of `&&`")? {
                     Ok(EvalValue::Bool(false))
                 } else {
-                    Ok(EvalValue::Bool(self.eval_bool(rhs, "&& の右辺")?))
+                    Ok(EvalValue::Bool(
+                        self.eval_bool(rhs, "right operand of `&&`")?,
+                    ))
                 }
             }
             Expr::Or(lhs, rhs) => {
                 // Java || に従い短絡評価する
-                if self.eval_bool(lhs, "|| の左辺")? {
+                if self.eval_bool(lhs, "left operand of `||`")? {
                     Ok(EvalValue::Bool(true))
                 } else {
-                    Ok(EvalValue::Bool(self.eval_bool(rhs, "|| の右辺")?))
+                    Ok(EvalValue::Bool(
+                        self.eval_bool(rhs, "right operand of `||`")?,
+                    ))
                 }
             }
             Expr::Ternary { cond, then, else_ } => {
                 // 条件側のみを評価する（Java 三項演算子と同じ遅延評価）
-                if self.eval_bool(cond, "三項演算子の条件")? {
+                if self.eval_bool(cond, "ternary condition")? {
                     self.eval(then)
                 } else {
                     self.eval(else_)
@@ -840,14 +848,14 @@ impl<'a> Interp<'a> {
     fn eval_bool(&mut self, expr: &Expr, what: &str) -> Result<bool, EvalError> {
         match self.eval(expr)? {
             EvalValue::Bool(b) => Ok(b),
-            got => Err(self.type_err(what, "ブール", got)),
+            got => Err(self.type_err(what, "boolean", got)),
         }
     }
 
     fn eval_num(&mut self, expr: &Expr, what: &str) -> Result<f64, EvalError> {
         match self.eval(expr)? {
             EvalValue::Number(n) => Ok(n),
-            got => Err(self.type_err(what, "数値", got)),
+            got => Err(self.type_err(what, "number", got)),
         }
     }
 
@@ -855,8 +863,8 @@ impl<'a> Interp<'a> {
         use BinOp::{Add, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Sub};
         match op {
             Add | Sub | Mul | Div => {
-                let a = self.eval_num(lhs, "算術演算の左辺")?;
-                let b = self.eval_num(rhs, "算術演算の右辺")?;
+                let a = self.eval_num(lhs, "left operand of arithmetic")?;
+                let b = self.eval_num(rhs, "right operand of arithmetic")?;
                 let n = match op {
                     Add => a + b,
                     Sub => a - b,
@@ -867,8 +875,8 @@ impl<'a> Interp<'a> {
                 Ok(EvalValue::Number(n))
             }
             Lt | Le | Gt | Ge => {
-                let a = self.eval_num(lhs, "比較の左辺")?;
-                let b = self.eval_num(rhs, "比較の右辺")?;
+                let a = self.eval_num(lhs, "left operand of comparison")?;
+                let b = self.eval_num(rhs, "right operand of comparison")?;
                 let r = match op {
                     Lt => a < b,
                     Le => a <= b,
@@ -884,7 +892,13 @@ impl<'a> Interp<'a> {
                 let r = match (a, b) {
                     (EvalValue::Number(x), EvalValue::Number(y)) => x == y,
                     (EvalValue::Bool(x), EvalValue::Bool(y)) => x == y,
-                    _ => return Err(self.type_err("等価比較", "同型の値", b)),
+                    _ => {
+                        return Err(self.type_err(
+                            "equality comparison",
+                            "values of the same type",
+                            b,
+                        ))
+                    }
                 };
                 Ok(EvalValue::Bool(if op == Eq { r } else { !r }))
             }
@@ -907,7 +921,7 @@ impl<'a> Interp<'a> {
             if let Some(b) = self.ctx.boolean(path) {
                 return Ok(EvalValue::Bool(b));
             }
-            return Err(self.err(format!("不明な mascot 変数: {path}")));
+            return Err(self.err(format!("unknown mascot variable: {path}")));
         }
         if let Some(n) = self.vars.injected.get(path) {
             return Ok(EvalValue::Number(*n));
@@ -918,7 +932,7 @@ impl<'a> Interp<'a> {
             let ctx = self.ctx;
             return self.vars.eval_quiet(&var, ctx);
         }
-        Err(self.err(format!("不明な識別子: {path}")))
+        Err(self.err(format!("unknown identifier: {path}")))
     }
 
     /// メソッド呼び出し。対応範囲は Math.random/abs/min と isOn のみ（資産で使用の全種）。
@@ -932,28 +946,28 @@ impl<'a> Interp<'a> {
             return match (name, args.len()) {
                 ("random", 0) => Ok(EvalValue::Number(random_unit())),
                 ("abs", 1) => Ok(EvalValue::Number(
-                    self.eval_num(&args[0], "Math.abs の引数")?.abs(),
+                    self.eval_num(&args[0], "argument of Math.abs")?.abs(),
                 )),
                 ("min", 2) => {
-                    let a = self.eval_num(&args[0], "Math.min の第 1 引数")?;
-                    let b = self.eval_num(&args[1], "Math.min の第 2 引数")?;
+                    let a = self.eval_num(&args[0], "first argument of Math.min")?;
+                    let b = self.eval_num(&args[1], "second argument of Math.min")?;
                     Ok(EvalValue::Number(java_min(a, b)))
                 }
                 _ => Err(self.err(format!(
-                    "未対応の Math 関数: Math.{}（引数 {} 個）",
+                    "unsupported Math function: Math.{} ({} arguments)",
                     name,
                     args.len()
                 ))),
             };
         }
         if target.is_empty() {
-            return Err(self.err(format!("メソッド呼び出しの対象がありません: {name}")));
+            return Err(self.err(format!("method call has no target: {name}")));
         }
         if name == "isOn" && args.len() == 1 {
             let (x, y) = self.eval_point(&args[0])?;
             return Ok(EvalValue::Bool(self.ctx.is_on(target, x, y)));
         }
-        Err(self.err(format!("未対応のメソッド呼び出し: {target}.{name}")))
+        Err(self.err(format!("unsupported method call: {target}.{name}")))
     }
 
     /// isOn の引数点。`mascot.anchor` はアンカー点 (anchor.x, anchor.y) に展開する
@@ -964,15 +978,15 @@ impl<'a> Interp<'a> {
                 let x = self
                     .ctx
                     .number("mascot.anchor.x")
-                    .ok_or_else(|| self.err("不明な mascot 変数: mascot.anchor.x"))?;
+                    .ok_or_else(|| self.err("unknown mascot variable: mascot.anchor.x"))?;
                 let y = self
                     .ctx
                     .number("mascot.anchor.y")
-                    .ok_or_else(|| self.err("不明な mascot 変数: mascot.anchor.y"))?;
+                    .ok_or_else(|| self.err("unknown mascot variable: mascot.anchor.y"))?;
                 return Ok((x, y));
             }
         }
-        let n = self.eval_num(arg, "isOn の引数")?;
+        let n = self.eval_num(arg, "argument of isOn")?;
         Ok((n, n))
     }
 }

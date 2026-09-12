@@ -325,7 +325,7 @@ impl OsSource for Win32OsSource {
                 .map(|wa| (rect_from_workarea(wa.monitor), rect_from_workarea(wa.area)))
                 .collect(),
             Err(err) => {
-                log::warn!("モニタ列挙に失敗しました: {err}");
+                log::warn!("failed to enumerate monitors: {err}");
                 Vec::new()
             }
         }

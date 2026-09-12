@@ -39,9 +39,9 @@ const BEHAVIORNAME_THROWN: &str = "Thrown";
 /// [`Action`] の実行エラー（Java `VariableException` / `LostGroundException` 相当）。
 #[derive(Debug, thiserror::Error)]
 pub enum ActionError {
-    #[error("式評価エラー: {0}")]
+    #[error("expression evaluation error: {0}")]
     Eval(EvalError),
-    #[error("地面を失いました（LostGround）")]
+    #[error("lost ground (LostGround)")]
     LostGround,
 }
 
@@ -55,9 +55,9 @@ impl From<crate::config::script::EvalError> for ActionError {
 /// `BehaviorInstantiationException` 相当）。
 #[derive(Debug, thiserror::Error)]
 pub enum BehaviorError {
-    #[error("式評価エラー: {0}")]
+    #[error("expression evaluation error: {0}")]
     Eval(EvalError),
-    #[error("存在しない Behavior: {0}")]
+    #[error("unknown Behavior: {0}")]
     UnknownBehavior(String),
 }
 
@@ -148,7 +148,7 @@ fn action_error_to_behavior(err: ActionError) -> BehaviorError {
         ActionError::Eval(e) => BehaviorError::Eval(e),
         ActionError::LostGround => BehaviorError::Eval(EvalError {
             expr: "(LostGround)".to_string(),
-            message: "LostGround は BehaviorError で表現できないため Eval として伝播します"
+            message: "LostGround cannot be represented as a BehaviorError; propagating as Eval"
                 .to_string(),
         }),
     }
@@ -330,7 +330,7 @@ impl BehaviorRunner {
                     || screen.right <= bounds_x
                     || screen.bottom <= bounds_y
                 {
-                    log::info!("画面外に移動しました ({bounds_x}, {bounds_y})");
+                    log::info!("moved offscreen ({bounds_x}, {bounds_y})");
                     reposition_above_area(mascot, env, rng);
                     let fall = table
                         .build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot.scale())
@@ -339,7 +339,7 @@ impl BehaviorRunner {
                         .map_err(NextFlow::Fatal)?;
                 }
             } else {
-                log::info!("Behavior `{}` を完了しました", self.name);
+                log::info!("Behavior `{}` completed", self.name);
                 let next = table
                     .build_next_behavior(Some(self.name.as_str()), mascot, env, factory, rng)
                     .map_err(NextFlow::Fatal)?;
@@ -590,7 +590,7 @@ impl BehaviorTable {
         if Self::is_behavior_enabled(row, mascot.image_set_name(), env) {
             self.build_behavior_direct(name, factory, mascot.scale())
         } else {
-            log::warn!("Behavior `{name}` は無効化されているため Fall へフォールバックします");
+            log::warn!("Behavior `{name}` is disabled; falling back to Fall");
             reposition_above_area(mascot, env, rng);
             self.build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot.scale())
         }
@@ -628,7 +628,10 @@ impl BehaviorTable {
                 Ok(EvalValue::Bool(true)) => true,
                 Ok(_) => false,
                 Err(err) => {
-                    log::warn!("Behavior `{}` の条件を評価できません: {err}", row.name);
+                    log::warn!(
+                        "failed to evaluate condition of Behavior `{}`: {err}",
+                        row.name
+                    );
                     false
                 }
             })
@@ -649,7 +652,7 @@ impl BehaviorTable {
                 Ok(_) => false,
                 Err(err) => {
                     log::warn!(
-                        "Behavior 参照 `{}` の条件を評価できません: {err}",
+                        "failed to evaluate condition of Behavior reference `{}`: {err}",
                         reference.name
                     );
                     false

@@ -100,6 +100,7 @@ use simeji::app::environment::Environment;
 use simeji::app::manager::Manager;
 use simeji::app::reload::load_materials;
 use simeji::config::parse_actions;
+use simeji::i18n::{Lang, UiKey};
 use simeji::mascot::action::factory::XmlBehaviorFactory;
 use simeji::mascot::rng::JavaRandom;
 use simeji::render::imageset::ImageSet;
@@ -159,6 +160,8 @@ struct App {
     views: Vec<MascotView>,
     // mascot 右クリック popup のモデル（選択時 / drain 時に command_of 走査）
     menu_popups: Vec<TrayMenuModel>,
+    /// UI 文言辞書（起動時 1 回ロード・popup 構築が参照・design §4.2）。
+    lang: Lang,
     last_tick: Instant,
     // draw 失敗 / frame 取得失敗の連続 warn 抑止（index → 最後の warn 文字列）
     last_draw_warns: HashMap<usize, String>,
@@ -215,9 +218,7 @@ impl App {
             match MascotView::create(target, 1, 1) {
                 Ok(view) => self.views.push(view),
                 Err(err) => {
-                    log::error!(
-                        "マスコットのウィンドウ生成に失敗しました（次 tick で再試行します）: {err}"
-                    );
+                    log::error!("failed to create mascot window (will retry on next tick): {err}");
                     break;
                 }
             }
@@ -247,13 +248,13 @@ impl App {
                             .cursor_position()
                             .map_or((0, 0), |pos| (pos.x as i32, pos.y as i32));
                         if let Err(err) = self.manager.mouse_pressed_at(index, point) {
-                            log::error!("マウス押下の処理に失敗しました: {err}");
+                            log::error!("failed to handle mouse press: {err}");
                             self.manager.dismiss_at(index);
                         }
                     }
                     (ElementState::Released, MouseButton::Left) => {
                         if let Err(err) = self.manager.mouse_released_at(index) {
-                            log::error!("マウス解放の処理に失敗しました: {err}");
+                            log::error!("failed to handle mouse release: {err}");
                             self.manager.dismiss_at(index);
                         }
                     }
@@ -295,6 +296,7 @@ impl App {
             &self.dirs.tray_context.image_sets,
             &menu_items,
             is_paused,
+            &self.lang,
         );
         // muda / tray-icon 実物 API: position None = カーソル位置（doc 参照）。
         // 戻り値 = 項目選択の有無（platform_impl/windows/mod.rs show_context_menu_for_hwnd
@@ -336,7 +338,7 @@ impl App {
                 }
                 continue;
             }
-            log::warn!("未知のメニュー id を無視しました: {id:?}");
+            log::warn!("ignoring unknown menu id: {id:?}");
         }
     }
 
@@ -376,7 +378,7 @@ impl App {
                     .apply_all(|mascot| mascot.set_needs_repaint(true));
             }
             Err(err) => {
-                log::error!("Reload に失敗したため現状を維持します: {err}");
+                log::error!("reload failed; keeping current state: {err}");
             }
         }
     }
@@ -400,7 +402,7 @@ fn warn_once(memo: &mut HashMap<usize, String>, index: usize, message: impl FnOn
         return;
     }
     memo.insert(index, message.clone());
-    log::warn!("マスコット #{index} の描画を問題によりスキップしました: {message}");
+    log::warn!("skipped drawing mascot #{index} due to a problem: {message}");
 }
 
 /// draw glue（③(T) sink = draw + clear_needs_repaint）。
@@ -426,14 +428,14 @@ fn handle_draws(
         let Some(image_state) = mascot.image().cloned() else {
             // frame 取得失敗（None）→ log（連続抑止）+ clear しない（次 tick 再試行）
             warn_once(last_draw_warns, index, || {
-                "画像ポーズが未解決（mascot が画像を保持していません）".to_string()
+                "image pose unresolved (mascot holds no image)".to_string()
             });
             return;
         };
         let image_set = mascot.image_set_arc();
         let Some(frame) = image_set.frames.get(&image_state.image_ref) else {
             warn_once(last_draw_warns, index, || {
-                format!("画像 {} が画像セットに存在しません", image_state.image_ref)
+                format!("image {} not found in image set", image_state.image_ref)
             });
             return;
         };
@@ -468,7 +470,7 @@ fn handle_draws(
                 last_draw_warns.remove(&index);
             }
             Err(err) => {
-                warn_once(last_draw_warns, index, || format!("描画に失敗: {err}"));
+                warn_once(last_draw_warns, index, || format!("draw failed: {err}"));
             }
         }
     });
@@ -492,13 +494,13 @@ fn try_main() -> anyhow::Result<()> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
-        .context("実行ファイルのディレクトリを特定できませんでした")?;
+        .context("could not determine the executable directory")?;
 
     // 2. settings.toml（パースエラー等はファイルパスを添えて終了・handoff ⑪。
     //    不在時は既定値が返る）
     let settings_path = exe_dir.join("conf").join("settings.toml");
     let settings = Settings::load(&settings_path)
-        .with_context(|| format!("{} の読み込みに失敗しました", settings_path.display()))?;
+        .with_context(|| format!("failed to load {}", settings_path.display()))?;
 
     // 3. show_console = true のときだけコンソールを確保（既定 false = 非表示）
     if settings.general.show_console {
@@ -511,12 +513,15 @@ fn try_main() -> anyhow::Result<()> {
     // 5. 資産ディレクトリ（欠落パス入りエラーで終了）
     let AssetDirs { conf_dir, img_dir } = resolve_assets(&exe_dir)?;
 
+    // 5b. UI 文言辞書（env_logger 初期化後 = warn を消さない・design §4.2）
+    let lang = Lang::load(&conf_dir.join("lang"), &settings.general.language);
+
     // 6. settings.toml が無ければ既定設定で初回生成する（失敗しても起動は止めない）
     match Settings::create_default_if_missing(&settings_path) {
-        Ok(true) => log::info!("{} を既定設定で生成しました", settings_path.display()),
+        Ok(true) => log::info!("created {} with default settings", settings_path.display()),
         Ok(false) => {}
         Err(err) => log::warn!(
-            "{} の生成に失敗しました（既定設定で起動を続行します）: {err}",
+            "failed to create {} (continuing with default settings): {err}",
             settings_path.display()
         ),
     }
@@ -525,7 +530,7 @@ fn try_main() -> anyhow::Result<()> {
     let _guard = match SingleInstance::acquire(SINGLE_INSTANCE_MUTEX) {
         Ok(guard) => guard,
         Err(SingleInstanceError::AlreadyRunning) => {
-            bail!("既に起動しています（単一起動のため終了します）");
+            bail!("another instance is already running (single instance only)");
         }
         Err(err @ SingleInstanceError::CreateFailed(_)) => return Err(err.into()),
     };
@@ -537,11 +542,11 @@ fn try_main() -> anyhow::Result<()> {
     let scales = scales_of(&settings);
     let materials = match load_materials(&conf_dir, &img_dir, &scales) {
         Ok(materials) => materials,
-        Err(err) => bail!("起動時の素材ロードに失敗しました: {err}"),
+        Err(err) => bail!("failed to load materials at startup: {err}"),
     };
     if materials.is_empty() {
         bail!(
-            "有効な画像セットが 1 つもありません: {} 配下に画像 set（PNG のフォルダ）が必要です",
+            "no valid image sets found: expected image set folders (containing PNGs) under {}",
             img_dir.display()
         );
     }
@@ -565,7 +570,7 @@ fn try_main() -> anyhow::Result<()> {
     // 同内容の 2 度パース・同期ロード許容内。Err は行番号付き表示）
     let actions = match parse_actions(&conf_dir.join("actions.xml")) {
         Ok(actions) => actions,
-        Err(err) => bail!("actions.xml の解析に失敗しました: {err}"),
+        Err(err) => bail!("failed to parse actions.xml: {err}"),
     };
     // factory は Manager が 1 個のみ保持する（manager.rs 既存設計追従・差し替え API 無し）。
     // per-set DisabledAnimation（check_references は set 毎列挙に依存）は
@@ -607,17 +612,17 @@ fn try_main() -> anyhow::Result<()> {
     manager.request_spawn_random(&image_sets);
 
     // 13. トレイ（アイコンは img/icon.png 優先 → 埋め込み既定・Java Main.getIcon L764-792 準拠）
-    let tray_model = TrayMenuModel::build_tray(&image_sets, &settings.allowed);
+    let tray_model = TrayMenuModel::build_tray(&image_sets, &settings.allowed, &lang);
     let (icon_rgba, icon_width, icon_height) = load_tray_icon_rgba(&img_dir.join("icon.png"));
     let tray_icon = tray_icon::TrayIconBuilder::new()
         .with_menu(Box::new(tray_model.menu().clone()))
         .with_icon(
             tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height)
-                .context("トレイアイコンの生成に失敗しました")?,
+                .context("failed to create tray icon")?,
         )
-        .with_tooltip("しめじ")
+        .with_tooltip(lang.text(UiKey::Shimeji))
         .build()
-        .context("トレイアイコンの生成に失敗しました")?;
+        .context("failed to create tray icon")?;
     // 「LoopDestroyed で明示 drop」のため Option 化
     let tray = Some(tray_icon);
 
@@ -632,6 +637,7 @@ fn try_main() -> anyhow::Result<()> {
         menu_popups: Vec::new(),
         last_tick: Instant::now(),
         last_draw_warns: HashMap::new(),
+        lang,
     };
 
     // 14. tao イベントループ（tick 1 本・描画/入力/トレイ受信は同じループ）
@@ -703,14 +709,14 @@ fn attach_console() {
 /// - コンソールがある場合（[`GetConsoleWindow`] 非 null）: `eprintln!` で
 ///   原因チェーン付き（`{:#}`）を表示
 /// - 無い場合（release 通常起動）: [`MessageBoxW`]（本文 = エラー、タイトル
-///   「しめじ」、`MB_OK | MB_ICONERROR`）
+///   "Shimeji"（英語固定・design §4.2）、`MB_OK | MB_ICONERROR`）
 fn report_fatal(err: &anyhow::Error) {
     let has_console = unsafe { !GetConsoleWindow().is_invalid() };
     if has_console {
         eprintln!("{err:#}");
     } else {
         let text = HSTRING::from(format!("{err:#}"));
-        let caption = HSTRING::from("しめじ");
+        let caption = HSTRING::from("Shimeji");
         unsafe {
             MessageBoxW(None, &text, &caption, MB_OK | MB_ICONERROR);
         }

@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod app;
 pub mod config;
+pub mod i18n;
 pub mod mascot;
 pub mod render;
 pub mod tray;

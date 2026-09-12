@@ -44,7 +44,7 @@
 //!     // load_materials の第 3 引数注入用
 //!     pub fn scales(&self) -> &BTreeMap<String, f64>
 //! }
-//! // thiserror・3 経路（toml パース / toml シリアライズ / io）・Display は日本語
+//! // thiserror・3 経路（toml パース / toml シリアライズ / io）・Display は英語
 //! pub enum SettingsError { /* ... */ }
 //!
 //! pub enum TrayCommand {
@@ -57,8 +57,8 @@
 //!
 //! pub struct TrayMenuModel { /* 非公開フィールド */ }
 //! impl TrayMenuModel {
-//!     pub fn build_tray(image_sets: &[String], allowed: &AllowedSettings) -> TrayMenuModel
-//!     pub fn build_popup(index: usize, image_sets: &[String], menu_items: &BehaviorMenu, is_paused: bool) -> TrayMenuModel
+//!     pub fn build_tray(image_sets: &[String], allowed: &AllowedSettings, lang: &Lang) -> TrayMenuModel
+//!     pub fn build_popup(index: usize, image_sets: &[String], menu_items: &BehaviorMenu, is_paused: bool, lang: &Lang) -> TrayMenuModel
 //!     pub fn menu(&self) -> &tray_icon::menu::Menu
 //!     pub fn command_of(&self, id: &MenuId) -> Option<TrayCommand>
 //!     pub fn sync_allowed(&self, allowed: &AllowedSettings)   // 全 CheckMenuItem へ set_checked
@@ -106,7 +106,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -114,6 +114,7 @@ use std::time::Instant;
 use simeji::app::environment::{Environment, OsSource};
 use simeji::app::manager::{BehaviorMenu, Manager};
 use simeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use simeji::i18n::Lang;
 use simeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
@@ -128,6 +129,16 @@ use tray_icon::menu::{CheckMenuItem, MenuId, MenuItemKind, Submenu};
 // =====================================================================
 // 合成データヘルパ（自己完結・app_reload_test.rs 踏襲）
 // =====================================================================
+
+/// 出荷辞書 `conf/lang/ja.toml` を読んだ `Lang`（tray/popup のラベル期待値の正本）。
+fn ja_lang() -> Lang {
+    Lang::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("conf")
+            .join("lang"),
+        "ja",
+    )
+}
 
 /// 矩形ヘルパ。
 fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
@@ -576,12 +587,12 @@ fn make_apply_context(home: &TempHome, image_sets: &[&str]) -> TrayContext {
 /// Allowed Behaviours サブメニューのラベル順（design §3-11・増殖/変身/投げ/
 /// 画面間移動/効果音枠/Transients）と AllowedKind の対応。
 const ALLOWED_LABELS: [&str; 6] = [
-    "増殖",
-    "変身",
-    "投げ",
-    "画面間移動",
-    "効果音枠",
-    "Transients",
+    "しめじを増やす動作",
+    "スキン変更、変身",
+    "ウインドウを投げる行為",
+    "マルチモニターの場合しめじが複数の画面で動作するのを許可",
+    "効果音の許可",
+    "特殊効果",
 ];
 
 fn allowed_kinds_in_menu_order() -> [AllowedKind; 6] {
@@ -690,6 +701,10 @@ fn assert_settings_eq(expected: &Settings, actual: &Settings) {
     assert_eq!(
         actual.general.show_console, expected.general.show_console,
         "general.show_console"
+    );
+    assert_eq!(
+        actual.general.language, expected.general.language,
+        "general.language"
     );
 }
 
@@ -842,7 +857,7 @@ fn settings_corrupt_toml_and_io_errors_are_settings_error() {
     let err: SettingsError = Settings::load(&home.settings_path()).expect_err("壊れた TOML は Err");
     assert!(
         !err.to_string().is_empty(),
-        "Display は日本語メッセージ（非空）"
+        "Display は英語メッセージ（非空）"
     );
 
     // io 経路: 保存先ディレクトリ不在
@@ -851,7 +866,7 @@ fn settings_corrupt_toml_and_io_errors_are_settings_error() {
         .expect_err("保存先不在は Err");
     assert!(
         !err.to_string().is_empty(),
-        "Display は日本語メッセージ（非空）"
+        "Display は英語メッセージ（非空）"
     );
 }
 
@@ -874,7 +889,10 @@ fn settings_round_trip_preserves_all_values() {
         allowed: allowed(false, true, false, true, false, true),
         disabled_behaviors: disabled,
         imagesets: ImagesetsSettings { scale },
-        general: GeneralSettings { show_console: true },
+        general: GeneralSettings {
+            show_console: true,
+            ..Default::default()
+        },
     };
 
     let path = home.settings_path();
@@ -1425,7 +1443,11 @@ fn expect_separator(kind: &MenuItemKind, what: &str) {
 #[test]
 fn tray_menu_structure_and_commands_match_design_3_11() {
     let sets = vec!["Shimeji".to_string(), "Kuro".to_string()];
-    let model = TrayMenuModel::build_tray(&sets, &allowed(true, true, true, true, true, true));
+    let model = TrayMenuModel::build_tray(
+        &sets,
+        &allowed(true, true, true, true, true, true),
+        &ja_lang(),
+    );
     let items = model.menu().items();
     assert_eq!(
         items.len(),
@@ -1453,7 +1475,7 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
 
     // 1. 「呼ぶ」Submenu: 先頭「（ランダム）」= Spawn(None) + 各 set 名 = Spawn(Some(set))
     let spawn = expect_submenu(&items[0], "呼ぶ");
-    assert_eq!(spawn.text(), "呼ぶ");
+    assert_eq!(spawn.text(), "しめじを呼ぶ");
     let children = spawn.items();
     assert_eq!(
         children.len(),
@@ -1486,25 +1508,31 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
     );
 
     // 2-4. Follow Cursor / Reduce to One / Restore Windows
-    assert_eq!(expect_item_text(&items[1], "Follow"), "Follow Cursor");
+    assert_eq!(
+        expect_item_text(&items[1], "Follow"),
+        "カーソルを追っかける"
+    );
     assert!(matches!(
         model.command_of(items[1].id()),
         Some(TrayCommand::FollowCursor)
     ));
-    assert_eq!(expect_item_text(&items[2], "Reduce"), "Reduce to One");
+    assert_eq!(expect_item_text(&items[2], "Reduce"), "一つだけにする");
     assert!(matches!(
         model.command_of(items[2].id()),
         Some(TrayCommand::ReduceToOne)
     ));
-    assert_eq!(expect_item_text(&items[3], "Restore"), "Restore Windows");
+    assert_eq!(
+        expect_item_text(&items[3], "Restore"),
+        "ウインドウをもとに戻す"
+    );
     assert!(matches!(
         model.command_of(items[3].id()),
         Some(TrayCommand::RestoreWindows)
     ));
 
     // 5. Allowed Behaviours Submenu: CheckMenuItem 6 種（ラベル順固定・checked = allowed）
-    let allowed_sub = expect_submenu(&items[4], "Allowed Behaviours");
-    assert_eq!(allowed_sub.text(), "Allowed Behaviours");
+    let allowed_sub = expect_submenu(&items[4], "許可する行為");
+    assert_eq!(allowed_sub.text(), "許可する行為");
     let checks = allowed_sub.items();
     assert_eq!(checks.len(), 6, "トグルは 6 種");
     let kinds = allowed_kinds_in_menu_order();
@@ -1536,7 +1564,7 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
     }
 
     // 6. separator
-    expect_separator(&items[5], "Allowed Behaviours の後");
+    expect_separator(&items[5], "許可する行為 の後");
 
     // 7-8. 一時停止 / Dismiss All
     assert_eq!(expect_item_text(&items[6], "一時停止"), "一時停止");
@@ -1544,7 +1572,7 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
         model.command_of(items[6].id()),
         Some(TrayCommand::TogglePauseAll)
     ));
-    assert_eq!(expect_item_text(&items[7], "Dismiss All"), "Dismiss All");
+    assert_eq!(expect_item_text(&items[7], "Dismiss All"), "すべて消す");
     assert!(matches!(
         model.command_of(items[7].id()),
         Some(TrayCommand::DismissAll)
@@ -1554,7 +1582,7 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
     expect_separator(&items[8], "Dismiss All の後");
 
     // 10. Reload
-    assert_eq!(expect_item_text(&items[9], "Reload"), "Reload");
+    assert_eq!(expect_item_text(&items[9], "Reload"), "再読み込み");
     assert!(matches!(
         model.command_of(items[9].id()),
         Some(TrayCommand::Reload)
@@ -1567,10 +1595,10 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
 fn tray_menu_allowed_check_items_reflect_initial_allowed_values() {
     let empty: Vec<String> = vec![];
     let initial = allowed(false, true, false, true, true, false);
-    let model = TrayMenuModel::build_tray(&empty, &initial);
+    let model = TrayMenuModel::build_tray(&empty, &initial, &ja_lang());
     let items = model.menu().items();
 
-    let checks = expect_submenu(&items[4], "Allowed Behaviours").items();
+    let checks = expect_submenu(&items[4], "許可する行為").items();
     let kinds = allowed_kinds_in_menu_order();
     for index in 0..6 {
         let check = expect_check(&checks[index], "トグル項目");
@@ -1597,13 +1625,17 @@ fn tray_menu_allowed_check_items_reflect_initial_allowed_values() {
 #[test]
 fn tray_menu_sync_allowed_updates_all_check_items() {
     let sets = vec!["Shimeji".to_string()];
-    let model = TrayMenuModel::build_tray(&sets, &allowed(true, true, true, true, true, true));
+    let model = TrayMenuModel::build_tray(
+        &sets,
+        &allowed(true, true, true, true, true, true),
+        &ja_lang(),
+    );
 
     let updated = allowed(false, true, true, true, false, false);
     model.sync_allowed(&updated);
 
     let items = model.menu().items();
-    let checks = expect_submenu(&items[4], "Allowed Behaviours").items();
+    let checks = expect_submenu(&items[4], "許可する行為").items();
     let kinds = allowed_kinds_in_menu_order();
     for index in 0..6 {
         let check = expect_check(&checks[index], "トグル項目");
@@ -1647,7 +1679,7 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
         ],
     };
     let index = 2usize;
-    let model = TrayMenuModel::build_popup(index, &sets, &menu_items, false);
+    let model = TrayMenuModel::build_popup(index, &sets, &menu_items, false, &ja_lang());
     let items = model.menu().items();
     assert_eq!(
         items.len(),
@@ -1658,8 +1690,10 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
     let pattern: Vec<&str> = items.iter().map(kind_label).collect();
     assert_eq!(pattern, ["submenu", "submenu", "separator", "item", "item"]);
 
-    // 1. 「呼ぶ」（tray と同内容）
-    let children = expect_submenu(&items[0], "呼ぶ").items();
+    // 1. 「同じしめじを呼ぶ」（popup 専用キー CallAnother・tray の「しめじを呼ぶ」とは別）
+    let spawn = expect_submenu(&items[0], "同じしめじを呼ぶ");
+    assert_eq!(spawn.text(), "同じしめじを呼ぶ");
+    let children = spawn.items();
     assert_eq!(children.len(), 3);
     assert!(matches!(
         model.command_of(children[0].id()),
@@ -1674,9 +1708,9 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
         Some(TrayCommand::Spawn(Some(s))) if s == "Kuro"
     ),);
 
-    // 2. 「個別行動指定」: selectable のみ（toggleable 専用の Spin は出ない）
-    let behavior = expect_submenu(&items[1], "個別行動指定");
-    assert_eq!(behavior.text(), "個別行動指定");
+    // 2. 「行為の設定」: selectable のみ（toggleable 専用の Spin は出ない）
+    let behavior = expect_submenu(&items[1], "行為の設定");
+    assert_eq!(behavior.text(), "行為の設定");
     let rows = behavior.items();
     assert_eq!(rows.len(), 3, "toggleable 専用（Spin）は popup に出さない");
     for (position, name) in ["Walk", "Stare", "Jump"].into_iter().enumerate() {
@@ -1692,7 +1726,7 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
     }
 
     // 3. separator
-    expect_separator(&items[2], "個別行動指定の後");
+    expect_separator(&items[2], "行為の設定の後");
 
     // 4-5. 一時停止（未 pause）・消す
     assert_eq!(expect_item_text(&items[3], "一時停止"), "一時停止");
@@ -1707,11 +1741,11 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
     );
 
     // pause 中は「再開」ラベル（command は同一）
-    let paused_model = TrayMenuModel::build_popup(index, &sets, &menu_items, true);
+    let paused_model = TrayMenuModel::build_popup(index, &sets, &menu_items, true, &ja_lang());
     let paused_items = paused_model.menu().items();
     assert_eq!(
         expect_item_text(&paused_items[3], "再開"),
-        "再開",
+        "再開する",
         "is_paused でラベルが切替"
     );
     assert!(
@@ -1727,7 +1761,11 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
 #[test]
 fn command_of_unknown_id_returns_none() {
     let empty: Vec<String> = vec![];
-    let model = TrayMenuModel::build_tray(&empty, &allowed(true, true, true, true, true, true));
+    let model = TrayMenuModel::build_tray(
+        &empty,
+        &allowed(true, true, true, true, true, true),
+        &ja_lang(),
+    );
     let unknown = MenuId::new("tray_test_unknown_id");
     assert!(model.command_of(&unknown).is_none(), "未知 id → None");
 }

@@ -189,7 +189,7 @@ pub fn parse_actions(path: &Path) -> Result<ActionsConfig, ConfigError> {
         // Java: UnrecognizedRootTagNameErrorMessage 相当
         return cx.error(
             root,
-            format!("未知のルートタグ: {}", root.tag_name().name()),
+            format!("unknown root tag: {}", root.tag_name().name()),
         );
     }
 
@@ -199,7 +199,7 @@ pub fn parse_actions(path: &Path) -> Result<ActionsConfig, ConfigError> {
             let (name, def) = parse_action_def(&cx, node, true, 0)?;
             if actions.contains_key(&name) {
                 // Java: DuplicateActionErrorMessage 相当
-                return cx.error(node, format!("Action `{name}` が重複定義されています"));
+                return cx.error(node, format!("duplicate Action `{name}`"));
             }
             actions.insert(name, def);
         }
@@ -217,7 +217,7 @@ pub fn parse_behaviors(path: &Path) -> Result<BehaviorsConfig, ConfigError> {
     if root.tag_name().name() != "Mascot" {
         return cx.error(
             root,
-            format!("未知のルートタグ: {}", root.tag_name().name()),
+            format!("unknown root tag: {}", root.tag_name().name()),
         );
     }
 
@@ -257,7 +257,7 @@ pub fn validate_required_behaviors(config: &BehaviorsConfig) -> Result<(), Confi
         Err(ConfigError {
             file: "(behaviors)".to_string(),
             line: 0,
-            reason: format!("必須 Behavior が欠落しています: {}", missing.join(", ")),
+            reason: format!("missing required behaviors: {}", missing.join(", ")),
         })
     }
 }
@@ -270,7 +270,7 @@ fn read_file(path: &Path) -> Result<String, ConfigError> {
     fs::read_to_string(path).map_err(|e| ConfigError {
         file: path.display().to_string(),
         line: 0,
-        reason: format!("conf ファイルを読めません: {e}"),
+        reason: format!("failed to read conf file: {e}"),
     })
 }
 
@@ -281,7 +281,7 @@ fn parse_document<'a>(text: &'a str, path: &Path) -> Result<Document<'a>, Config
     Document::parse(text).map_err(|e| ConfigError {
         file: path.display().to_string(),
         line: e.pos().row,
-        reason: format!("XML として解釈できません: {e}"),
+        reason: format!("failed to parse XML: {e}"),
     })
 }
 
@@ -344,7 +344,7 @@ fn check_xml_nesting(text: &str, path: &Path) -> Result<(), ConfigError> {
                 return Err(ConfigError {
                     file: path.display().to_string(),
                     line,
-                    reason: format!("XML 要素のネストが深すぎます（上限 {MAX_XML_NESTING} 段）"),
+                    reason: format!("XML element nesting too deep (limit {MAX_XML_NESTING})"),
                 });
             }
         }
@@ -421,7 +421,7 @@ impl<'doc, 'input> Cx<'doc, 'input> {
         if depth > MAX_XML_NESTING {
             Err(self.error_value(
                 node,
-                format!("XML 要素のネストが深すぎます（上限 {MAX_XML_NESTING} 段）"),
+                format!("XML element nesting too deep (limit {MAX_XML_NESTING})"),
             ))
         } else {
             Ok(())
@@ -457,7 +457,7 @@ fn parse_action_def(
     // Type 属性は必須。不正値は Err（Java: UnknownActionTypeErrorMessage 相当）
     let type_text = node
         .attribute("Type")
-        .ok_or_else(|| cx.error_value(node, "Action に Type 属性がありません"))?;
+        .ok_or_else(|| cx.error_value(node, "Action is missing the Type attribute"))?;
     let kind = match type_text {
         "Embedded" => ActionKind::Embedded,
         "Move" => ActionKind::Move,
@@ -465,13 +465,13 @@ fn parse_action_def(
         "Animate" => ActionKind::Animate,
         "Sequence" => ActionKind::Sequence,
         "Select" => ActionKind::Select,
-        _ => return cx.error(node, format!("未知の Action Type: {type_text}")),
+        _ => return cx.error(node, format!("unknown Action Type: {type_text}")),
     };
 
     // Name はトップレベルのみ必須（匿名アクションは名前を持たない）
     let name = if top_level {
         node.attribute("Name")
-            .ok_or_else(|| cx.error_value(node, "Action に Name 属性がありません"))?
+            .ok_or_else(|| cx.error_value(node, "Action is missing the Name attribute"))?
             .to_string()
     } else {
         String::new()
@@ -482,7 +482,9 @@ fn parse_action_def(
     let class = match kind {
         ActionKind::Embedded => Some(
             node.attribute("Class")
-                .ok_or_else(|| cx.error_value(node, "Embedded Action に Class 属性がありません"))?
+                .ok_or_else(|| {
+                    cx.error_value(node, "Embedded Action is missing the Class attribute")
+                })?
                 .to_string(),
         ),
         _ => None,
@@ -495,7 +497,7 @@ fn parse_action_def(
         Some("Floor") => Some(BorderType::Floor),
         Some("Wall") => Some(BorderType::Wall),
         Some("Ceiling") => Some(BorderType::Ceiling),
-        Some(other) => return cx.error(node, format!("BorderType の値が不正です: {other}")),
+        Some(other) => return cx.error(node, format!("invalid BorderType value: {other}")),
     };
 
     // Loop（Sequence / Select のみ使用される・Java Sequence.java L19-20。
@@ -532,7 +534,7 @@ fn parse_action_def(
                 if !complex {
                     return cx.error(
                         child,
-                        format!("{type_text} 型の Action は子アクションを持てません"),
+                        format!("{type_text} Action cannot have child actions"),
                     );
                 }
                 children.push(parse_action_ref(cx, child)?);
@@ -541,7 +543,7 @@ fn parse_action_def(
                 if !complex {
                     return cx.error(
                         child,
-                        format!("{type_text} 型の Action は子アクションを持てません"),
+                        format!("{type_text} Action cannot have child actions"),
                     );
                 }
                 let (_, inline) = parse_action_def(cx, child, false, depth + 1)?;
@@ -554,7 +556,7 @@ fn parse_action_def(
         // Java: NoChildActionsErrorMessage 相当
         return cx.error(
             node,
-            format!("{type_text} 型の Action には子アクションが 1 つ以上必要です"),
+            format!("{type_text} Action requires at least one child action"),
         );
     }
 
@@ -603,7 +605,7 @@ fn parse_action_def(
 fn parse_action_ref(cx: &Cx, node: Node) -> Result<SequenceChild, ConfigError> {
     let name = node
         .attribute("Name")
-        .ok_or_else(|| cx.error_value(node, "ActionReference に Name 属性がありません"))?
+        .ok_or_else(|| cx.error_value(node, "ActionReference is missing the Name attribute"))?
         .to_string();
     let mut attrs = VarMap::new();
     for attr in node.attributes() {
@@ -628,7 +630,7 @@ fn parse_animation(cx: &Cx, node: Node) -> Result<Animation, ConfigError> {
         poses.push(parse_pose(cx, child)?);
     }
     if poses.is_empty() {
-        return cx.error(node, "Animation に Pose が 1 つもありません");
+        return cx.error(node, "Animation has no poses");
     }
     Ok(Animation {
         condition,
@@ -642,17 +644,17 @@ fn parse_animation(cx: &Cx, node: Node) -> Result<Animation, ConfigError> {
 fn parse_pose(cx: &Cx, node: Node) -> Result<Pose, ConfigError> {
     let image = node
         .attribute("Image")
-        .ok_or_else(|| cx.error_value(node, "Pose に Image 属性がありません"))?
+        .ok_or_else(|| cx.error_value(node, "Pose is missing the Image attribute"))?
         .to_string();
     let anchor = parse_xy2(cx, node, "ImageAnchor")?;
     let velocity = parse_xy2(cx, node, "Velocity")?;
     let duration_text = node
         .attribute("Duration")
-        .ok_or_else(|| cx.error_value(node, "Pose に Duration 属性がありません"))?;
+        .ok_or_else(|| cx.error_value(node, "Pose is missing the Duration attribute"))?;
     let duration = duration_text.parse::<i32>().map_err(|_| {
         cx.error_value(
             node,
-            format!("Duration が整数として解釈できません: {duration_text}"),
+            format!("Duration is not a valid integer: {duration_text}"),
         )
     })?;
     Ok(Pose {
@@ -666,9 +668,9 @@ fn parse_pose(cx: &Cx, node: Node) -> Result<Pose, ConfigError> {
 /// "x,y" 形式の Pose 属性を 2 つの i32 へ（Java: split(",") + Integer.parseInt 相当）。
 /// 3 要素目以降は無視（Java も [0] / [1] のみ使用）。要素不足や整数化失敗は Err。
 fn parse_xy2(cx: &Cx, node: Node, attr_name: &str) -> Result<(i32, i32), ConfigError> {
-    let text = node
-        .attribute(attr_name)
-        .ok_or_else(|| cx.error_value(node, format!("Pose に {attr_name} 属性がありません")))?;
+    let text = node.attribute(attr_name).ok_or_else(|| {
+        cx.error_value(node, format!("Pose is missing the {attr_name} attribute"))
+    })?;
     let mut parts = text.split(',');
     let x_text = parts.next().unwrap_or_default();
     let y_text = parts.next().unwrap_or_default();
@@ -676,7 +678,7 @@ fn parse_xy2(cx: &Cx, node: Node, attr_name: &str) -> Result<(i32, i32), ConfigE
         (Ok(x), Ok(y)) => Ok((x, y)),
         _ => cx.error(
             node,
-            format!("{attr_name} は `x,y` 形式の整数である必要があります: {text}"),
+            format!("{attr_name} must be an integer pair in `x,y` format: {text}"),
         ),
     }
 }
@@ -752,22 +754,22 @@ fn parse_behavior_def(
 ) -> Result<BehaviorDef, ConfigError> {
     let name = node
         .attribute("Name")
-        .ok_or_else(|| cx.error_value(node, "Behavior に Name 属性がありません"))?
+        .ok_or_else(|| cx.error_value(node, "Behavior is missing the Name attribute"))?
         .to_string();
     if !seen_names.insert(name.clone()) {
         // Java: DuplicateBehaviourErrorMessage 相当（グループをまたいで一意である必要がある）
-        return cx.error(node, format!("Behavior `{name}` が重複定義されています"));
+        return cx.error(node, format!("duplicate Behavior `{name}`"));
     }
     let frequency_text = node.attribute("Frequency").ok_or_else(|| {
         cx.error_value(
             node,
-            format!("Behavior `{name}` に Frequency 属性がありません"),
+            format!("Behavior `{name}` is missing the Frequency attribute"),
         )
     })?;
     let frequency = frequency_text.parse::<i32>().map_err(|_| {
         cx.error_value(
             node,
-            format!("Behavior `{name}` の Frequency が整数として解釈できません: {frequency_text}"),
+            format!("Behavior `{name}` Frequency is not a valid integer: {frequency_text}"),
         )
     })?;
     let hidden = node
@@ -843,7 +845,7 @@ fn parse_behavior_def(
 fn parse_next_behavior_list(cx: &Cx, node: Node) -> Result<NextBehaviorList, ConfigError> {
     let add_text = node
         .attribute("Add")
-        .ok_or_else(|| cx.error_value(node, "NextBehaviorList に Add 属性がありません"))?;
+        .ok_or_else(|| cx.error_value(node, "NextBehaviorList is missing the Add attribute"))?;
     let add = add_text.eq_ignore_ascii_case("true"); // Java Boolean.parseBoolean 相当
     let mut references = Vec::new();
     parse_next_list_children(cx, node, &[], &mut references, 0)?;
@@ -875,19 +877,19 @@ fn parse_next_list_children(
                 let name = node
                     .attribute("Name")
                     .ok_or_else(|| {
-                        cx.error_value(node, "BehaviorReference に Name 属性がありません")
+                        cx.error_value(node, "BehaviorReference is missing the Name attribute")
                     })?
                     .to_string();
                 let frequency_text = node.attribute("Frequency").ok_or_else(|| {
                     cx.error_value(
                         node,
-                        format!("BehaviorReference `{name}` に Frequency 属性がありません"),
+                        format!("BehaviorReference `{name}` is missing the Frequency attribute"),
                     )
                 })?;
                 let frequency = frequency_text.parse::<i32>().map_err(|_| {
                     cx.error_value(
                         node,
-                        format!("BehaviorReference `{name}` の Frequency が整数として解釈できません: {frequency_text}"),
+                        format!("BehaviorReference `{name}` Frequency is not a valid integer: {frequency_text}"),
                     )
                 })?;
 

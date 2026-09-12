@@ -368,7 +368,7 @@ impl Mascot {
             return;
         };
         if let Err(err) = runner.next(self, env, table, factory, rng) {
-            log::error!("次の Behavior を取得できませんでした: {err}");
+            log::error!("failed to get next Behavior: {err}");
             self.dispose();
         }
         self.time += 1;

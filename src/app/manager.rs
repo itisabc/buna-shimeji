@@ -214,7 +214,7 @@ impl Manager {
     pub fn request_spawn_random(&mut self, image_sets: &[String]) {
         if image_sets.is_empty() {
             // Java L468-470: length == 0 → return（乱数取得より先）
-            log::warn!("image set が 1 つも無いため spawn 要求を無視します");
+            log::warn!("ignoring spawn request: no image sets are available");
             return;
         }
         // Java L471: int random = (int) (length * Math.random())（切り捨て）
@@ -263,13 +263,13 @@ impl Manager {
             let resolved = match self.resolver.as_mut() {
                 Some(resolver) => resolver(&request.image_set_name),
                 None => {
-                    log::warn!("image set resolver 未設定のため spawn をスキップします");
+                    log::warn!("skipping spawn: image set resolver is not configured");
                     None
                 }
             };
             let Some(image_set) = resolved else {
                 log::warn!(
-                    "image set `{}` を解決できなかったため spawn をスキップします",
+                    "skipping spawn: could not resolve image set `{}`",
                     request.image_set_name
                 );
                 continue;
@@ -308,7 +308,7 @@ impl Manager {
                     ) {
                         // Java Breed.java L95-99 / Main.java L498-503: 構築 / 実行例外 →
                         // log + dispose 相当（未追加のまま破棄・子は Manager に乗らない）
-                        log::error!("spawn された Mascot の behavior 初期化に失敗: {err}");
+                        log::error!("failed to initialize behavior of spawned mascot: {err}");
                     } else {
                         // Java L94: manager.add(newMascot)
                         self.mascots.push(mascot);
@@ -316,7 +316,7 @@ impl Manager {
                 }
                 Err(err) => {
                     log::error!(
-                        "spawn された Mascot の behavior `{}` 構築に失敗: {err}",
+                        "failed to build behavior `{}` of spawned mascot: {err}",
                         request.behavior_name.as_deref().unwrap_or("(null)")
                     );
                 }
@@ -478,12 +478,12 @@ impl Manager {
                         self.factory.as_mut(),
                         self.rng.as_mut(),
                     ) {
-                        log::error!(r#"Behavior "{name}" の設定に失敗: {err}"#);
+                        log::error!(r#"failed to set behavior "{name}": {err}"#);
                         mascot.dispose();
                     }
                 }
                 Err(err) => {
-                    log::error!(r#"Behavior "{name}" の構築に失敗: {err}"#);
+                    log::error!(r#"failed to build behavior "{name}": {err}"#);
                     mascot.dispose();
                 }
             }
@@ -516,12 +516,12 @@ impl Manager {
                         self.factory.as_mut(),
                         self.rng.as_mut(),
                     ) {
-                        log::error!(r#"Behavior "{name}" の設定に失敗: {err}"#);
+                        log::error!(r#"failed to set behavior "{name}": {err}"#);
                         mascot.dispose();
                     }
                 }
                 Err(err) => {
-                    log::error!(r#"Behavior "{name}" の構築に失敗: {err}"#);
+                    log::error!(r#"failed to build behavior "{name}": {err}"#);
                     mascot.dispose();
                 }
             }
@@ -538,7 +538,7 @@ impl Manager {
     /// に対する防御）。
     pub fn set_behavior_at(&mut self, index: usize, name: &str) {
         let Some(mascot) = self.mascots.get_mut(index) else {
-            log::warn!("set_behavior_at: index {index} は範囲外のため無視します");
+            log::warn!("set_behavior_at: ignoring out-of-range index {index}");
             return;
         };
         let env: &dyn EnvironmentView = &self.environment;
@@ -553,12 +553,12 @@ impl Manager {
                     self.factory.as_mut(),
                     self.rng.as_mut(),
                 ) {
-                    log::error!(r#"Behavior "{name}" の設定に失敗: {err}"#);
+                    log::error!(r#"failed to set behavior "{name}": {err}"#);
                     mascot.dispose();
                 }
             }
             Err(err) => {
-                log::error!(r#"Behavior "{name}" の構築に失敗: {err}"#);
+                log::error!(r#"failed to build behavior "{name}": {err}"#);
                 mascot.dispose();
             }
         }
@@ -568,7 +568,7 @@ impl Manager {
     /// L559-560 逐語 `setPaused(!isPaused())`）。index 範囲外 → warn + no-op。
     pub fn toggle_pause_at(&mut self, index: usize) {
         let Some(mascot) = self.mascots.get_mut(index) else {
-            log::warn!("toggle_pause_at: index {index} は範囲外のため無視します");
+            log::warn!("toggle_pause_at: ignoring out-of-range index {index}");
             return;
         };
         mascot.set_paused(!mascot.is_paused());
@@ -599,7 +599,7 @@ impl Manager {
         point: (i32, i32),
     ) -> Result<(), BehaviorError> {
         let Some(mascot) = self.mascots.get_mut(index) else {
-            log::warn!("mouse_pressed_at: index {index} は範囲外のため無視します");
+            log::warn!("mouse_pressed_at: ignoring out-of-range index {index}");
             return Ok(());
         };
         let env: &dyn EnvironmentView = &self.environment;
@@ -612,7 +612,7 @@ impl Manager {
     /// Java `Mascot.mouseReleased` L455-471 相当）。index 範囲外 → warn + Ok。
     pub fn mouse_released_at(&mut self, index: usize) -> Result<(), BehaviorError> {
         let Some(mascot) = self.mascots.get_mut(index) else {
-            log::warn!("mouse_released_at: index {index} は範囲外のため無視します");
+            log::warn!("mouse_released_at: ignoring out-of-range index {index}");
             return Ok(());
         };
         let env: &dyn EnvironmentView = &self.environment;
@@ -626,7 +626,7 @@ impl Manager {
     /// `point` (= Some) はスクリーン座標契約）。index 範囲外 → warn + no-op。
     pub fn set_cursor_position_at(&mut self, index: usize, point: Option<(i32, i32)>) {
         let Some(mascot) = self.mascots.get_mut(index) else {
-            log::warn!("set_cursor_position_at: index {index} は範囲外のため無視します");
+            log::warn!("set_cursor_position_at: ignoring out-of-range index {index}");
             return;
         };
         mascot.set_cursor_position(point);
@@ -637,7 +637,7 @@ impl Manager {
     /// index 範囲外 → warn + no-op。
     pub fn dismiss_at(&mut self, index: usize) {
         let Some(mascot) = self.mascots.get_mut(index) else {
-            log::warn!("dismiss_at: index {index} は範囲外のため無視します");
+            log::warn!("dismiss_at: ignoring out-of-range index {index}");
             return;
         };
         mascot.dispose();
@@ -695,7 +695,9 @@ impl Manager {
         // 1. base table を materials[0] の table で置換 + set_tables 全消し再登録
         //（既定 set 分は clone して base と set_tables の両方へ）
         let mut materials = materials.into_iter();
-        let first = materials.next().expect("materials 非空は事前確認済み");
+        let first = materials
+            .next()
+            .expect("materials is non-empty (checked above)");
         self.set_tables.clear();
         self.set_tables.insert(first.name, first.table.clone());
         self.table = first.table;
@@ -751,12 +753,14 @@ impl Manager {
                         self.factory.as_mut(),
                         self.rng.as_mut(),
                     ) {
-                        log::error!(r#"Reload 後の Behavior "{runner_name}" の設定に失敗: {err}"#);
+                        log::error!(
+                            r#"failed to set behavior "{runner_name}" after reload: {err}"#
+                        );
                         mascot.dispose();
                     }
                 }
                 Err(err) => {
-                    log::error!("Reload 後の Behavior 構築に失敗: {err}");
+                    log::error!("failed to build behavior after reload: {err}");
                     mascot.dispose();
                 }
             }

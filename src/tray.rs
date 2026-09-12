@@ -44,6 +44,7 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem,
 
 use crate::app::manager::{BehaviorMenu, Manager};
 use crate::app::reload::load_materials;
+use crate::i18n::{Lang, UiKey, DEFAULT_LANGUAGE};
 
 // =====================================================================
 // トレイアイコン: Java Main.getIcon()（.tmp/java-ref/Main.java L764-792）
@@ -74,14 +75,14 @@ pub fn load_tray_icon_rgba(custom_path: &Path) -> (Vec<u8>, u32, u32) {
             }
             // Java L775-777: カスタム読み込みの例外時のみ warn
             Err(err) => log::warn!(
-                "カスタムトレイアイコン {} を読み込めないため既定アイコンを使用します: {err}",
+                "failed to load custom tray icon {}; using default icon: {err}",
                 custom_path.display()
             ),
         }
     } else {
         // Java L770: isRegularFile で無ければ無言で既定へ（debug のみ）
         log::debug!(
-            "カスタムトレイアイコン {} は存在しないため既定アイコンを使用します",
+            "custom tray icon {} does not exist; using default icon",
             custom_path.display()
         );
     }
@@ -92,7 +93,7 @@ pub fn load_tray_icon_rgba(custom_path: &Path) -> (Vec<u8>, u32, u32) {
             (rgba.into_raw(), width, height)
         }
         Err(err) => {
-            log::error!("埋め込み既定トレイアイコンのデコードに失敗しました: {err}");
+            log::error!("failed to decode embedded default tray icon: {err}");
             let (width, height) = (16u32, 16u32);
             (vec![0; (width * height * 4) as usize], width, height)
         }
@@ -107,19 +108,17 @@ pub fn load_tray_icon_rgba(custom_path: &Path) -> (Vec<u8>, u32, u32) {
 #[derive(Debug, Error)]
 pub enum SettingsError {
     /// settings.toml の読み込み（パース）に失敗（Java L63-67 の IOException 相当）。
-    #[error("settings.toml の読み込みに失敗しました: {0}")]
+    #[error("failed to load settings.toml: {0}")]
     Parse(#[from] toml::de::Error),
     /// settings.toml の書き出し（シリアライズ）に失敗。
-    #[error("settings.toml の書き出しに失敗しました: {0}")]
+    #[error("failed to write settings.toml: {0}")]
     Serialize(#[from] toml::ser::Error),
     /// settings.toml の読み書き（io）に失敗（保存先ディレクトリ不在等）。
-    #[error("settings.toml の入出力に失敗しました: {0}")]
+    #[error("settings.toml I/O failed: {0}")]
     Io(#[from] std::io::Error),
     /// imagesets.scale が非有限（NaN / ±inf）または 0 以下。
     /// 設定不正として起動エラー経路に載せる（上限は設けない）。
-    #[error(
-        "settings.toml の imagesets.scale が不正です（{0} = {1}）: 正の有限値を指定してください"
-    )]
+    #[error("invalid settings.toml imagesets.scale ({0} = {1}): specify a positive finite value")]
     InvalidScale(String, f64),
 }
 
@@ -186,12 +185,30 @@ pub struct ImagesetsSettings {
 
 /// 一般設定（design §3-14 の `[general]`）。TOML 出力で先頭セクションに置くため
 /// [`Settings`] の最初のフィールドに据える。欠落メンバは `#[serde(default)]` で
-/// 補完（`show_console` 既定 false・後方互換）。
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// 補完（`show_console` 既定 false・`language` 既定 [`DEFAULT_LANGUAGE`]・後方互換）。
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GeneralSettings {
     /// コンソール表示（既定 false。main が起動時の窓表示制御に参照）。
     #[serde(default)]
     pub show_console: bool,
+    /// UI 言語コード（既定 "ja"。`conf/lang/<code>.toml` を選択）。
+    #[serde(default = "default_language")]
+    pub language: String,
+}
+
+/// `language` の serde 既定値（[`DEFAULT_LANGUAGE`] を共用・後方互換）。
+fn default_language() -> String {
+    DEFAULT_LANGUAGE.to_string()
+}
+
+impl Default for GeneralSettings {
+    /// `show_console = false` / `language = `[`DEFAULT_LANGUAGE`]。
+    fn default() -> GeneralSettings {
+        GeneralSettings {
+            show_console: false,
+            language: default_language(),
+        }
+    }
 }
 
 /// settings.toml の強型（design §3-14 形状・Java `Settings` のうち Phase 1 が
@@ -289,14 +306,14 @@ fn allowed_value(allowed: &AllowedSettings, kind: AllowedKind) -> bool {
 }
 
 /// Allowed Behaviours サブメニューのラベル順（design §3-11・増殖 / 変身 / 投げ /
-/// 画面間移動 / 効果音枠 / Transients）と [`AllowedKind`] の対応。
-const ALLOWED_MENU_ITEMS: [(AllowedKind, &str); 6] = [
-    (AllowedKind::Breeding, "増殖"),
-    (AllowedKind::Transformation, "変身"),
-    (AllowedKind::Throwing, "投げ"),
-    (AllowedKind::Multiscreen, "画面間移動"),
-    (AllowedKind::Sounds, "効果音枠"),
-    (AllowedKind::Transients, "Transients"),
+/// 画面間移動 / 効果音枠 / Transients）と [`AllowedKind`] / 辞書キーの対応。
+const ALLOWED_MENU_ITEMS: [(AllowedKind, UiKey); 6] = [
+    (AllowedKind::Breeding, UiKey::BreedingCloning),
+    (AllowedKind::Transformation, UiKey::Transformation),
+    (AllowedKind::Throwing, UiKey::ThrowingWindows),
+    (AllowedKind::Multiscreen, UiKey::Multiscreen),
+    (AllowedKind::Sounds, UiKey::SoundEffects),
+    (AllowedKind::Transients, UiKey::BreedingTransient),
 ];
 
 /// トレイ / ポップアップのメニュー項目に対応するコマンド（design §3-11）。
@@ -359,18 +376,21 @@ pub struct TrayMenuModel {
 }
 
 /// 「呼ぶ」サブメニュー（design §3-11 の先頭・tray / popup 共通構成）:
-/// 先頭「（ランダム）」= [`TrayCommand::Spawn`]`(None)` + 各 set 名 =
-/// `Spawn(Some(set))`（`image_sets` の順で並べる）。
+/// 先頭 [`UiKey::SpawnRandom`] = [`TrayCommand::Spawn`]`(None)` + 各 set 名 =
+/// `Spawn(Some(set))`（`image_sets` の順で並べる）。サブメニュー名は `label`
+///（tray = `CallShimeji` / popup = `CallAnother`）を辞書で解決する。
 fn build_spawn_submenu(
     image_sets: &[String],
     commands: &mut HashMap<MenuId, TrayCommand>,
+    lang: &Lang,
+    label: UiKey,
 ) -> Submenu {
-    let submenu = Submenu::new("呼ぶ", true);
-    let random = MenuItem::new("（ランダム）", true, None);
+    let submenu = Submenu::new(lang.text(label), true);
+    let random = MenuItem::new(lang.text(UiKey::SpawnRandom), true, None);
     commands.insert(random.id().clone(), TrayCommand::Spawn(None));
     submenu
         .append(&random)
-        .expect("「（ランダム）」のメニュー追加に失敗しました");
+        .expect("failed to append the (random) menu item");
     for image_set in image_sets {
         let item = MenuItem::new(image_set, true, None);
         commands.insert(
@@ -379,7 +399,7 @@ fn build_spawn_submenu(
         );
         submenu
             .append(&item)
-            .expect("「呼ぶ」set 項目のメニュー追加に失敗しました");
+            .expect("failed to append a call set menu item");
     }
     submenu
 }
@@ -398,39 +418,44 @@ impl TrayMenuModel {
     /// 8. Dismiss All
     /// 9. separator
     /// 10. Reload
-    pub fn build_tray(image_sets: &[String], allowed: &AllowedSettings) -> TrayMenuModel {
+    pub fn build_tray(
+        image_sets: &[String],
+        allowed: &AllowedSettings,
+        lang: &Lang,
+    ) -> TrayMenuModel {
         let menu = Menu::new();
         let mut commands = HashMap::new();
 
         // 1. 呼ぶ
-        let spawn = build_spawn_submenu(image_sets, &mut commands);
+        let spawn = build_spawn_submenu(image_sets, &mut commands, lang, UiKey::CallShimeji);
         // 2-4. Follow Cursor / Reduce to One / Restore Windows
-        let follow = MenuItem::new("Follow Cursor", true, None);
+        let follow = MenuItem::new(lang.text(UiKey::FollowCursor), true, None);
         commands.insert(follow.id().clone(), TrayCommand::FollowCursor);
-        let reduce = MenuItem::new("Reduce to One", true, None);
+        let reduce = MenuItem::new(lang.text(UiKey::ReduceToOne), true, None);
         commands.insert(reduce.id().clone(), TrayCommand::ReduceToOne);
-        let restore = MenuItem::new("Restore Windows", true, None);
+        let restore = MenuItem::new(lang.text(UiKey::RestoreWindows), true, None);
         commands.insert(restore.id().clone(), TrayCommand::RestoreWindows);
         // 5. Allowed Behaviours（6 CheckMenuItem・checked = allowed の対応値）
-        let allowed_menu = Submenu::new("Allowed Behaviours", true);
+        let allowed_menu = Submenu::new(lang.text(UiKey::AllowedBehaviours), true);
         let mut allowed_checks = Vec::with_capacity(ALLOWED_MENU_ITEMS.len());
-        for (kind, label) in ALLOWED_MENU_ITEMS {
-            let check = CheckMenuItem::new(label, true, allowed_value(allowed, kind), None);
+        for (kind, key) in ALLOWED_MENU_ITEMS {
+            let check =
+                CheckMenuItem::new(lang.text(key), true, allowed_value(allowed, kind), None);
             allowed_checks.push((kind, check.clone()));
             allowed_menu
                 .append(&check)
-                .expect("トグル項目のメニュー追加に失敗しました");
+                .expect("failed to append a toggle menu item");
         }
         // 6 / 9. separator
         let separator1 = PredefinedMenuItem::separator();
         let separator2 = PredefinedMenuItem::separator();
         // 7-8. 一時停止 / Dismiss All
-        let pause = MenuItem::new("一時停止", true, None);
+        let pause = MenuItem::new(lang.text(UiKey::PauseAnimations), true, None);
         commands.insert(pause.id().clone(), TrayCommand::TogglePauseAll);
-        let dismiss = MenuItem::new("Dismiss All", true, None);
+        let dismiss = MenuItem::new(lang.text(UiKey::DismissAll), true, None);
         commands.insert(dismiss.id().clone(), TrayCommand::DismissAll);
         // 10. Reload
-        let reload = MenuItem::new("Reload", true, None);
+        let reload = MenuItem::new(lang.text(UiKey::Reload), true, None);
         commands.insert(reload.id().clone(), TrayCommand::Reload);
 
         menu.append_items(&[
@@ -445,7 +470,7 @@ impl TrayMenuModel {
             &separator2,
             &reload,
         ])
-        .expect("トレイメニューの構築に失敗しました");
+        .expect("failed to build the tray menu");
 
         TrayMenuModel {
             menu,
@@ -466,36 +491,41 @@ impl TrayMenuModel {
         image_sets: &[String],
         menu_items: &BehaviorMenu,
         is_paused: bool,
+        lang: &Lang,
     ) -> TrayMenuModel {
         let menu = Menu::new();
         let mut commands = HashMap::new();
 
         // ① 呼ぶ
-        let spawn = build_spawn_submenu(image_sets, &mut commands);
+        let spawn = build_spawn_submenu(image_sets, &mut commands, lang, UiKey::CallAnother);
         // ② 個別行動指定（selectable のみ）
-        let behavior = Submenu::new("個別行動指定", true);
+        let behavior = Submenu::new(lang.text(UiKey::SetBehaviour), true);
         for name in &menu_items.selectable {
-            let item = MenuItem::new(name, true, None);
+            let item = MenuItem::new(lang.behavior_text(name), true, None);
             commands.insert(
                 item.id().clone(),
                 TrayCommand::SetBehaviorFor(index, name.clone()),
             );
             behavior
                 .append(&item)
-                .expect("行動項目のメニュー追加に失敗しました");
+                .expect("failed to append a behavior menu item");
         }
         // ③ separator
         let separator = PredefinedMenuItem::separator();
         // ④ 一時停止 / 再開（Java L559: isPaused ? Resume : Pause のラベル切替）
-        let pause_label = if is_paused { "再開" } else { "一時停止" };
-        let pause = MenuItem::new(pause_label, true, None);
+        let pause_key = if is_paused {
+            UiKey::ResumeAnimations
+        } else {
+            UiKey::PauseAnimations
+        };
+        let pause = MenuItem::new(lang.text(pause_key), true, None);
         commands.insert(pause.id().clone(), TrayCommand::TogglePauseFor(index));
         // ⑤ 消す
-        let dismiss = MenuItem::new("消す", true, None);
+        let dismiss = MenuItem::new(lang.text(UiKey::Dismiss), true, None);
         commands.insert(dismiss.id().clone(), TrayCommand::DismissFor(index));
 
         menu.append_items(&[&spawn, &behavior, &separator, &pause, &dismiss])
-            .expect("ポップアップメニューの構築に失敗しました");
+            .expect("failed to build the popup menu");
 
         TrayMenuModel {
             menu,
@@ -585,7 +615,7 @@ pub fn apply_tray_command(
             // design §3-11: トグル状態は conf/settings.toml に即時永続化。
             // 保存失敗でもトグル適用は続行する（panic しない）
             if let Err(err) = Settings::save(&context.conf_dir.join("settings.toml"), settings) {
-                log::error!("settings.toml の保存に失敗しました: {err}");
+                log::error!("failed to save settings.toml: {err}");
             }
             match kind {
                 AllowedKind::Breeding => manager.set_breeding_allowed(value),
@@ -608,7 +638,7 @@ pub fn apply_tray_command(
                 .collect();
             match load_materials(&context.conf_dir, &context.img_dir, &scales) {
                 Ok(materials) => manager.reload(materials),
-                Err(err) => log::error!("Reload に失敗したため現状を維持します: {err}"),
+                Err(err) => log::error!("reload failed; keeping current state: {err}"),
             }
         }
         TrayCommand::SetBehaviorFor(index, name) => manager.set_behavior_at(index, &name),

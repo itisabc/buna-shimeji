@@ -24,10 +24,10 @@ pub struct AssetDirs {
 #[derive(Debug, Error)]
 pub enum AssetError {
     /// `conf` ディレクトリが見つからない（`exe_dir.join("conf")` を報告）。
-    #[error("conf ディレクトリが見つかりません: {0}")]
+    #[error("conf directory not found: {0}")]
     ConfDirNotFound(PathBuf),
     /// `img` ディレクトリが見つからない（`exe_dir.join("img")` を報告）。
-    #[error("img ディレクトリが見つかりません: {0}")]
+    #[error("img directory not found: {0}")]
     ImgDirNotFound(PathBuf),
 }
 
