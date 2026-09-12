@@ -135,6 +135,19 @@ fn is_bottom_behavior(name: Option<&str>) -> bool {
     )
 }
 
+/// タスク #30-9(C): ピン保持中に飛び降り系行動（窓外へ落下し 30-8b で pin を
+/// 解除してしまう）を、同系統の「飛び降りない」行動へ差し替える写像。
+/// 対象外（縁伝い・下端掴み・安全行動自身など）は None を返す（冪等）。
+fn pin_safe_replacement(name: Option<&str>) -> Option<&'static str> {
+    match name {
+        Some("JumpFromLeftEdgeOfIE") => Some("SitOnTheLeftEdgeOfIE"),
+        Some("JumpFromRightEdgeOfIE") => Some("SitOnTheRightEdgeOfIE"),
+        Some("WalkLeftAlongIEAndJump") => Some("WalkLeftAlongIEAndSit"),
+        Some("WalkRightAlongIEAndJump") => Some("WalkRightAlongIEAndSit"),
+        _ => None,
+    }
+}
+
 impl Manager {
     /// Java `Manager.TICK_INTERVAL` L37 逐語（呼び出し間隔の最小値・ms）。
     /// （テスト契約 pin は assoc の `Manager::TICK_INTERVAL_MS`）
@@ -414,6 +427,35 @@ impl Manager {
                 // 下端掴み行為を取った保持者が Fall / Thrown へ遷移した tick は
                 // clamp をスキップし（アンカーを窓下辺へ引き戻さない）、解除を要求する。
                 if is_holder {
+                    // #30-9(C): 保持者が飛び降り系行動へ入っていたら、同系統の
+                    // 「飛び降りない」行動へ差し替える（30-8b による pin 自動解除を防ぐ）。
+                    if let Some(safe) = pin_safe_replacement(mascot.behavior_name()) {
+                        match table.build_behavior_direct(
+                            safe,
+                            self.factory.as_mut(),
+                            mascot.scale(),
+                        ) {
+                            Ok(runner) => {
+                                log::info!(
+                                    "pin guard: replacing jump behavior with `{safe}` (Allowed bypass)"
+                                );
+                                if let Err(err) = mascot.set_behavior(
+                                    Some(runner),
+                                    env,
+                                    table,
+                                    self.factory.as_mut(),
+                                    self.rng.as_mut(),
+                                ) {
+                                    log::error!(
+                                        "pin guard: failed to set behavior `{safe}`: {err}"
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                log::error!("pin guard: failed to build behavior `{safe}`: {err}")
+                            }
+                        }
+                    }
                     if is_bottom_behavior(mascot.behavior_name()) {
                         has_clung = true;
                     }
