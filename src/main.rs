@@ -585,7 +585,10 @@ fn try_main() -> anyhow::Result<()> {
     let factory = XmlBehaviorFactory::new(actions, &default_disables);
 
     let mut manager = Manager::new(
-        Environment::new(Win32OsSource),
+        Environment::new(Win32OsSource::new(
+            settings.interactive_windows.whitelist.clone(),
+            settings.interactive_windows.blacklist.clone(),
+        )),
         materials[0].table.clone(),
         Box::new(factory),
         Box::new(JavaRandom::from_os()),

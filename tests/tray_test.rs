@@ -121,8 +121,8 @@ use simeji::mascot::behavior::{
 use simeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
 use simeji::render::imageset::{Frame, ImageSet};
 use simeji::tray::{
-    apply_tray_command, AllowedKind, AllowedSettings, GeneralSettings, ImagesetsSettings, Settings,
-    SettingsError, TrayCommand, TrayContext, TrayMenuModel,
+    apply_tray_command, AllowedKind, AllowedSettings, GeneralSettings, ImagesetsSettings,
+    InteractiveWindowsSettings, Settings, SettingsError, TrayCommand, TrayContext, TrayMenuModel,
 };
 use tray_icon::menu::{CheckMenuItem, MenuId, MenuItemKind, Submenu};
 
@@ -706,6 +706,14 @@ fn assert_settings_eq(expected: &Settings, actual: &Settings) {
         actual.general.language, expected.general.language,
         "general.language"
     );
+    assert_eq!(
+        actual.interactive_windows.whitelist, expected.interactive_windows.whitelist,
+        "interactive_windows.whitelist"
+    );
+    assert_eq!(
+        actual.interactive_windows.blacklist, expected.interactive_windows.blacklist,
+        "interactive_windows.blacklist"
+    );
 }
 
 // =====================================================================
@@ -893,6 +901,7 @@ fn settings_round_trip_preserves_all_values() {
             show_console: true,
             ..Default::default()
         },
+        interactive_windows: InteractiveWindowsSettings::default(),
     };
 
     let path = home.settings_path();
@@ -929,6 +938,7 @@ fn settings_save_is_deterministic_with_sorted_keys() {
         disabled_behaviors: disabled,
         imagesets: ImagesetsSettings { scale },
         general: GeneralSettings::default(),
+        interactive_windows: InteractiveWindowsSettings::default(),
     };
 
     let path = home.settings_path();
@@ -2400,5 +2410,238 @@ fn tray_icon_corrupt_custom_falls_back_without_panic() {
         rgba.len(),
         16 * 16 * 4,
         "デコード失敗 → 既定の RGBA 長 1024"
+    );
+}
+
+// =====================================================================
+// 契約 D: interactive_windows（アクティブウィンドウ選別の whitelist/blacklist）
+// =====================================================================
+//
+// 追加される公開インターフェース（coder が src/tray.rs に実装・シグネチャは
+// 本テストが固定）:
+// ```text
+// #[derive(Debug, Default, Serialize, Deserialize)]
+// #[serde(default)]
+// pub struct InteractiveWindowsSettings {
+//     pub whitelist: Vec<String>,
+//     pub blacklist: Vec<String>,
+// }
+// // Settings に追加:
+// #[serde(default)]
+// pub interactive_windows: InteractiveWindowsSettings,
+// ```
+// TOML 形状:
+// ```toml
+// [interactive_windows]
+// whitelist = ["メモ帳", "Visual Studio Code"]
+// blacklist = []
+// ```
+//
+// Win32 選別（`is_interactive_by_title`）は tests/os_source_test.rs が既存で網羅
+// 済みのため本節では扱わない（重複禁止）。ここは設定スキーマ（TOML 入出力）の
+// 契約のみを pin する。
+
+/// [interactive_windows] の whitelist/blacklist が記載順のまま
+/// `Settings.interactive_windows` に入る（Vec の順序を保存・並べ替えや除去をしない）。
+#[test]
+fn settings_load_reads_interactive_windows_lists_in_order() {
+    let home = TempHome::new("iw_load_order");
+    let sample = concat!(
+        "[interactive_windows]\n",
+        "whitelist = [\"メモ帳\", \"Visual Studio Code\", \"Notepad\"]\n",
+        "blacklist = [\"Chrome\", \"Explorer\"]\n",
+    );
+    std::fs::write(home.settings_path(), sample).expect("settings.toml を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("interactive_windows を読める");
+    assert_eq!(
+        settings.interactive_windows.whitelist,
+        [
+            "メモ帳".to_string(),
+            "Visual Studio Code".to_string(),
+            "Notepad".to_string()
+        ],
+        "whitelist は記載順のまま（並べ替え・除去なし）"
+    );
+    assert_eq!(
+        settings.interactive_windows.blacklist,
+        ["Chrome".to_string(), "Explorer".to_string()],
+        "blacklist は記載順のまま"
+    );
+}
+
+/// 後方互換: [interactive_windows] を持たない既存形式 TOML を load しても
+/// エラーにならず、whitelist/blacklist は両方空・既存フィールドは従来どおり読める。
+#[test]
+fn settings_load_without_interactive_windows_section_is_backward_compatible() {
+    let home = TempHome::new("iw_legacy");
+    let legacy = concat!(
+        "[general]\n",
+        "language = \"en\"\n",
+        "\n",
+        "[allowed]\n",
+        "throwing = false\n",
+        "\n",
+        "[disabled_behaviors]\n",
+        "Shimeji = [\"Walk\"]\n",
+        "\n",
+        "[imagesets]\n",
+        "scale = { Shimeji = 0.5 }\n",
+    );
+    std::fs::write(home.settings_path(), legacy).expect("旧形式 TOML を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("旧形式 TOML を読める");
+    assert!(
+        settings.interactive_windows.whitelist.is_empty(),
+        "セクション欠落 → whitelist 空"
+    );
+    assert!(
+        settings.interactive_windows.blacklist.is_empty(),
+        "セクション欠落 → blacklist 空"
+    );
+    assert_eq!(
+        settings.general.language, "en",
+        "general は従来どおり読める"
+    );
+    assert!(!settings.allowed.throwing, "allowed は従来どおり読める");
+    assert!(settings.allowed.sounds, "未記載 allowed は既定 true");
+    assert_eq!(
+        settings
+            .disabled_behaviors
+            .get("Shimeji")
+            .map(Vec::as_slice),
+        Some(&["Walk".to_string()][..]),
+        "disabled_behaviors は従来どおり読める"
+    );
+    assert_eq!(
+        settings.scales().get("Shimeji"),
+        Some(&0.5),
+        "imagesets は従来どおり読める"
+    );
+}
+
+/// Settings::default() および InteractiveWindowsSettings::default() は両方空。
+#[test]
+fn settings_default_interactive_windows_is_empty() {
+    let settings = Settings::default();
+    assert!(
+        settings.interactive_windows.whitelist.is_empty(),
+        "Settings::default() の whitelist は空"
+    );
+    assert!(
+        settings.interactive_windows.blacklist.is_empty(),
+        "Settings::default() の blacklist は空"
+    );
+
+    let iw = InteractiveWindowsSettings::default();
+    assert!(
+        iw.whitelist.is_empty(),
+        "InteractiveWindowsSettings 既定 whitelist 空"
+    );
+    assert!(
+        iw.blacklist.is_empty(),
+        "InteractiveWindowsSettings 既定 blacklist 空"
+    );
+}
+
+/// save → load の往復で interactive_windows が保存される（空・非空いずれも）。
+#[test]
+fn settings_round_trip_preserves_interactive_windows() {
+    // 空リスト: 既定値の往復
+    let home = TempHome::new("iw_roundtrip_empty");
+    let default_path = home.settings_path();
+    Settings::save(&default_path, &Settings::default()).expect("空設定を save できる");
+    let loaded = Settings::load(&default_path).expect("空設定を load できる");
+    assert!(
+        loaded.interactive_windows.whitelist.is_empty()
+            && loaded.interactive_windows.blacklist.is_empty(),
+        "空リストも往復で空のまま"
+    );
+
+    // 非空リスト: 値がそのまま戻る
+    let home2 = TempHome::new("iw_roundtrip_values");
+    let original = Settings {
+        interactive_windows: InteractiveWindowsSettings {
+            whitelist: vec!["メモ帳".to_string(), "  padded  ".to_string()],
+            blacklist: vec!["Chrome".to_string()],
+        },
+        ..Settings::default()
+    };
+    let path = home2.settings_path();
+    Settings::save(&path, &original).expect("非空設定を save できる");
+    let loaded = Settings::load(&path).expect("非空設定を load できる");
+    assert_settings_eq(&original, &loaded);
+    assert_eq!(
+        loaded.interactive_windows.whitelist, original.interactive_windows.whitelist,
+        "whitelist が往復で保存される"
+    );
+    assert_eq!(
+        loaded.interactive_windows.blacklist, original.interactive_windows.blacklist,
+        "blacklist が往復で保存される"
+    );
+}
+
+/// セクションはあるが片方のキーだけ記載 → もう片方は空で補完される。
+#[test]
+fn settings_load_with_only_one_interactive_windows_key_leaves_other_empty() {
+    // whitelist のみ
+    let home = TempHome::new("iw_only_white");
+    std::fs::write(
+        home.settings_path(),
+        "[interactive_windows]\nwhitelist = [\"Notepad\"]\n",
+    )
+    .expect("settings.toml を書ける");
+    let settings = Settings::load(&home.settings_path()).expect("片キー TOML を読める");
+    assert_eq!(
+        settings.interactive_windows.whitelist,
+        ["Notepad".to_string()],
+        "記載済み whitelist は読まれる"
+    );
+    assert!(
+        settings.interactive_windows.blacklist.is_empty(),
+        "欠落 blacklist は空で補完"
+    );
+
+    // blacklist のみ
+    let home2 = TempHome::new("iw_only_black");
+    std::fs::write(
+        home2.settings_path(),
+        "[interactive_windows]\nblacklist = [\"Chrome\"]\n",
+    )
+    .expect("settings.toml を書ける");
+    let settings = Settings::load(&home2.settings_path()).expect("片キー TOML を読める");
+    assert!(
+        settings.interactive_windows.whitelist.is_empty(),
+        "欠落 whitelist は空で補完"
+    );
+    assert_eq!(
+        settings.interactive_windows.blacklist,
+        ["Chrome".to_string()],
+        "記載済み blacklist は読まれる"
+    );
+}
+
+/// 各項目はそのまま保持（trim・空要素除去などの加工をしない）。空白要素は許容し、
+/// 一致判定上の扱いは `is_interactive_by_title` が担う（os_source_test 側で網羅）。
+#[test]
+fn settings_load_preserves_interactive_windows_entries_verbatim() {
+    let home = TempHome::new("iw_verbatim");
+    let sample = concat!(
+        "[interactive_windows]\n",
+        "whitelist = [\"  spaced  \", \"\", \"x\"]\n",
+        "blacklist = [\" \", \"Chrome \"]\n",
+    );
+    std::fs::write(home.settings_path(), sample).expect("settings.toml を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("interactive_windows を読める");
+    assert_eq!(
+        settings.interactive_windows.whitelist,
+        ["  spaced  ".to_string(), String::new(), "x".to_string()],
+        "空白・空文字を含む項目も trim せずそのまま保持"
+    );
+    assert_eq!(
+        settings.interactive_windows.blacklist,
+        [" ".to_string(), "Chrome ".to_string()],
+        "末尾空白を含む項目もそのまま保持"
     );
 }

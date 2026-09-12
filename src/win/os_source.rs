@@ -12,14 +12,14 @@
 //! | `raise_window()` | `restoreWindows` L327 の `BringWindowToTop` 相当 |
 //!
 //! orch 決定済みの意図的差異:
-//! 1. **whitelist / blacklist 空固定**: 資産の settings.properties に
-//!    `interactiveWindows` / `interactiveWindowsBlacklist` の記述なし（plan (AG)①）→
-//!    [`INTERACTIVE_WHITELIST`] / [`INTERACTIVE_BLACKLIST`] は空固定。一般式
-//!    [`is_interactive_by_title`] は Java `isInteractive` L87-142 逐語で、実装体は
-//!    空スライスを渡す（= 全窓非 interactive・Java 資産既定と同一挙動）。
-//!    settings.toml 昇格は Phase 2 課題
-//! 2. **interactiveCache / refreshCache 非実装**（L88-91 / L342-346）: 設定不変のため
-//!    compute-once でキャッシュ不要
+//! 1. **whitelist / blacklist は settings.toml `[interactive_windows]` 由来**:
+//!    [`Win32OsSource::new`] が受け取った whitelist / blacklist を保持し、
+//!    アクティブウィンドウ選別 [`is_interactive_by_title`] へ注入する。資産の
+//!    settings.properties に記述が無い場合は既定 = 両方空で、実装体は空スライスを
+//!    渡す（= 全窓非 interactive・Java 資産既定と同一挙動）。一般式
+//!    [`is_interactive_by_title`] は Java `isInteractive` L87-142 逐語のまま。
+//! 2. **interactiveCache / refreshCache 非実装**（L88-91 / L342-346）: 設定は起動時に
+//!    確定し tick 中不変のため compute-once でキャッシュ不要
 //! 3. **DWMWA_CLOAKED**: Java は Windows8+ チェック有り（L146-147）だが、Rust 版は
 //!    [`DwmGetWindowAttribute`] 呼び出し + S_OK かつ flags != 0 のチェックのみで同等
 //!    （Win8+ で S_OK が返る環境でのみ判定が効く）
@@ -46,12 +46,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::environment::OsSource;
 use crate::mascot::Rect;
 use crate::win::workarea::{enumerate_workareas, Rect as WorkAreaRect};
-
-/// `interactiveWindows` 相当（orch 決定 1: 資産既定 = 空固定・Phase 2 で settings.toml 昇格）。
-const INTERACTIVE_WHITELIST: &[&str] = &[];
-
-/// `interactiveWindowsBlacklist` 相当（orch 決定 1）。
-const INTERACTIVE_BLACKLIST: &[&str] = &[];
 
 /// `isInteractive` L87-142 のタイトル判定部分（HWND キャッシュ L88-91 を除く逐語）。
 ///
@@ -119,7 +113,12 @@ enum WindowStatus {
 /// `screen` は `getScreen()` 相当。`None` は [`OsSource::windows`] 用の
 /// 交差判定省略モード（選別のみ・orch 決定 4）で、選別通過窓は全て
 /// [`WindowStatus::OutOfBounds`] 変体として返る。
-unsafe fn window_status(hwnd: HWND, screen: Option<&Rect>) -> WindowStatus {
+unsafe fn window_status(
+    hwnd: HWND,
+    screen: Option<&Rect>,
+    whitelist: &[&str],
+    blacklist: &[&str],
+) -> WindowStatus {
     // L145: IsWindowVisible
     if !IsWindowVisible(hwnd).as_bool() {
         return WindowStatus::Ignored;
@@ -136,7 +135,7 @@ unsafe fn window_status(hwnd: HWND, screen: Option<&Rect>) -> WindowStatus {
     }
 
     // L162: isInteractive(hWnd) && !IsIconic(hWnd)
-    if !is_interactive(hwnd) || IsIconic(hwnd).as_bool() {
+    if !is_interactive(hwnd, whitelist, blacklist) || IsIconic(hwnd).as_bool() {
         return WindowStatus::Ignored;
     }
 
@@ -151,11 +150,11 @@ unsafe fn window_status(hwnd: HWND, screen: Option<&Rect>) -> WindowStatus {
     }
 }
 
-/// `isInteractive` L87-142（実装体・空固定リストを渡す）。
-unsafe fn is_interactive(hwnd: HWND) -> bool {
+/// `isInteractive` L87-142（実装体・設定由来の whitelist / blacklist を渡す）。
+unsafe fn is_interactive(hwnd: HWND, whitelist: &[&str], blacklist: &[&str]) -> bool {
     // L94: WindowUtils.getWindowTitle(hWnd)
     let title = window_title(hwnd);
-    is_interactive_by_title(&title, INTERACTIVE_WHITELIST, INTERACTIVE_BLACKLIST)
+    is_interactive_by_title(&title, whitelist, blacklist)
 }
 
 /// JNA `WindowUtils.getWindowTitle`（W32WindowUtils）相当
@@ -259,17 +258,21 @@ fn id_from_hwnd(hwnd: HWND) -> i64 {
 }
 
 /// [`find_active_proc`] の走査コンテキスト（`findActiveWindow` 相当）。
-struct ActiveWindowCtx {
+struct ActiveWindowCtx<'a> {
     /// `getScreen()` 相当（L165 の交差判定用）。
     screen: Rect,
+    /// 設定由来の whitelist（[`is_interactive_by_title`] へ渡す）。
+    whitelist: &'a [&'a str],
+    /// 設定由来の blacklist（[`is_interactive_by_title`] へ渡す）。
+    blacklist: &'a [&'a str],
     /// 採用した hwnd。None = 窓無し / INVALID で中止。
     handle: Option<HWND>,
 }
 
 /// `findActiveWindow` L181-191 の WNDENUMPROC 逐語。
 unsafe extern "system" fn find_active_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let ctx = &mut *(lparam.0 as *mut ActiveWindowCtx);
-    match window_status(hwnd, Some(&ctx.screen)) {
+    let ctx = &mut *(lparam.0 as *mut ActiveWindowCtx<'_>);
+    match window_status(hwnd, Some(&ctx.screen), ctx.whitelist, ctx.blacklist) {
         // L182-185: VALID → 採用して列挙停止
         WindowStatus::Valid => {
             ctx.handle = Some(hwnd);
@@ -283,7 +286,11 @@ unsafe extern "system" fn find_active_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 }
 
 /// [`collect_proc`] の収集コンテキスト（`restoreWindows` 用選別・交差判定なし）。
-struct WindowsCtx {
+struct WindowsCtx<'a> {
+    /// 設定由来の whitelist（[`is_interactive_by_title`] へ渡す）。
+    whitelist: &'a [&'a str],
+    /// 設定由来の blacklist（[`is_interactive_by_title`] へ渡す）。
+    blacklist: &'a [&'a str],
     windows: Vec<(i64, RECT)>,
 }
 
@@ -291,8 +298,8 @@ struct WindowsCtx {
 /// 選別済み集合（`getWindowStatus` の選別部通過 = Java の VALID / OUT_OF_BOUNDS 群）を
 /// 全て収集する。交差判定なし・列挙中止なし（#9b 契約・orch 決定 4）。
 unsafe extern "system" fn collect_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let ctx = &mut *(lparam.0 as *mut WindowsCtx);
-    match window_status(hwnd, None) {
+    let ctx = &mut *(lparam.0 as *mut WindowsCtx<'_>);
+    match window_status(hwnd, None, ctx.whitelist, ctx.blacklist) {
         // 選別通過。screen=None のため常に OutOfBounds 変体（交差判定は Environment 側）。
         // L305-315 相当: 矩形はここで取得（失敗は skip = 列挙継続）
         WindowStatus::Valid | WindowStatus::OutOfBounds => {
@@ -305,12 +312,40 @@ unsafe extern "system" fn collect_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     BOOL(1) // 列挙は常に続行
 }
 
-/// [`OsSource`] の実 Win32 実装体（状態なし・単一スレッド前提・Send 不要）。
+/// [`OsSource`] の実 Win32 実装体（単一スレッド前提・Send 不要）。
+///
+/// whitelist / blacklist は settings.toml の `[interactive_windows]` 由来で、
+/// [`Win32OsSource::new`] で注入する。未指定（空）の場合、どのアクティブウィンドウも
+/// interactive にならない（Java `isInteractive` の意味論どおり）。
 ///
 /// **`monitors()` / `active_window()` は EventLoop 構築後に呼ばれること**
 /// （tao PMv2・モジュール doc 参照）。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Win32OsSource;
+#[derive(Debug, Clone, Default)]
+pub struct Win32OsSource {
+    /// 反応対象タイトルの部分一致リスト（空 = 非使用）。
+    whitelist: Vec<String>,
+    /// 反応除外タイトルの部分一致リスト（空 = 非使用）。
+    blacklist: Vec<String>,
+}
+
+impl Win32OsSource {
+    /// settings.toml `[interactive_windows]` の whitelist / blacklist を注入して構築する。
+    pub fn new(whitelist: Vec<String>, blacklist: Vec<String>) -> Win32OsSource {
+        Win32OsSource {
+            whitelist,
+            blacklist,
+        }
+    }
+
+    /// `Vec<String>` 設定を [`is_interactive_by_title`] の `&[&str]` 契約へ
+    /// 変換する参照スライス対（呼び出し中のみ有効）。
+    fn interactive_lists(&self) -> (Vec<&str>, Vec<&str>) {
+        (
+            self.whitelist.iter().map(String::as_str).collect(),
+            self.blacklist.iter().map(String::as_str).collect(),
+        )
+    }
+}
 
 impl OsSource for Win32OsSource {
     /// 既存 [`enumerate_workareas()`] を monitor index 順に
@@ -344,14 +379,17 @@ impl OsSource for Win32OsSource {
     /// 後段矩形取得。`EnumWindows` の戻り値は列挙停止（BOOL 0）でも FALSE に
     /// なるため無視（Java 同様）。
     fn active_window(&self) -> Option<(i64, Rect)> {
+        let (whitelist, blacklist) = self.interactive_lists();
         let mut ctx = ActiveWindowCtx {
             screen: screen_union(),
+            whitelist: &whitelist,
+            blacklist: &blacklist,
             handle: None,
         };
         unsafe {
             let _ = EnumWindows(
                 Some(find_active_proc),
-                LPARAM(&mut ctx as *mut ActiveWindowCtx as isize),
+                LPARAM(&mut ctx as *mut ActiveWindowCtx<'_> as isize),
             );
         }
         // L71: getWindowRect(findActiveWindow(), true)。getWindowStatus L164 でも
@@ -380,13 +418,16 @@ impl OsSource for Win32OsSource {
     /// IsZoomed / isInteractive / 非 IsIconic）。交差判定なし・列挙中止なし
     /// （#9b 契約・orch 決定 4: OUT_OF_BOUNDS 判定は Environment 側）。
     fn windows(&self) -> Vec<(i64, Rect)> {
+        let (whitelist, blacklist) = self.interactive_lists();
         let mut ctx = WindowsCtx {
+            whitelist: &whitelist,
+            blacklist: &blacklist,
             windows: Vec::new(),
         };
         unsafe {
             let _ = EnumWindows(
                 Some(collect_proc),
-                LPARAM(&mut ctx as *mut WindowsCtx as isize),
+                LPARAM(&mut ctx as *mut WindowsCtx<'_> as isize),
             );
         }
         ctx.windows

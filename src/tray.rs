@@ -183,6 +183,23 @@ pub struct ImagesetsSettings {
     pub scale: BTreeMap<String, f64>,
 }
 
+/// アクティブウィンドウ選別の whitelist / blacklist（design §3-14 の
+/// `[interactive_windows]`）。Java `Settings` の `interactiveWindows` /
+/// `interactiveWindowsBlacklist` 相当で、`Win32OsSource` の
+/// `is_interactive_by_title` へ注入される。
+///
+/// 各項目は load 時に加工しない（trim・空要素除去・正規化なし・verbatim 保持）。
+/// trim 後空判定や部分一致は下流の `is_interactive_by_title` が担う。
+/// `#[serde(default)]` でセクション欠落・キー欠落の双方を空リストに補完する。
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InteractiveWindowsSettings {
+    /// 反応対象タイトルの部分一致リスト（空 = 非使用）。
+    pub whitelist: Vec<String>,
+    /// 反応除外タイトルの部分一致リスト（空 = 非使用）。
+    pub blacklist: Vec<String>,
+}
+
 /// 一般設定（design §3-14 の `[general]`）。TOML 出力で先頭セクションに置くため
 /// [`Settings`] の最初のフィールドに据える。欠落メンバは `#[serde(default)]` で
 /// 補完（`show_console` 既定 false・`language` 既定 [`DEFAULT_LANGUAGE`]・後方互換）。
@@ -230,6 +247,13 @@ pub struct Settings {
     /// set 単位 scale（design §3-14 の `[imagesets] scale = { ... }`）。
     #[serde(default)]
     pub imagesets: ImagesetsSettings,
+    /// アクティブウィンドウ選別の whitelist / blacklist
+    /// （design §3-14 の `[interactive_windows]`・[`Win32OsSource`] へ注入）。
+    /// 後方互換: セクション欠落は空リスト補完。
+    ///
+    /// [`Win32OsSource`]: crate::win::os_source::Win32OsSource
+    #[serde(default)]
+    pub interactive_windows: InteractiveWindowsSettings,
 }
 
 impl Settings {
