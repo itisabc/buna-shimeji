@@ -256,6 +256,28 @@ pub struct Settings {
     pub interactive_windows: InteractiveWindowsSettings,
 }
 
+/// 初回生成する settings.toml の `[general]` 直後へ添える対応言語の記入例。
+///
+/// serde シリアライザはコメントを出力できないため、`language` 行の直後へ挿入する。
+/// 有効化する場合は該当行の先頭 `#` を外して言語コードを書き換える。
+const GENERAL_HELP: &str = "\
+# --- [general] language 記入例 ---
+# language = \"ja\"   # 同梱: \"en\"（英語・既定） / \"ja\"（日本語）
+";
+
+/// 初回生成する settings.toml の末尾へ添える `[interactive_windows]` の記入例。
+///
+/// serde シリアライザはコメントを出力できないため、既定値本体の後へ追記する。
+/// `[interactive_windows]` は [`Settings`] の最後のフィールドなので、末尾追記で
+/// 同セクションの説明として読める。各例はコメントアウトしてあり、
+/// 有効化する場合は該当行の先頭 `#` を外す（部分一致・大文字小文字を区別）。
+const INTERACTIVE_WINDOWS_HELP: &str = "\
+# --- [interactive_windows] 記入例 ---
+# whitelist = [\"メモ帳\", \"Visual Studio Code\"]   # タイトル部分一致で反応対象にする
+# blacklist = [\"タスク マネージャー\"]              # 部分一致で除外する（whitelist より優先）
+# 注意: whitelist と blacklist の両方が空のときは、どのウィンドウにも反応しません。
+";
+
 impl Settings {
     /// settings.toml を読み込む（Java Settings.java load L61-68 相当）。
     /// ファイル不在は `Ok(既定値)`（Java L62 `Files.isRegularFile` 逐語・
@@ -295,14 +317,26 @@ impl Settings {
     }
 
     /// settings.toml が無ければ既定値で新規生成する（初回起動時の土台作成）。
-    /// - 不在 → [`Settings::default`] を [`Settings::save`] して `Ok(true)`
+    /// - 不在 → [`Settings::default`] の TOML に [`GENERAL_HELP`] / [`INTERACTIVE_WINDOWS_HELP`]
+    ///   の記入例コメントを添えて生成し `Ok(true)`
     /// - 既存 → 何もせず `Ok(false)`（手編集を上書きしない）
-    /// - 書込失敗 → [`Settings::save`] のエラーをそのまま伝播
+    /// - 書込失敗 → エラーをそのまま伝播
     pub fn create_default_if_missing(path: &Path) -> Result<bool, SettingsError> {
         if path.is_file() {
             return Ok(false);
         }
-        Settings::save(path, &Settings::default())?;
+        let settings = Settings::default();
+        let mut text = toml::to_string(&settings)?;
+        // serde はコメントを出力できないため、`language` 行の直後へ記入例を挿入する
+        let anchor = format!("language = \"{}\"\n", settings.general.language);
+        if let Some(pos) = text.find(&anchor) {
+            text.insert_str(pos + anchor.len(), GENERAL_HELP);
+        }
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(INTERACTIVE_WINDOWS_HELP);
+        std::fs::write(path, text)?;
         Ok(true)
     }
 

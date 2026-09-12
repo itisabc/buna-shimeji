@@ -1040,6 +1040,64 @@ fn create_default_if_missing_writes_readable_defaults() {
     assert!(loaded.scales().is_empty(), "生成既定は空 map");
 }
 
+/// create_default_if_missing: 生成される settings.toml に `[interactive_windows]`
+/// セクション（空 whitelist/blacklist）とコメントアウトされた記入例が含まれ、
+/// 生成物がそのまま load できる（コメントは解釈を妨げない）。
+#[test]
+fn create_default_if_missing_includes_interactive_windows_section_and_help() {
+    let home = TempHome::new("create_interactive");
+    let path = home.settings_path();
+    Settings::create_default_if_missing(&path).expect("生成できる");
+
+    let text = std::fs::read_to_string(&path).expect("生成物を読める");
+    assert!(
+        text.contains("[interactive_windows]"),
+        "セクション見出しが出力される"
+    );
+    assert!(text.contains("whitelist = []"), "空 whitelist が出力される");
+    assert!(text.contains("blacklist = []"), "空 blacklist が出力される");
+    let comment_lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .collect();
+    assert!(
+        comment_lines.iter().any(|l| l.contains("whitelist")),
+        "whitelist の記入例コメントがある"
+    );
+    assert!(
+        comment_lines.iter().any(|l| l.contains("blacklist")),
+        "blacklist の記入例コメントがある"
+    );
+
+    let loaded = Settings::load(&path).expect("記入例コメント付きでも load できる");
+    assert!(loaded.interactive_windows.whitelist.is_empty());
+    assert!(loaded.interactive_windows.blacklist.is_empty());
+}
+
+/// create_default_if_missing: 生成される settings.toml の `[general]` 付近に
+/// 対応言語（en / ja）の記入例コメントが含まれ、生成物がそのまま load できる。
+#[test]
+fn create_default_if_missing_includes_language_help() {
+    let home = TempHome::new("create_language");
+    let path = home.settings_path();
+    Settings::create_default_if_missing(&path).expect("生成できる");
+
+    let text = std::fs::read_to_string(&path).expect("生成物を読める");
+    let comment_lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .collect();
+    assert!(
+        comment_lines
+            .iter()
+            .any(|l| l.contains("language") && l.contains("en") && l.contains("ja")),
+        "対応言語（en/ja）の記入例コメントがある"
+    );
+
+    let loaded = Settings::load(&path).expect("記入例コメント付きでも load できる");
+    assert_eq!(loaded.general.language, "en", "既定言語は en");
+}
+
 /// create_default_if_missing: 既存ファイル → Ok(false) かつ内容を一切変更しない
 ///（手編集を上書きしない）。
 #[test]
