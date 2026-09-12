@@ -1,11 +1,11 @@
-# Shimeji (Rust 再実装)
+# Shimeji (Rust 実装)
 
-Windows 用デスクトップマスコット「しめじ」を Rust で再実装するプロジェクトです。
-Java 版（Shimeji-ee / Shimeji-Desktop 系）と同等の挙動（歩く・落ちる・ジャンプ・
+Windows 用デスクトップマスコット「しめじ」の Rust 実装です。
+Java 版（Shimeji-ee / Shimeji-Desktop 系）を参考に、主要なマスコット挙動（歩く・落ちる・ジャンプ・
 ドラッグ・スロー・増殖・変身・ウィンドウ運び）を、tao + windows-rs による
-軽量実装で目指します（透過描画は CreateDIBSection + UpdateLayeredWindow。
+軽量実装で実現しています（透過描画は CreateDIBSection + UpdateLayeredWindow。
 
-- 挙動: Java 版と同等（アクションの式・定数を Java ソースから逐語移植）
+- 挙動: 主要なマスコット挙動を実装済み（アクションの式・定数は Java 版を参考に実装）
 - 軽量化: メモリ 5〜20MB / アイドル CPU ほぼ 0（tick 駆動・変化時のみ描画。実測: アイドル CPU 0.234%・Private 8.8MB・WorkingSet 22.4MB・スレッド 2）
 - 拡張性: Phase 2 で OpenAI 互換 API による LLM エージェント化（Think/Chat）
 - 画像差し替え容易: `img/<SetName>/` にフォルダを置くだけで新しい画像セットを利用可能
@@ -27,7 +27,7 @@ img/
 （コミット `dea89528c10c066626a09609f0e742cbe6405a8d`）から取得し、
 内容を一切改変せずに同梱しています。
 
-## ビルド・実行（Phase 1 で整備）
+## ビルド・実行
 
 ```powershell
 cargo build --release   # リリースビルド
@@ -35,7 +35,8 @@ cargo run --release     # 実行（exe と同じ場所に conf/ と img/ が必�
 cargo test              # 単体テスト
 ```
 
-※ 現在 Phase 1 作業中のため、`Cargo.toml` と `src/` は未整備です。
+現状: 主要挙動の実装は完了（`cargo test` 485/485 PASS、2026-09-12、HEAD `3be3218`）。
+今後の主開発は Phase 2（LLM エージェントによる Think/Chat、効果音）です。
 
 ## ライセンス
 
