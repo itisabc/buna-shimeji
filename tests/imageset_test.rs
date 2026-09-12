@@ -7,7 +7,8 @@
 //!   非 PNG は無言スキップ、デコード失敗 PNG は IHDR 寸法の全透明フレームで代替 + 警告、
 //!   ヘッダ自体が読めない PNG はフレーム欠落 + 警告、サイズ混在は警告して続行、
 //!   set ディレクトリ不在は Err（スキップ判断は呼び出し側の責務）
-//! - set 単位 scale のロード時プリスケール（java_round 寸法・Nearest フィルタ）
+//! - set 単位 scale のロード時プリスケール（java_round 寸法・Lanczos3 フィルタ。
+//!   straight RGBA8 のまま。premultiply はしない）
 //! - java_round（Java Math.round = floor(x+0.5)。負の半端で Rust f64::round と異なる）
 //!   と scale_anchor（補正なし）/ scale_velocity（非ゼロ→0 を符号付き ±1 補正）/ scale_pose
 //!   （Java AnimationBuilder.java L206-211・ImagePairs.java L81-82 の丸め規則）
@@ -632,10 +633,31 @@ fn load_retains_resolved_scale_while_preserving_frame_prescale() {
     );
 }
 
+/// 画像を左半 / 右半に分けた (R合計, G合計, B合計) を返す（配置の集計検証用）。
+/// 1px 単位の絶対値ではなく空間的な優勢色をロバストに比較するために使う。
+fn half_rgb_totals(rgba: &[u8], width: u32, height: u32, left_half: bool) -> (u64, u64, u64) {
+    let (mut r, mut g, mut b) = (0u64, 0u64, 0u64);
+    for y in 0..height {
+        for x in 0..width {
+            if (x < width / 2) != left_half {
+                continue;
+            }
+            let idx = ((y * width + x) * 4) as usize;
+            r += u64::from(rgba[idx]);
+            g += u64::from(rgba[idx + 1]);
+            b += u64::from(rgba[idx + 2]);
+        }
+    }
+    (r, g, b)
+}
+
 #[test]
-fn load_scale_uses_nearest_neighbour_sampling() {
-    // Java 既定フィルタ NEAREST_NEIGHBOUR の契約: 補間による中間色ピクセルを生成しない
-    let img = TempImg::new("scale_nearest");
+fn load_scale_uses_lanczos3_interpolation() {
+    // 契約: set 単位 scale のロード時プリスケールは Lanczos3 で行われる
+    //（straight RGBA8 のまま。premultiply しない）。
+    // Lanczos3 は補間するため「赤でも青でもない中間色（不透明）」が生成される。
+    // Nearest なら中間色は一切生成されない = この断言が RED の根拠。
+    let img = TempImg::new("scale_lanczos3");
     let mut two = image::RgbaImage::from_pixel(2, 2, image::Rgba(OPAQUE_RED));
     two.put_pixel(1, 0, image::Rgba(OPAQUE_BLUE));
     two.put_pixel(1, 1, image::Rgba(OPAQUE_BLUE));
@@ -643,25 +665,34 @@ fn load_scale_uses_nearest_neighbour_sampling() {
 
     let set = ImageSet::load(img.path(), "SetA", Some(2.0)).expect("Some(2.0) ロード");
     let frame = set.frame("two.png").expect("two.png が引ける");
-    assert_eq!((frame.width, frame.height), (4, 4));
-    let mut saw_red = false;
-    let mut saw_blue = false;
+    assert_eq!((frame.width, frame.height), (4, 4), "java_round 寸法");
+
+    // 中間色の存在 + 元が全て不透明なので出力も全ピクセル不透明
+    let mut intermediate = 0usize;
     for px in frame.rgba.chunks_exact(4) {
         let p = as_px(px);
-        assert!(
-            p == OPAQUE_RED || p == OPAQUE_BLUE,
-            "中間色ピクセル {p:?} が存在（Nearest 以外のフィルタ）"
-        );
-        if p == OPAQUE_RED {
-            saw_red = true;
-        }
-        if p == OPAQUE_BLUE {
-            saw_blue = true;
+        assert_eq!(p[3], 255, "元が全て不透明なら出力も不透明: {p:?}");
+        if p != OPAQUE_RED && p != OPAQUE_BLUE {
+            intermediate += 1;
         }
     }
     assert!(
-        saw_red && saw_blue,
-        "左半分赤・右半分青の配置が維持されるべき"
+        intermediate > 0,
+        "Lanczos3 補間による中間色ピクセルが存在するはず（Nearest なら 0）"
+    );
+
+    // 空間配置（ロバストな集計）: 左半は赤優勢・右半は青優勢
+    let (lr, _, lb) = half_rgb_totals(&frame.rgba, frame.width, frame.height, true);
+    let (rr, _, rb) = half_rgb_totals(&frame.rgba, frame.width, frame.height, false);
+    assert!(lr > lb, "左半は赤優勢のはず（R合計={lr} B合計={lb}）");
+    assert!(rb > rr, "右半は青優勢のはず（R合計={rr} B合計={rb}）");
+
+    // 決定論: 同一入力・同一 scale の再ロードは同一バイト列
+    let reloaded = ImageSet::load(img.path(), "SetA", Some(2.0)).expect("再ロード");
+    assert_eq!(
+        reloaded.frame("two.png").expect("two.png").rgba,
+        frame.rgba,
+        "同一入力に対し決定的"
     );
 }
 

@@ -6,13 +6,18 @@
 //! - 丸め規則は Java に一致させる（Java `Math.round` = floor(x + 0.5)。
 //!   Rust `f64::round` は負の半端で 0 から遠ざかるため使用しない）
 //! - scale のロード時プリスケール: 寸法は Java ImageUtils.scale の
-//!   `(int) Math.round(width * effectiveScaling)`、フィルタは Java 既定の
-//!   NEAREST_NEIGHBOUR。アンカーは ImagePairs.java L81-82 の
-//!   `(int) Math.round(anchorX * scaling)`（±1 補正なし）、速度は
+//!   `(int) Math.round(width * effectiveScaling)`。フィルタは **Lanczos3**
+//!   （straight RGBA8 のまま。premultiply しない）。アンカーは ImagePairs.java
+//!   L81-82 の `(int) Math.round(anchorX * scaling)`（±1 補正なし）、速度は
 //!   AnimationBuilder.java L206-211（非ゼロ→0 に丸まった成分を符号付き ±1 に補正）
+//! - 逐語移植の例外: Java のフィルタ機構（nearest/bicubic/hqx）に lanczos は無く、
+//!   Lanczos3 は本プロジェクト独自の意図的な逸脱（AGENTS.md §1 / design.md §1.6 の
+//!   「明確なリスク時は Java と変えてよい」に基づく記録）。寸法・anchor・velocity の
+//!   丸め規則は Java のまま不変
 //!
 //! Phase 1 の意図的な範囲外: opacity / hqx フィルタ / ImageRight 右向き反転
 //! （反転は #5 描画側で検討）/ ログ出力 / 非 PNG の警告。
+//! ロード時スケールのフィルタは Lanczos3 であり、この hqx 除外とは別軸。
 //! サブディレクトリ内の PNG は対象外（資産はフラット構成・明記済みの制限）。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,10 +53,10 @@ fn valid_frame_dimensions(width: u32, height: u32) -> bool {
 #[derive(Debug, Error)]
 pub enum ImagesetError {
     /// ファイル / ディレクトリ I/O 失敗（set ディレクトリ不在を含む）。
-    #[error("I/O エラー: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     /// PNG ヘッダとして解釈できないファイル（シグネチャ不正・IHDR 不在など）。
-    #[error("PNG ヘッダを読めません: {0}")]
+    #[error("cannot read PNG header: {0}")]
     NotPng(String),
 }
 
@@ -219,7 +224,7 @@ impl ImageSet {
     ///   ヘッダ自体が読めない PNG はフレーム欠落 + 警告
     /// - サイズ混在 set は警告 1 件を追加して続行（フレームは各自の寸法を保持）
     /// - `scale` が Some(s) かつ s != 1.0 のとき全フレームを java_round 寸法・
-    ///   Nearest でプリスケール
+    ///   Lanczos3（straight RGBA8・premultiply なし）でプリスケール
     /// - set ディレクトリ不在 / 列挙 I/O エラーは Err（set 単位のスキップ判断は呼び出し側）
     pub fn load(
         img_dir: &Path,
@@ -247,7 +252,7 @@ impl ImageSet {
                     let (width, height) = rgba.dimensions();
                     if !valid_frame_dimensions(width, height) {
                         warnings.push(format!(
-                            "{file_name}: 寸法 {width}x{height} が上限を超えるため読み飛ばしました"
+                            "{file_name}: skipped because dimensions {width}x{height} exceed the limit"
                         ));
                         continue;
                     }
@@ -265,12 +270,12 @@ impl ImageSet {
                     Ok((width, height)) => {
                         if !valid_frame_dimensions(width, height) {
                             warnings.push(format!(
-                                "{file_name}: 寸法 {width}x{height} が不正なため読み飛ばしました"
+                                "{file_name}: skipped because dimensions {width}x{height} are invalid"
                             ));
                             continue;
                         }
                         warnings.push(format!(
-                            "{file_name}: デコードに失敗したため {width}x{height} の全透明フレームで代替しました"
+                            "{file_name}: decode failed; substituted a fully transparent {width}x{height} frame"
                         ));
                         frames.insert(
                             file_name,
@@ -284,7 +289,7 @@ impl ImageSet {
                     // ヘッダも読めない: フレーム欠落 + 警告
                     Err(_) => {
                         warnings.push(format!(
-                            "{file_name}: PNG ヘッダが読めないため読み飛ばしました"
+                            "{file_name}: skipped because the PNG header could not be read"
                         ));
                     }
                 },
@@ -296,7 +301,7 @@ impl ImageSet {
         if sizes.len() > 1 {
             let dims: Vec<String> = sizes.iter().map(|(w, h)| format!("{w}x{h}")).collect();
             warnings.push(format!(
-                "{set_name}: フレーム寸法が混在しています（{}）。各フレームは自身の寸法のまま読み込みました",
+                "{set_name}: mixed frame dimensions ({}). Each frame was loaded at its own dimensions",
                 dims.join(", ")
             ));
         }
@@ -317,12 +322,12 @@ impl ImageSet {
                     frame.height,
                     std::mem::take(&mut frame.rgba),
                 )
-                .expect("フレームの rgba 長は寸法と整合する");
+                .expect("frame rgba length is consistent with its dimensions");
                 let dst = image::imageops::resize(
                     &src,
                     new_width,
                     new_height,
-                    image::imageops::FilterType::Nearest,
+                    image::imageops::FilterType::Lanczos3,
                 );
                 frame.width = dst.width();
                 frame.height = dst.height();
@@ -331,7 +336,7 @@ impl ImageSet {
             for file_name in oversized {
                 frames.remove(&file_name);
                 warnings.push(format!(
-                    "{file_name}: scale {s} 適用後の寸法が上限を超えるため読み飛ばしました"
+                    "{file_name}: skipped because dimensions after applying scale {s} exceed the limit"
                 ));
             }
         }
@@ -380,7 +385,7 @@ pub fn check_references(config: &ActionsConfig, available: &[String]) -> Consist
                 continue;
             }
             warnings.push(format!(
-                "アクション '{action_name}' のアニメーション #{index}: 画像 {} が見つからないため無効化しました",
+                "action '{action_name}' animation #{index}: disabled because image {} was not found",
                 missing.join(", ")
             ));
             disabled.push(DisabledAnimation {
