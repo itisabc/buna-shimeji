@@ -138,6 +138,8 @@ pub enum AllowedKind {
     Sounds,
     /// 画面間移動（Java `Multiscreen`）。
     Multiscreen,
+    /// ドロップしたウィンドウを最前面固定（Rust 独自拡張・機能 #30・design §1.10(z)）。
+    PinDroppedWindow,
 }
 
 /// Allowed Behaviours 6 トグル（Java Settings.java L89-94 逐語・全て既定 true）。
@@ -158,6 +160,9 @@ pub struct AllowedSettings {
     pub sounds: bool,
     /// Java L94 `Multiscreen`（画面間移動）。
     pub multiscreen: bool,
+    /// ドロップしたウィンドウを最前面固定（Rust 独自拡張・機能 #30・**既定 false**）。
+    /// Java の Allowed Behaviours には無い項目で、ユーザーの自発ドロップ時のみ発動する。
+    pub pin_dropped_window: bool,
 }
 
 impl Default for AllowedSettings {
@@ -170,6 +175,7 @@ impl Default for AllowedSettings {
             throwing: true,
             sounds: true,
             multiscreen: true,
+            pin_dropped_window: false,
         }
     }
 }
@@ -360,18 +366,21 @@ fn allowed_value(allowed: &AllowedSettings, kind: AllowedKind) -> bool {
         AllowedKind::Throwing => allowed.throwing,
         AllowedKind::Sounds => allowed.sounds,
         AllowedKind::Multiscreen => allowed.multiscreen,
+        AllowedKind::PinDroppedWindow => allowed.pin_dropped_window,
     }
 }
 
 /// Allowed Behaviours サブメニューのラベル順（design §3-11・増殖 / 変身 / 投げ /
-/// 画面間移動 / 効果音枠 / Transients）と [`AllowedKind`] / 辞書キーの対応。
-const ALLOWED_MENU_ITEMS: [(AllowedKind, UiKey); 6] = [
+/// 画面間移動 / 効果音枠 / Transients / ドロップ窓固定）と [`AllowedKind`] /
+/// 辞書キーの対応。
+const ALLOWED_MENU_ITEMS: [(AllowedKind, UiKey); 7] = [
     (AllowedKind::Breeding, UiKey::BreedingCloning),
     (AllowedKind::Transformation, UiKey::Transformation),
     (AllowedKind::Throwing, UiKey::ThrowingWindows),
     (AllowedKind::Multiscreen, UiKey::Multiscreen),
     (AllowedKind::Sounds, UiKey::SoundEffects),
     (AllowedKind::Transients, UiKey::BreedingTransient),
+    (AllowedKind::PinDroppedWindow, UiKey::PinDroppedWindow),
 ];
 
 /// トレイ / ポップアップのメニュー項目に対応するコマンド（design §3-11）。
@@ -638,6 +647,7 @@ fn apply_allowed(settings: &mut Settings, kind: AllowedKind, value: bool) {
         AllowedKind::Throwing => settings.allowed.throwing = value,
         AllowedKind::Sounds => settings.allowed.sounds = value,
         AllowedKind::Multiscreen => settings.allowed.multiscreen = value,
+        AllowedKind::PinDroppedWindow => settings.allowed.pin_dropped_window = value,
     }
 }
 
@@ -667,7 +677,11 @@ pub fn apply_tray_command(
         TrayCommand::Spawn(None) => manager.request_spawn_random(&context.image_sets),
         TrayCommand::FollowCursor => manager.set_behavior_all("ChaseMouse"),
         TrayCommand::ReduceToOne => manager.remain_one(),
-        TrayCommand::RestoreWindows => manager.restore_windows(),
+        TrayCommand::RestoreWindows => {
+            manager.restore_windows();
+            // #30 item 5: 復元時に pin を解除する（我々が付けた TOPMOST を剥がす）。
+            manager.unpin_pinned_window();
+        }
         TrayCommand::SetAllowed(kind, value) => {
             apply_allowed(settings, kind, value);
             // design §3-11: トグル状態は conf/settings.toml に即時永続化。
@@ -683,10 +697,16 @@ pub fn apply_tray_command(
                 AllowedKind::Multiscreen => manager.set_multiscreen(value),
                 // 効果音は Phase 1 no-op（design §3-12・settings 永続化のみ）
                 AllowedKind::Sounds => {}
+                // ドロップ窓固定（機能 #30 item 1/5）: OFF 時は Manager が即 unpin する。
+                AllowedKind::PinDroppedWindow => manager.set_pin_dropped_window_allowed(value),
             }
         }
         TrayCommand::TogglePauseAll => manager.toggle_pause_all(),
-        TrayCommand::DismissAll => manager.dispose_all(),
+        TrayCommand::DismissAll => {
+            manager.dispose_all();
+            // #30 item 5: 終了時に pin を解除する（mascot 削除は次 tick でも解除は即座）。
+            manager.unpin_pinned_window();
+        }
         TrayCommand::Reload => {
             // scales は BTreeMap（Settings 契約）→ load_materials は HashMap 入力のため変換
             let scales: HashMap<String, f64> = settings

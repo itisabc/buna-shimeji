@@ -585,17 +585,18 @@ fn make_apply_context(home: &TempHome, image_sets: &[&str]) -> TrayContext {
 // =====================================================================
 
 /// Allowed Behaviours サブメニューのラベル順（design §3-11・増殖/変身/投げ/
-/// 画面間移動/効果音枠/Transients）と AllowedKind の対応。
-const ALLOWED_LABELS: [&str; 6] = [
+/// 画面間移動/効果音枠/Transients/ドロップ窓固定）と AllowedKind の対応。
+const ALLOWED_LABELS: [&str; 7] = [
     "しめじを増やす動作",
     "スキン変更、変身",
     "ウインドウを投げる行為",
     "マルチモニターの場合しめじが複数の画面で動作するのを許可",
     "効果音の許可",
     "特殊効果",
+    "ドロップしたウインドウを固定",
 ];
 
-fn allowed_kinds_in_menu_order() -> [AllowedKind; 6] {
+fn allowed_kinds_in_menu_order() -> [AllowedKind; 7] {
     [
         AllowedKind::Breeding,
         AllowedKind::Transformation,
@@ -603,6 +604,7 @@ fn allowed_kinds_in_menu_order() -> [AllowedKind; 6] {
         AllowedKind::Multiscreen,
         AllowedKind::Sounds,
         AllowedKind::Transients,
+        AllowedKind::PinDroppedWindow,
     ]
 }
 
@@ -615,6 +617,7 @@ fn allowed_field(allowed: &AllowedSettings, kind: &AllowedKind) -> bool {
         AllowedKind::Throwing => allowed.throwing,
         AllowedKind::Sounds => allowed.sounds,
         AllowedKind::Multiscreen => allowed.multiscreen,
+        AllowedKind::PinDroppedWindow => allowed.pin_dropped_window,
     }
 }
 
@@ -627,6 +630,7 @@ fn kind_by_name(name: &str) -> AllowedKind {
         "Transformation" => AllowedKind::Transformation,
         "Throwing" => AllowedKind::Throwing,
         "Sounds" => AllowedKind::Sounds,
+        "PinDroppedWindow" => AllowedKind::PinDroppedWindow,
         _ => AllowedKind::Multiscreen,
     }
 }
@@ -639,6 +643,7 @@ fn allowed_field_by_name(allowed: &AllowedSettings, name: &str) -> bool {
         "Transformation" => allowed.transformation,
         "Throwing" => allowed.throwing,
         "Sounds" => allowed.sounds,
+        "PinDroppedWindow" => allowed.pin_dropped_window,
         _ => allowed.multiscreen,
     }
 }
@@ -659,12 +664,14 @@ fn kind_name(kind: &AllowedKind) -> &'static str {
         "Throwing"
     } else if same_kind(kind, &AllowedKind::Sounds) {
         "Sounds"
+    } else if same_kind(kind, &AllowedKind::PinDroppedWindow) {
+        "PinDroppedWindow"
     } else {
         "Multiscreen"
     }
 }
 
-/// 6 フィールドを明示して AllowedSettings を作る（AllowedSettings::default の
+/// 7 フィールドを明示して AllowedSettings を作る（AllowedSettings::default の
 /// pin は Settings::default 経由のみに限定するため）。
 #[allow(clippy::too_many_arguments)]
 fn allowed(
@@ -674,6 +681,7 @@ fn allowed(
     throwing: bool,
     sounds: bool,
     multiscreen: bool,
+    pin_dropped_window: bool,
 ) -> AllowedSettings {
     AllowedSettings {
         breeding,
@@ -682,6 +690,7 @@ fn allowed(
         throwing,
         sounds,
         multiscreen,
+        pin_dropped_window,
     }
 }
 
@@ -894,7 +903,7 @@ fn settings_round_trip_preserves_all_values() {
     scale.insert("Shimeji".to_string(), 0.5);
     scale.insert("HiRes".to_string(), 0.25);
     let original = Settings {
-        allowed: allowed(false, true, false, true, false, true),
+        allowed: allowed(false, true, false, true, false, true, false),
         disabled_behaviors: disabled,
         imagesets: ImagesetsSettings { scale },
         general: GeneralSettings {
@@ -934,7 +943,7 @@ fn settings_save_is_deterministic_with_sorted_keys() {
     scale.insert("Delta".to_string(), 2.0);
     scale.insert("Beta".to_string(), 0.5);
     let settings = Settings {
-        allowed: allowed(true, true, true, true, true, true),
+        allowed: allowed(true, true, true, true, true, true, true),
         disabled_behaviors: disabled,
         imagesets: ImagesetsSettings { scale },
         general: GeneralSettings::default(),
@@ -1513,7 +1522,7 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
     let sets = vec!["Shimeji".to_string(), "Kuro".to_string()];
     let model = TrayMenuModel::build_tray(
         &sets,
-        &allowed(true, true, true, true, true, true),
+        &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
     let items = model.menu().items();
@@ -1598,18 +1607,18 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
         Some(TrayCommand::RestoreWindows)
     ));
 
-    // 5. Allowed Behaviours Submenu: CheckMenuItem 6 種（ラベル順固定・checked = allowed）
+    // 5. Allowed Behaviours Submenu: CheckMenuItem 7 種（ラベル順固定・checked = allowed）
     let allowed_sub = expect_submenu(&items[4], "許可する行為");
     assert_eq!(allowed_sub.text(), "許可する行為");
     let checks = allowed_sub.items();
-    assert_eq!(checks.len(), 6, "トグルは 6 種");
+    assert_eq!(checks.len(), 7, "トグルは 7 種");
     let kinds = allowed_kinds_in_menu_order();
-    for index in 0..6 {
+    for index in 0..7 {
         let check = expect_check(&checks[index], "トグル項目");
         assert_eq!(
             check.text(),
             ALLOWED_LABELS[index],
-            "ラベル順（増殖/変身/投げ/画面間移動/効果音枠/Transients）"
+            "ラベル順（増殖/変身/投げ/画面間移動/効果音枠/Transients/ドロップ窓固定）"
         );
         assert!(
             check.is_checked(),
@@ -1662,13 +1671,13 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
 #[test]
 fn tray_menu_allowed_check_items_reflect_initial_allowed_values() {
     let empty: Vec<String> = vec![];
-    let initial = allowed(false, true, false, true, true, false);
+    let initial = allowed(false, true, false, true, true, false, false);
     let model = TrayMenuModel::build_tray(&empty, &initial, &ja_lang());
     let items = model.menu().items();
 
     let checks = expect_submenu(&items[4], "許可する行為").items();
     let kinds = allowed_kinds_in_menu_order();
-    for index in 0..6 {
+    for index in 0..7 {
         let check = expect_check(&checks[index], "トグル項目");
         assert_eq!(
             check.is_checked(),
@@ -1695,17 +1704,17 @@ fn tray_menu_sync_allowed_updates_all_check_items() {
     let sets = vec!["Shimeji".to_string()];
     let model = TrayMenuModel::build_tray(
         &sets,
-        &allowed(true, true, true, true, true, true),
+        &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
 
-    let updated = allowed(false, true, true, true, false, false);
+    let updated = allowed(false, true, true, true, false, false, false);
     model.sync_allowed(&updated);
 
     let items = model.menu().items();
     let checks = expect_submenu(&items[4], "許可する行為").items();
     let kinds = allowed_kinds_in_menu_order();
-    for index in 0..6 {
+    for index in 0..7 {
         let check = expect_check(&checks[index], "トグル項目");
         assert_eq!(
             check.is_checked(),
@@ -1831,7 +1840,7 @@ fn command_of_unknown_id_returns_none() {
     let empty: Vec<String> = vec![];
     let model = TrayMenuModel::build_tray(
         &empty,
-        &allowed(true, true, true, true, true, true),
+        &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
     let unknown = MenuId::new("tray_test_unknown_id");

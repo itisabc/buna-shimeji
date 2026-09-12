@@ -314,6 +314,9 @@ pub struct Mascot {
     affordances: Vec<String>,
     hotspots: Vec<Hotspot>,
     remove_pending: bool,
+    /// #30 item 5: pin 窓の holder 特定用ミラー。真実は `Environment.pinned` で、
+    /// Manager が必ず同期する（非保持・非 pin は None）。
+    pinned_window: Option<i64>,
 }
 
 impl Mascot {
@@ -344,6 +347,7 @@ impl Mascot {
             affordances: Vec::new(),
             hotspots: Vec::new(),
             remove_pending: false,
+            pinned_window: None,
         }
     }
 
@@ -521,6 +525,17 @@ impl Mascot {
 
     pub fn cursor_position(&self) -> Option<(i32, i32)> {
         self.cursor
+    }
+
+    /// #30 item 5: このマスコットが保持中の pin 窓 id（holder 特定用ミラー）。
+    /// 真実は `Environment.pinned` で、Manager が同期する。
+    pub fn pinned_window(&self) -> Option<i64> {
+        self.pinned_window
+    }
+
+    /// #30 item 5: pin 窓ミラーを設定する（Manager 専用・holder 特定用）。
+    pub fn set_pinned_window(&mut self, id: Option<i64>) {
+        self.pinned_window = id;
     }
 
     /// Java setCursorPosition L1320-1332（カーソル描画更新は renderer glue）。

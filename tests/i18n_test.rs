@@ -42,7 +42,7 @@ use simeji::i18n::{Lang, UiKey, DEFAULT_LANGUAGE};
 use simeji::tray::{GeneralSettings, Settings};
 
 /// 設計 §3-A の UI キー数。
-const UI_KEY_COUNT: usize = 20;
+const UI_KEY_COUNT: usize = 21;
 /// 設計 §6.2-2 の behaviors.xml の Behavior 数。
 const BEHAVIOR_NAME_COUNT: usize = 57;
 

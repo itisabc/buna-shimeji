@@ -35,12 +35,17 @@
 //! （例: ドラッグ先 800px → 1000px に跳ぶ）となり Java 相当挙動が崩れるため、
 //! 変換なしを正とする（#8/#9b の Environment 座標系 = 物理座標契約と整合）。
 
+use std::sync::atomic::{AtomicI64, Ordering};
+
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GetCursorPos, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed, SetWindowPos, SWP_NOSIZE,
+    BringWindowToTop, EnumWindows, GetClassNameW, GetCursorPos, GetWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindow, IsWindowVisible, IsZoomed, SetWindowPos, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST,
+    HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOPMOST,
 };
 
 use crate::app::environment::OsSource;
@@ -257,6 +262,89 @@ fn id_from_hwnd(hwnd: HWND) -> i64 {
     hwnd.0 as isize as i64
 }
 
+// ---- #30 item 5: panic 時の WS_EX_TOPMOST 復元（グローバル static の例外）----
+
+/// panic 発生時に TOPMOST を剥がすべき窓 id（0 = なし）。
+///
+/// グローバル可変状態禁止（AGENTS.md §5-3）の対象はマスコット / アプリの状態であり、
+/// プロセス終了時の best-effort 復元専用の小さな static は `mascot/rng.rs` の
+/// `SEED_UNIQUIFIER` と同様にマスコット状態へ一切関与しないため例外とする
+/// （判断記録: design.md §1.10(z)）。
+static PANIC_UNPIN_WINDOW: AtomicI64 = AtomicI64::new(0);
+
+/// panic 時に TOPMOST を剥がすべき窓 id を登録する（`None` = 解除）。
+/// 「元から TOPMOST だった窓を対象外にする」判定は呼び出し側
+/// （[`crate::app::manager::Manager`]）の責務。
+pub fn set_panic_unpin_window(id: Option<i64>) {
+    PANIC_UNPIN_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// panic フックから呼ぶ best-effort 復元。保持中の id があれば `HWND_NOTOPMOST` で
+/// `SetWindowPos` し、静かに失敗を許容する（戻り値不問・
+/// [`Win32OsSource::set_window_topmost`] と同じ呼び出しスタイル）。呼び出し後は 0 に戻す。
+pub fn restore_topmost_on_panic() {
+    let id = PANIC_UNPIN_WINDOW.swap(0, Ordering::Relaxed);
+    if id == 0 {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd_from_id(id),
+            Some(HWND_NOTOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+// ---- #30 item 6: 保持マスコット窓をピン対象窓より前面へ再アサート ----
+
+/// 保持マスコット窓を最前面へ再アサートする（#30 item 6）。
+///
+/// pin 成立時にピン対象窓 W を `HWND_TOPMOST` にすると、同じ TOPMOST 帯で W が
+/// マスコット窓（[`crate::win::window`] が `WS_EX_TOPMOST` で生成）より前面に出る。
+/// マスコットは移動（tao の `set_outer_position`）のみで Z オーダーを変えないため、
+/// 落下中 / 張り付き中のマスコットが W の裏に隠れる。本関数はピン保持中に毎 tick
+/// 呼ばれ、マスコット窓を TOPMOST 帯の最前面へ押し戻す。
+///
+/// `insertAfter` に W ではなく `HWND_TOP` を渡す理由: マスコットは TOPMOST のため
+/// `HWND_TOP` は「TOPMOST 帯の最前面」を意味し W の上に来る。W を指定すると W の
+/// **直後**（= W の 1 つ下）になり、マスコットのさらに上に別の TOPMOST 窓があれば
+/// 隠れ得るため、明示的に最前面を狙う `HWND_TOP` を採用する。
+///
+/// 上に窓が無い（既に最前面）なら `SetWindowPos` をスキップし、毎 tick の無駄な
+/// Win32 呼び出しを避ける。`GW_HWNDPREV` は「Z 順で 1 つ上の窓」を返し、無ければ
+/// `GetWindow` が `Err`（= NULL）になる。`SetWindowPos` の第 2 引数は windows-rs
+/// では `Option<HWND>` で、`HWND_TOP` は 0（= NULL）のため `Some(HWND_TOP)` は
+/// `None` と等価。`SetWindowPos` の戻り値は不問
+/// （[`Win32OsSource::set_window_topmost`] と同じ呼び出しスタイル）。
+pub fn ensure_window_above(mascot_hwnd: isize) {
+    let mascot = HWND(mascot_hwnd as *mut std::ffi::c_void);
+    if mascot.0.is_null() {
+        return;
+    }
+    // GW_HWNDPREV = Z 順で 1 つ上の窓。Err（NULL 含む）なら既に最前面 → skip。
+    unsafe {
+        if GetWindow(mascot, GW_HWNDPREV).is_err() {
+            return;
+        }
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            mascot,
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
 /// [`find_active_proc`] の走査コンテキスト（`findActiveWindow` 相当）。
 struct ActiveWindowCtx<'a> {
     /// `getScreen()` 相当（L165 の交差判定用）。
@@ -310,6 +398,63 @@ unsafe extern "system" fn collect_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         WindowStatus::Invalid | WindowStatus::Ignored => {}
     }
     BOOL(1) // 列挙は常に続行
+}
+
+/// [`point_window_proc`] の走査コンテキスト（#30: `window_at_point`）。
+struct PointWindowCtx {
+    /// 判定対象の画面座標（物理座標）。
+    point: (i32, i32),
+    /// 自プロセス id（自マスコットのレイヤード窓を除外する）。
+    pid: u32,
+    /// 最初に点を含んだ窓（Z 順で最初 = 最前面）。None = 未発見。
+    handle: Option<(i64, RECT)>,
+}
+
+/// #30 `window_at_point` の EnumWindows コールバック。
+/// 可視・非最小化・自プロセス除外・シェル/デスクトップ窓除外を満たし、rect が点を
+/// 含む最初のトップレベル窓を採用して列挙を停止する（Z 順 = 最前面優先）。
+unsafe extern "system" fn point_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let ctx = &mut *(lparam.0 as *mut PointWindowCtx);
+    if ctx.handle.is_some() {
+        return BOOL(0);
+    }
+
+    // 自プロセス（マスコット / トレイ等）を除外
+    let mut pid: u32 = 0;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid == ctx.pid {
+        return BOOL(1);
+    }
+
+    if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+        return BOOL(1);
+    }
+
+    // タスクバー / デスクトップ / 壁紙（WorkerW）を除外
+    if is_shell_window(hwnd) {
+        return BOOL(1);
+    }
+
+    if let Some(rect) = window_rect(hwnd) {
+        let (x, y) = ctx.point;
+        // Rect は right/bottom を含まない（半開区間）。
+        if rect.left <= x && x < rect.right && rect.top <= y && y < rect.bottom {
+            ctx.handle = Some((id_from_hwnd(hwnd), rect));
+            return BOOL(0);
+        }
+    }
+    BOOL(1)
+}
+
+/// シェル / デスクトップ窓（クラス名完全一致）か。#30 `window_at_point` の除外用。
+unsafe fn is_shell_window(hwnd: HWND) -> bool {
+    let mut buf = [0u16; 256];
+    let len = GetClassNameW(hwnd, &mut buf);
+    if len <= 0 {
+        return false;
+    }
+    let class = String::from_utf16_lossy(&buf[..len as usize]);
+    matches!(class.as_str(), "Shell_TrayWnd" | "Progman" | "WorkerW")
 }
 
 /// [`OsSource`] の実 Win32 実装体（単一スレッド前提・Send 不要）。
@@ -440,6 +585,74 @@ impl OsSource for Win32OsSource {
     fn raise_window(&self, id: i64) {
         unsafe {
             let _ = BringWindowToTop(hwnd_from_id(id));
+        }
+    }
+
+    // ---- #30: ドロップした窓の最前面固定（§1.10(z) item 3）----
+
+    /// 点を含む最前面のトップレベル窓 `(id, rect)` を返す（whitelist/blacklist 非適用・R12）。
+    /// `WindowFromPoint` は自レイヤード窓を拾う恐れがあるため使わず、`EnumWindows` を
+    /// Z 順に走査して可視・非最小化・自プロセス除外・シェル窓除外で選ぶ。
+    fn window_at_point(&self, x: i32, y: i32) -> Option<(i64, Rect)> {
+        let mut ctx = PointWindowCtx {
+            point: (x, y),
+            pid: unsafe { GetCurrentProcessId() },
+            handle: None,
+        };
+        unsafe {
+            let _ = EnumWindows(
+                Some(point_window_proc),
+                LPARAM(&mut ctx as *mut PointWindowCtx as isize),
+            );
+        }
+        ctx.handle.map(|(id, rect)| (id, rect_from(rect)))
+    }
+
+    /// 窓の現在矩形（whitelist 非適用）。生存（IsWindow）・可視・非最小化・
+    /// 非 DWM クロークのときのみ `Some`。pin 窓の毎 tick 追跡・自動解除判定に使う。
+    fn window_frame(&self, id: i64) -> Option<Rect> {
+        let hwnd = hwnd_from_id(id);
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                return None;
+            }
+            if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+                return None;
+            }
+            if is_cloaked(hwnd) {
+                return None;
+            }
+            window_rect(hwnd).map(rect_from)
+        }
+    }
+
+    /// `SetWindowPos(HWND_TOPMOST / HWND_NOTOPMOST, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)`。
+    /// 成功可否を返す（UIPI 保護窓は false）。
+    fn set_window_topmost(&self, id: i64, topmost: bool) -> bool {
+        let insert_after = if topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        };
+        unsafe {
+            SetWindowPos(
+                hwnd_from_id(id),
+                Some(insert_after),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+            .is_ok()
+        }
+    }
+
+    /// `WS_EX_TOPMOST` の有無（pin 前の `was_topmost` 記録用）。
+    fn is_window_topmost(&self, id: i64) -> bool {
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd_from_id(id), GWL_EXSTYLE);
+            (style & WS_EX_TOPMOST.0 as isize) != 0
         }
     }
 }

@@ -45,7 +45,7 @@
 //! 8. tick の可変状態は `RefCell` 内包で管理し `&self` 更新にする
 //!    （tests/app_test.rs 契約・tao 単一スレッド前提のため Mutex は使わない）
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 
 use crate::config::script::EvalContext;
@@ -68,6 +68,8 @@ pub struct SpawnRequest {
 /// OS 供給の抽象（実 Win32 供給は #10）。
 /// WindowsEnvironment.java の該当部分（EnumWindows / MonitorFromPoint /
 /// MouseInfo / SetWindowPos）をこの trait の背後に隠す（テストは fake source で差し替え）。
+// #30 で追加した 4 メソッドは既定実装を持ち、既存のテストダブルを壊さない。
+#[allow(unused_variables)]
 pub trait OsSource {
     /// 全モニタの (モニタ矩形, WorkArea)（`updateScreenRect` L114-140 相当・
     /// monitor index 順）。Java は 5 秒タイマだが tick 毎に取得する（doc 差異 1）。
@@ -91,6 +93,33 @@ pub trait OsSource {
 
     /// 窓を最前面へ（#9b・`BringWindowToTop` 相当）。
     fn raise_window(&self, id: i64);
+
+    // ---- #30: ドロップした窓の最前面固定（§1.10(z) item 3）----
+    // 既定実装は「窓なし/false」を返し、既存のテストダブルをコンパイル可能に保つ。
+
+    /// 点 (x, y) を含む最前面のトップレベル窓 `(id, rect)` を返す（Z 順走査）。
+    /// 可視・非最小化・自プロセス除外・シェル/デスクトップ窓除外。whitelist/blacklist は
+    /// 適用しない（R12）。None = 該当窓なし。既定 None。
+    fn window_at_point(&self, x: i32, y: i32) -> Option<(i64, Rect)> {
+        None
+    }
+
+    /// 窓の現在矩形（whitelist 非適用）。生存・可視・非最小化・非 DWM クロークのときのみ
+    /// `Some`。pin 窓の毎 tick 追跡と自動解除判定に使う。既定 None。
+    fn window_frame(&self, id: i64) -> Option<Rect> {
+        None
+    }
+
+    /// 窓の最前面（HWND_TOPMOST / HWND_NOTOPMOST）状態を設定し、成功可否を返す
+    /// （UIPI 保護窓は false）。既定 false。
+    fn set_window_topmost(&self, id: i64, topmost: bool) -> bool {
+        false
+    }
+
+    /// 窓が現在 WS_EX_TOPMOST かどうか（pin 前の `was_topmost` 記録用）。既定 false。
+    fn is_window_topmost(&self, id: i64) -> bool {
+        false
+    }
 }
 
 /// Environment から参照する eval context（`mascot.environment.*` は MascotContext が
@@ -165,6 +194,32 @@ struct EnvCore {
     cursor: CursorState,
 }
 
+/// pin 中（最前面固定中）の窓の公開スナップショット（§1.10(z) item 2）。
+/// `holder` は Manager のマスコット index。Manager（30-4）が holder 特定・存在確認に使う。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PinnedWindow {
+    pub id: i64,
+    pub rect: Rect,
+    pub holder: usize,
+    /// pin 前に元から TOPMOST だったか（解除時に我々が付けた場合のみ剥がす）。
+    pub was_topmost: bool,
+    /// 直前 tick の `env.tick()` が記録した矩形差分（30-8a）。
+    /// Manager が保持者アンカーを厳密追従させるのに使う（差分は `AreaState` 由来）。
+    pub dleft: i32,
+    pub dtop: i32,
+    pub dright: i32,
+    pub dbottom: i32,
+}
+
+/// pin の内部状態。公開 [`PinnedWindow`] に加え、追従用の [`AreaState`]（delta 保持）を持つ。
+struct PinState {
+    id: i64,
+    holder: usize,
+    was_topmost: bool,
+    /// 毎 tick の `window_frame` で `.set()` 更新され、移動 delta を記録する。
+    area: AreaState,
+}
+
 /// デスクトップ環境（Java `AbstractEnvironment` + `WindowsEnvironment` 相当）。
 /// Manager が所有し、[`EnvironmentView`] 経由で Action / mascot 純関数に参照を渡す。
 pub struct Environment {
@@ -178,6 +233,11 @@ pub struct Environment {
     /// L526-544 の put/remove 逐語対象・#9b）。空リスト = エントリ削除の契約のため
     /// 値が空のエントリは存在しない。
     disabled_behaviors: RefCell<HashMap<String, Vec<String>>>,
+    /// #30: 最前面固定中の窓（単一 holder・§1.10(z) item 2）。`&self` 更新のため RefCell。
+    pinned: RefCell<Option<PinState>>,
+    /// #30: 現在 tick 中のマスコット index（保持者スコープ）。pin 窓を activeIE として
+    /// 見せるのは `Some(holder)` のときだけ（非保持者隔離・Advisor P0-1）。
+    holder_scope: Cell<Option<usize>>,
     null_ctx: NullEnvCtx,
     /// Settings.java L32-37 / L45 既定値（settings.properties 無しのため既定適用）。
     breeding: bool,
@@ -223,6 +283,8 @@ impl Environment {
             }),
             spawns: RefCell::new(Vec::new()),
             disabled_behaviors: RefCell::new(HashMap::new()),
+            pinned: RefCell::new(None),
+            holder_scope: Cell::new(None),
             null_ctx: NullEnvCtx,
             breeding: true,
             transients: true,
@@ -319,6 +381,23 @@ impl Environment {
         if prev_id != core.active_window_id {
             // L79-82: id 変化 → resetDeltas
             core.active_window.reset_deltas();
+        }
+        // ここから先は core を触らない（pin 追跡は EnvCore の active_window を置換しない）。
+        drop(core);
+
+        // #30: pin 窓があれば whitelist 非適用の window_frame で rect を毎 tick 更新する
+        // （AreaState::set が delta を記録し、保持者の border_move 追従に載る）。
+        // None（破棄/不可視/最小化/クローク）なら自動 unpin（was_topmost 規則で復帰）。
+        let pin_id = self.pinned.borrow().as_ref().map(|pin| pin.id);
+        if let Some(id) = pin_id {
+            match self.source.window_frame(id) {
+                Some(rect) => {
+                    if let Some(pin) = self.pinned.borrow_mut().as_mut() {
+                        pin.area.set(rect.left, rect.top, rect.right, rect.bottom);
+                    }
+                }
+                None => self.unpin_window(),
+            }
         }
     }
 
@@ -428,6 +507,115 @@ impl Environment {
             offset += 25;
         }
     }
+
+    // ---- #30: ドロップした窓の最前面固定（§1.10(z) item 2）----
+
+    /// 窓 `id` を holder のマスコット専用に最前面固定する。
+    ///
+    /// - 既存 pin があれば先に [`Self::unpin_window`]（旧解除→新 pin・単一 holder）。
+    /// - `was_topmost` は pin 前の現状態を `OsSource::is_window_topmost` で記録する
+    ///   （解除時に我々が付けた場合のみ剥がす）。
+    /// - rect の初期供給源は `OsSource::window_frame(id)`。
+    /// - `set_window_topmost(id, true)` が成功したときのみ pin を立てて true を返す
+    ///   （UIPI 等の失敗は false・pin しない）。
+    pub fn pin_window(&self, id: i64, holder: usize) -> bool {
+        self.unpin_window();
+
+        let was_topmost = self.source.is_window_topmost(id);
+        let rect = self.source.window_frame(id).unwrap_or(Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        });
+
+        if !self.source.set_window_topmost(id, true) {
+            return false;
+        }
+
+        *self.pinned.borrow_mut() = Some(PinState {
+            id,
+            holder,
+            was_topmost,
+            area: fresh_area_state(rect),
+        });
+        true
+    }
+
+    /// pin を解除する。`was_topmost == false` のときのみ `set_window_topmost(id, false)`
+    /// で剥がし（元から TOPMOST の窓は我々が付けたのではないので触らない）、pin を
+    /// clear する（再入 call は no-op = 二重解除ガード）。
+    pub fn unpin_window(&self) {
+        let pin = self.pinned.borrow_mut().take();
+        if let Some(pin) = pin {
+            if !pin.was_topmost {
+                self.source.set_window_topmost(pin.id, false);
+            }
+        }
+    }
+
+    /// 現在の pin のスナップショット（Manager 30-4 が holder 特定・存在確認に使う。
+    /// 30-8a で前 tick の矩形差分 dleft/dtop/dright/dbottom も公開する）。
+    pub fn pinned_window(&self) -> Option<PinnedWindow> {
+        self.pinned.borrow().as_ref().map(|pin| PinnedWindow {
+            id: pin.id,
+            rect: Rect {
+                left: pin.area.left,
+                top: pin.area.top,
+                right: pin.area.right,
+                bottom: pin.area.bottom,
+            },
+            holder: pin.holder,
+            was_topmost: pin.was_topmost,
+            dleft: pin.area.dleft,
+            dtop: pin.area.dtop,
+            dright: pin.area.dright,
+            dbottom: pin.area.dbottom,
+        })
+    }
+
+    /// 30-8a: pin の `AreaState` delta を全 0 にする（rect は保持）。保持者アンカーを
+    /// 厳密追従させた直後に呼び、同 tick 内の `border_move` との二重適用・偽 LostGround
+    /// を防ぐ。pin 無しでも安全（no-op）。
+    pub fn clear_pinned_delta(&self) {
+        if let Some(pin) = self.pinned.borrow_mut().as_mut() {
+            pin.area.reset_deltas();
+        }
+    }
+
+    /// 現在 tick 中のマスコット index を設定する（holding マスコットのみ `Some`）。
+    /// Manager は各マスコット tick 直前に設定し、tick 後に `None` に戻す。
+    pub fn set_holder_scope(&self, holder: Option<usize>) {
+        self.holder_scope.set(holder);
+    }
+
+    /// 点 `(x, y)` を含む最前面のトップレベル窓 `(id, rect)` を返す
+    /// （[`OsSource::window_at_point`] への passthrough・#30 item 4）。
+    /// whitelist / blacklist 非適用の生の窓取得（R12）。Manager の
+    /// `mouse_released_at` がドロップ点直下の窓特定に使う。
+    pub fn window_at_point(&self, x: i32, y: i32) -> Option<(i64, Rect)> {
+        self.source.window_at_point(x, y)
+    }
+
+    /// holder スコープ中で pin 窓の AreaState を返す（非保持者・pin 無しは None）。
+    fn pinned_area_in_scope(&self) -> Option<AreaState> {
+        let scope = self.holder_scope.get();
+        let pinned = self.pinned.borrow();
+        match (pinned.as_ref(), scope) {
+            (Some(pin), Some(holder)) if pin.holder == holder => Some(pin.area),
+            _ => None,
+        }
+    }
+
+    /// holder スコープ中で pin 窓 id を返す（非保持者・pin 無しは None）。
+    fn pinned_id_in_scope(&self) -> Option<i64> {
+        let scope = self.holder_scope.get();
+        let pinned = self.pinned.borrow();
+        match (pinned.as_ref(), scope) {
+            (Some(pin), Some(holder)) if pin.holder == holder => Some(pin.id),
+            _ => None,
+        }
+    }
 }
 
 impl EnvironmentView for Environment {
@@ -519,25 +707,48 @@ impl EnvironmentView for Environment {
                 .get(index)
                 .cloned()
                 .unwrap_or_else(invisible_state),
-            AreaSlot::ActiveWindow => core.active_window,
+            // #30: 保持者スコープでは pin 窓の AreaState（delta 込み）を返す。
+            // Border トークン経由の follow（border_is_on / border_move）が pin を追従する。
+            AreaSlot::ActiveWindow => self
+                .pinned_area_in_scope()
+                .unwrap_or_else(|| core.active_window),
             AreaSlot::Invisible => invisible_state(),
         }
     }
 
     /// WindowsEnvironment L259-261 getActiveWindow 相当（gating は env.rs）。
+    /// #30: 保持者スコープのときだけ pin 窓を返す（非保持者は従来どおり実アクティブ窓）。
     fn active_window(&self) -> AreaState {
+        if let Some(area) = self.pinned_area_in_scope() {
+            return area;
+        }
         self.core.borrow().active_window
     }
 
     /// WindowsEnvironment L269-271: getActiveWindowId 逐語（handle null → 0）。
+    /// #30: 保持者スコープのときだけ pin 窓 id を返す。
     fn active_window_id(&self) -> i64 {
+        if let Some(id) = self.pinned_id_in_scope() {
+            return id;
+        }
         self.core.borrow().active_window_id.unwrap_or(0)
     }
 
     /// WindowsEnvironment L274-289 moveActiveWindow 逐語（窓無しは呼ばない）。
     /// DPI 補正は [`OsSource`] 側（doc 差異 5）。
+    /// #30: 保持者スコープは pin 窓を動かす。非保持スコープで実アクティブ窓が pin 窓と
+    /// 一致する場合は no-op（防御二重化・他個体の保持窓を動かさない）。
     fn move_active_window(&self, x: i32, y: i32) {
-        if let Some(id) = self.core.borrow().active_window_id {
+        if let Some(id) = self.pinned_id_in_scope() {
+            self.source.move_window(id, x, y);
+            return;
+        }
+        let pin_id = self.pinned.borrow().as_ref().map(|pin| pin.id);
+        let active_id = self.core.borrow().active_window_id;
+        if pin_id.is_some() && active_id == pin_id {
+            return;
+        }
+        if let Some(id) = active_id {
             self.source.move_window(id, x, y);
         }
     }

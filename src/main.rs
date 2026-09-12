@@ -108,7 +108,7 @@ use simeji::render::MascotView;
 use simeji::tray::{
     apply_tray_command, load_tray_icon_rgba, Settings, TrayCommand, TrayContext, TrayMenuModel,
 };
-use simeji::win::os_source::Win32OsSource;
+use simeji::win::os_source::{ensure_window_above, restore_topmost_on_panic, Win32OsSource};
 use simeji::win::window::{SingleInstance, SingleInstanceError};
 
 /// 単一起動 mutex 名（ユーザーセッション内単一・`Local\` 名前空間）。
@@ -198,6 +198,15 @@ impl App {
                 &mut self.last_draw_warns,
             );
 
+            // ③b #30 item 6: ピン保持中は保持マスコット窓をピン対象窓 W より前面へ
+            // 再アサートする（W を TOPMOST にした際にマスコットが裏へ隠れるのを防ぐ）。
+            // ピンが無い間は pinned_holder() が None のため新規コストなし。
+            if let Some(holder) = self.manager.pinned_holder() {
+                if let Some(view) = self.views.get(holder) {
+                    ensure_window_above(view.window().hwnd());
+                }
+            }
+
             // ④ トレイ / popup コマンド drain・適用
             self.drain_menu_events();
 
@@ -253,7 +262,13 @@ impl App {
                         }
                     }
                     (ElementState::Released, MouseButton::Left) => {
-                        if let Err(err) = self.manager.mouse_released_at(index) {
+                        // #30 item 4/5: 解放点（スクリーン座標）を渡し、トグル ON なら
+                        // 直下の窓を pin する。解除フック（トグル OFF / RestoreWindows /
+                        // DismissAll / Reload / LoopDestroyed / panic）は 30-5 で配線済み。
+                        let point = target
+                            .cursor_position()
+                            .map_or((0, 0), |pos| (pos.x as i32, pos.y as i32));
+                        if let Err(err) = self.manager.mouse_released_at(index, point) {
                             log::error!("failed to handle mouse release: {err}");
                             self.manager.dismiss_at(index);
                         }
@@ -510,6 +525,17 @@ fn try_main() -> anyhow::Result<()> {
     // 4. ログ（既定 info・RUST_LOG 尊重）
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // 4b. panic フック: プロセス異常終了時に pin 中の WS_EX_TOPMOST を best-effort で
+    //     剥がしてから既存フック（既定の panic 表示）へ委譲する（#30 item 5）。
+    //     pin が無ければ `restore_topmost_on_panic` は no-op。
+    {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_topmost_on_panic();
+            previous(info);
+        }));
+    }
+
     // 5. 資産ディレクトリ（欠落パス入りエラーで終了）
     let AssetDirs { conf_dir, img_dir } = resolve_assets(&exe_dir)?;
 
@@ -608,6 +634,9 @@ fn try_main() -> anyhow::Result<()> {
     manager.set_transformation_allowed(settings.allowed.transformation);
     manager.set_throwing_allowed(settings.allowed.throwing);
     manager.set_multiscreen(settings.allowed.multiscreen);
+    // #30 item 1: pin トグルの永続値を起動時に読み戻す（settings.toml で ON 保存済みの
+    // 場合でもトグル OFF 配線漏れがないよう、他 Allowed と同じ経路で適用する）。
+    manager.set_pin_dropped_window_allowed(settings.allowed.pin_dropped_window);
     // 無効 Behavior map（Manager passthrough・全体置換）
     manager.set_disabled_behaviors(settings.disabled_behaviors.clone());
 
@@ -658,6 +687,8 @@ fn try_main() -> anyhow::Result<()> {
                 let app = &mut app;
                 drop(app.tray.take());
                 app.menu_popups.clear();
+                // #30 item 5: pin 中の TOPMOST を終了時に剥がす（best-effort）。
+                app.manager.unpin_pinned_window();
             }
             _ => {}
         }

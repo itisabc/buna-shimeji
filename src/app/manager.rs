@@ -51,7 +51,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::app::environment::Environment;
+use crate::app::environment::{Environment, PinnedWindow};
 use crate::app::reload::ReloadMaterial;
 use crate::mascot::behavior::{BehaviorError, BehaviorFactory, BehaviorTable};
 use crate::mascot::{EnvironmentView, Mascot, Rng};
@@ -104,6 +104,16 @@ pub struct Manager {
     /// 立てるだけなので、該当分は次 tick の retain を通って本記録に現れる
     /// （glue は take_removed を唯一の除去同期点として扱ってよい）。
     removed_indices: Vec<usize>,
+    /// #30 item 4: ユーザーのドラッグドロップで窓を最前面固定するトグル
+    /// （既定 false・トレイ Allowed Behaviours から設定）。
+    pin_dropped_window_allowed: bool,
+    /// #30 item 7: 直前の押下が保持者の引きはがし（pin 解除）だったか（既定 false）。
+    /// true の間は次の解放で再ピンしない（[`Manager::mouse_released_at`]）。
+    pin_pull_off: bool,
+    /// #30-8b 案A: pin 成立後、保持者が下端掴み行為を一度でも取ったか（既定 false）。
+    /// true のとき保持者が Fall / Thrown へ遷移したら unpin する。
+    /// pin 成立時・unpin 時に false へリセットする。
+    pin_has_clung: bool,
 }
 
 /// 「要求 set の table を選ぶ」共通ヘルパ（Java `getConfiguration(imageSet)` 相当）。
@@ -114,6 +124,15 @@ fn table_for<'a>(
     image_set_name: &str,
 ) -> &'a BehaviorTable {
     set_tables.get(image_set_name).unwrap_or(base)
+}
+
+/// #30 item 4: 下端掴み 3 種（behaviors.xml L138-143）かどうか。
+/// 保持者の落下 clamp で「既に下端掴みなら再遷移しない」判定に使う。
+fn is_bottom_behavior(name: Option<&str>) -> bool {
+    matches!(
+        name,
+        Some("ClimbIEBottom") | Some("GrabIEBottomLeftWall") | Some("GrabIEBottomRightWall")
+    )
 }
 
 impl Manager {
@@ -167,6 +186,9 @@ impl Manager {
             enabled: true,
             exit_flag: false,
             removed_indices: Vec::new(),
+            pin_dropped_window_allowed: false,
+            pin_pull_off: false,
+            pin_has_clung: false,
         }
     }
 
@@ -348,18 +370,77 @@ impl Manager {
             mascot.set_total_count(total_count);
         }
 
+        // #30 item 5: pin の真実（Environment.pinned）とミラーを同期する。
+        // env.tick の auto unpin（窓クローズ）/ 保持マスコット削除 / dragging を扱う。
+        self.reconcile_pin();
+
         // Java L223: noMascots
         let no_mascots = self.mascots.is_empty();
+
+        // #30-8b 案A: 保持者が下端掴み行為を一度でも取った後 Fall / Thrown へ遷移したら
+        // pin を解除する。解除はループ内で &mut self を呼べない（&mut self.mascots を
+        // 借用中）ためローカルに要求を溜め、ループ後に反映する。
+        let mut has_clung = self.pin_has_clung;
+        let mut request_unpin = false;
 
         // Java L227-229: 全員 1 tick 進める。
         // 構築は「マスコット自身の set」の table を使う（#9b・(AF)・
         // Java buildNextBehavior は mascot 自身の Configuration で呼ばれるため）。
         if !no_mascots {
+            let pin = self.environment.pinned_window();
+            let env: &dyn EnvironmentView = &self.environment;
             for mascot in &mut self.mascots {
+                // #30 item 2: pin 窓を activeIE として見せるのは保持者の tick 中のみ。
+                // 非保持者はグローバルな active window のまま（Advisor P0-1 隔離）。
+                let is_holder = pin.is_some_and(|pin| mascot.pinned_window() == Some(pin.id));
+                self.environment.set_holder_scope(if is_holder {
+                    pin.map(|pin| pin.holder)
+                } else {
+                    None
+                });
                 let set_name = mascot.image_set_name().to_string();
                 let table = table_for(&self.set_tables, &self.table, &set_name);
+                // #30-8a: 保持者のみ、mascot.tick の前に前 tick の窓矩形差分から
+                // アンカーを窓下辺へ厳密追従させる（80px 超の純並進は追従しない）。
+                // 適用したら delta を消し、tick 内 border_move との二重適用を防ぐ。
+                if is_holder {
+                    let holder_pin = pin.expect("is_holder implies pin is Some");
+                    if Self::follow_pinned_window_bottom(mascot, &holder_pin) {
+                        self.environment.clear_pinned_delta();
+                    }
+                }
                 mascot.tick(env, table, self.factory.as_mut(), self.rng.as_mut());
+                // #30 item 4 / #30-8b: 保持者の tick 後のみ落下 clamp を適用する。
+                // 下端掴み行為を取った保持者が Fall / Thrown へ遷移した tick は
+                // clamp をスキップし（アンカーを窓下辺へ引き戻さない）、解除を要求する。
+                if is_holder {
+                    if is_bottom_behavior(mascot.behavior_name()) {
+                        has_clung = true;
+                    }
+                    if has_clung && matches!(mascot.behavior_name(), Some("Fall") | Some("Thrown"))
+                    {
+                        request_unpin = true;
+                    } else {
+                        let pin = pin.expect("is_holder implies pin is Some");
+                        Self::clamp_holder_to_pinned_window(
+                            mascot,
+                            pin,
+                            table,
+                            env,
+                            self.factory.as_mut(),
+                            self.rng.as_mut(),
+                        );
+                    }
+                }
+                self.environment.set_holder_scope(None);
             }
+        }
+
+        // #30-8b: ループ後にフラグを確定し、解除要求があれば unpin する
+        //（unpin_pinned_window が pin_has_clung を false へ戻す）。
+        self.pin_has_clung = has_clung;
+        if request_unpin {
+            self.unpin_pinned_window();
         }
         // Java L232-234（mascot.apply ループ）は #10 が [`Manager::apply_all`] で
         // 実施する（Manager 自体は描画しない）
@@ -593,15 +674,33 @@ impl Manager {
     /// `point` は**スクリーン座標**契約（hotspot 記録用・Dragged の差分計算は
     /// Environment の cursor（スクリーン座標）を使用するため同一空間）。
     /// 左ボタン判定は呼び出し側（#10b-2c）の責務。index 範囲外 → warn + Ok。
+    ///
+    /// #30 item 7: 押した個体が現在の pin holder なら、掴んだ時点で即座に
+    /// 最前面固定を解除する（R16「引きはがし＝解除」）。この引きはがしの解放では
+    /// 再ピンしない（[`Manager::pin_pull_off`]）。
     pub fn mouse_pressed_at(
         &mut self,
         index: usize,
         point: (i32, i32),
     ) -> Result<(), BehaviorError> {
-        let Some(mascot) = self.mascots.get_mut(index) else {
+        if self.mascots.get(index).is_none() {
             log::warn!("mouse_pressed_at: ignoring out-of-range index {index}");
             return Ok(());
-        };
+        }
+
+        // pin が存在することを前提に判定する（pin 無しで `None == None` を真に
+        // しないよう `is_some_and` を使う）。判定に使う `mascots[index]` の参照は
+        // ここで解放する。
+        let on_holder = self
+            .environment
+            .pinned_window()
+            .is_some_and(|pin| self.mascots[index].pinned_window() == Some(pin.id));
+        if on_holder {
+            self.unpin_pinned_window();
+        }
+        self.pin_pull_off = on_holder;
+
+        let mascot = &mut self.mascots[index];
         let env: &dyn EnvironmentView = &self.environment;
         let set_name = mascot.image_set_name().to_string();
         let table = table_for(&self.set_tables, &self.table, &set_name);
@@ -610,15 +709,223 @@ impl Manager {
 
     /// index のマスコットへマウスボタン解放を転送する（#10b-2c・
     /// Java `Mascot.mouseReleased` L455-471 相当）。index 範囲外 → warn + Ok。
-    pub fn mouse_released_at(&mut self, index: usize) -> Result<(), BehaviorError> {
-        let Some(mascot) = self.mascots.get_mut(index) else {
+    ///
+    /// #30 item 4: `point`（スクリーン座標・解放点）を追加。トグル ON かつ解放点
+    /// 直下に窓 W があれば `mascot.mouse_released(...)` の**前に** W を holder
+    /// `index` 専用に最前面固定する（固定成功時のみ当該 Mascot のミラーを
+    /// `Some(W.id)` にする。OFF / 窓なし / 固定失敗は既存 Thrown を維持）。
+    ///
+    /// #30 item 7: 直前の押下が保持者の引きはがし（[`Manager::pin_pull_off`]）なら
+    /// この解放では再ピンせず、フラグを消費するだけにする。
+    pub fn mouse_released_at(
+        &mut self,
+        index: usize,
+        point: (i32, i32),
+    ) -> Result<(), BehaviorError> {
+        if self.mascots.get(index).is_none() {
             log::warn!("mouse_released_at: ignoring out-of-range index {index}");
             return Ok(());
-        };
+        }
+
+        if self.pin_pull_off {
+            self.pin_pull_off = false;
+        } else {
+            self.pin_dropped_window_at(index, point);
+        }
+
+        let mascot = &mut self.mascots[index];
         let env: &dyn EnvironmentView = &self.environment;
         let set_name = mascot.image_set_name().to_string();
         let table = table_for(&self.set_tables, &self.table, &set_name);
         mascot.mouse_released(env, table, self.factory.as_mut(), self.rng.as_mut())
+    }
+
+    /// #30 item 4: ドロップ点直下の窓 W を holder `index` 専用に最前面固定する。
+    /// トグル OFF・窓なし・固定失敗では何もしない。成功時は単一 holder 方針に従い
+    /// 既存ミラーを全クリアして当該 Mascot のみ `Some(W.id)` にする。
+    fn pin_dropped_window_at(&mut self, index: usize, point: (i32, i32)) {
+        if !self.pin_dropped_window_allowed {
+            return;
+        }
+        let Some((id, _rect)) = self.environment.window_at_point(point.0, point.1) else {
+            return;
+        };
+        if !self.environment.pin_window(id, index) {
+            return;
+        }
+        // #30-8b: pin 成立時に「しがみつき済み」をリセットする（新規 pin への持ち越し防止）。
+        self.pin_has_clung = false;
+        for mascot in &mut self.mascots {
+            mascot.set_pinned_window(None);
+        }
+        if let Some(mascot) = self.mascots.get_mut(index) {
+            mascot.set_pinned_window(Some(id));
+        }
+        // プロセス異常終了（panic）時に WS_EX_TOPMOST を best-effort で剥がすための
+        // 復元ターゲットを登録する。元から TOPMOST だった窓（was_topmost == true）は
+        // 我々が付けたのではないため対象外（None 登録 = 解除）。
+        let panic_target = self
+            .environment
+            .pinned_window()
+            .filter(|pin| !pin.was_topmost)
+            .map(|pin| pin.id);
+        crate::win::os_source::set_panic_unpin_window(panic_target);
+    }
+
+    /// #30 item 1/4: トレイ「Allowed Behaviours」の pin トグルを設定する。
+    /// OFF 時は即 unpin + 全ミラークリア（design item 4/5）。
+    pub fn set_pin_dropped_window_allowed(&mut self, allowed: bool) {
+        self.pin_dropped_window_allowed = allowed;
+        if !allowed {
+            self.unpin_pinned_window();
+        }
+    }
+
+    /// #30 item 5: pin を解除し、全マスコットのミラーをクリアする
+    /// （トグル OFF / Reload / RestoreWindows / DismissAll の解除フック・30-5 が使う）。
+    pub fn unpin_pinned_window(&mut self) {
+        self.environment.unpin_window();
+        for mascot in &mut self.mascots {
+            mascot.set_pinned_window(None);
+        }
+        // #30-8b: 解除時に「しがみつき済み」を持ち越さない。
+        self.pin_has_clung = false;
+        // panic 復元ターゲットも解除する（#30-5）。
+        crate::win::os_source::set_panic_unpin_window(None);
+    }
+
+    /// #30 item 6: 現在 pin を保持しているマスコットの index を返す
+    /// （pin が無ければ `None`）。
+    ///
+    /// pin の真実（[`Environment::pinned_window`]）と各 Mascot のミラー
+    /// （[`Mascot::pinned_window`]）を突き合わせ、ミラーが pin 窓 id と一致する
+    /// マスコットの**現在の** index を探索して返す。`PinState.holder` の保存値は
+    /// 使わない（削除で index がずれても追随できないため）。
+    /// `src/main.rs` がピン保持中に保持マスコット窓をピン対象窓より前面へ再アサート
+    /// する対象特定に使う。pin が無い間は `None` を返すため新規コストはゼロ。
+    pub fn pinned_holder(&self) -> Option<usize> {
+        let pin = self.environment.pinned_window()?;
+        self.mascots
+            .iter()
+            .position(|mascot| mascot.pinned_window() == Some(pin.id))
+    }
+
+    /// #30 item 5: pin の真実（`Environment.pinned`）とミラーを同期する。
+    /// - pin なし: ミラーを全クリア（env.tick の `window_frame` None による auto unpin）
+    /// - 保持マスコットが見つからない（削除済み）/ `dragging`（引きはがし）:
+    ///   unpin + 全ミラークリア
+    /// - 有効: 保持者以外の残存ミラーをクリア
+    ///
+    /// 保持者特定は index ではなくミラー（`pinned_window == pin.id`）で行うため、
+    /// 削除による index ずれでも gating に渡す `pin.holder` と整合する。
+    fn reconcile_pin(&mut self) {
+        let Some(pin) = self.environment.pinned_window() else {
+            for mascot in &mut self.mascots {
+                mascot.set_pinned_window(None);
+            }
+            return;
+        };
+        let holder = self
+            .mascots
+            .iter()
+            .position(|mascot| mascot.pinned_window() == Some(pin.id));
+        let invalid = holder.is_none_or(|index| self.mascots[index].is_dragging());
+        if invalid {
+            self.environment.unpin_window();
+            for mascot in &mut self.mascots {
+                mascot.set_pinned_window(None);
+            }
+            return;
+        }
+        let holder = holder.expect("holder is Some when not invalid");
+        for (index, mascot) in self.mascots.iter_mut().enumerate() {
+            if index != holder && mascot.pinned_window() == Some(pin.id) {
+                mascot.set_pinned_window(None);
+            }
+        }
+    }
+
+    /// #30-8a: 保持マスコットのアンカーを、pin 窓の前 tick からの矩形差分から
+    /// 新しい窓下辺へ厳密追従させる。適用したら true（呼び出し側が
+    /// [`Environment::clear_pinned_delta`] を呼ぶ）。
+    ///
+    /// 追従条件・規則（design §1.10(z) 追補 30-8a）:
+    /// - アンカーが前 tick の窓下辺上（`y == old_bottom` かつ
+    ///   `x ∈ [old_left, old_right]`）のときのみ。窓側面を登る局面（`y < bottom`）は
+    ///   対象外（登りを妨げない）。
+    /// - サイズ変化（`dleft != dright || dtop != dbottom`）は 80px しきい値の対象外で
+    ///   常に追従する。
+    /// - 純並進で 1 tick の最大変位が 80px 超なら追従しない（ユーザー承認 案Y・
+    ///   既存の防ジャンプガードへ委譲し LostGround → Fall させる）。
+    /// - `y` は新 bottom に、`x` は窓の水平移動に比例（前幅 0 の縮退ではゼロ除算しない）。
+    fn follow_pinned_window_bottom(mascot: &mut Mascot, pin: &PinnedWindow) -> bool {
+        let (x, y) = mascot.anchor();
+        let window = pin.rect;
+
+        // 前 tick の矩形（現在値 - delta）。
+        let old_left = window.left - pin.dleft;
+        let old_right = window.right - pin.dright;
+        let old_bottom = window.bottom - pin.dbottom;
+
+        // 前 tick の窓下辺上に無いアンカーは追従しない。
+        if y != old_bottom || x < old_left || x > old_right {
+            return false;
+        }
+
+        let pure_translation = pin.dleft == pin.dright && pin.dtop == pin.dbottom;
+        if pure_translation && (pin.dleft.abs() > 80 || pin.dtop.abs() > 80) {
+            return false; // 案Y: 速い純並進は追従せず既存ガードに委ねる
+        }
+
+        // 水平は窓幅の比例で厳密化（前幅 0 の縮退時はゼロ除算回避）。
+        let old_width = old_right - old_left;
+        let new_x = if old_width == 0 {
+            x + pin.dleft
+        } else {
+            (x - old_left) * window.width() / old_width + window.left
+        };
+        mascot.set_anchor((new_x, window.bottom));
+        true
+    }
+
+    /// #30 item 4: 保持マスコットの落下 clamp。tick 後、anchor が pin 窓 W の水平
+    /// 範囲内かつ下端以深（`anchor.y >= W.bottom`）なら `(anchor.x, W.bottom)` に補正し、
+    /// 水平位置に応じた下端掴み行為へ強制遷移する。Allowed 判定は意図的に bypass する
+    /// （明示ユーザー操作・design item 4）。既に下端掴み 3 種なら再遷移しない。
+    fn clamp_holder_to_pinned_window(
+        mascot: &mut Mascot,
+        pin: PinnedWindow,
+        table: &BehaviorTable,
+        env: &dyn EnvironmentView,
+        factory: &mut dyn BehaviorFactory,
+        rng: &mut dyn Rng,
+    ) {
+        let (x, y) = mascot.anchor();
+        let window = pin.rect;
+        if x < window.left || x > window.right || y < window.bottom {
+            return;
+        }
+        if is_bottom_behavior(mascot.behavior_name()) {
+            return;
+        }
+        mascot.set_anchor((x, window.bottom));
+        let midpoint = window.left + (window.right - window.left) / 2;
+        let name = if x < midpoint {
+            "GrabIEBottomLeftWall"
+        } else if x > midpoint {
+            "GrabIEBottomRightWall"
+        } else {
+            "ClimbIEBottom"
+        };
+        match table.build_behavior_direct(name, factory, mascot.scale()) {
+            Ok(runner) => {
+                log::info!("pin clamp: forcing behavior `{name}` (Allowed bypass)");
+                if let Err(err) = mascot.set_behavior(Some(runner), env, table, factory, rng) {
+                    log::error!("pin clamp: failed to set behavior `{name}`: {err}");
+                }
+            }
+            Err(err) => log::error!("pin clamp: failed to build behavior `{name}`: {err}"),
+        }
     }
 
     /// index のマスコットのカーソル位置を更新する（#10b-2c・
@@ -674,6 +981,10 @@ impl Manager {
     /// Environment の disabled map（Allowed Behaviours）・image set resolver・
     /// added キューは一切変更しない。
     pub fn reload(&mut self, materials: Vec<ReloadMaterial>) {
+        // #30 item 5: 資産差し替えで旧 pin（TOPMOST）を残さない。起動時 reload は
+        // pin 無しのため no-op。
+        self.unpin_pinned_window();
+
         if materials.is_empty() {
             // 空: 全員 dispose 扱い（削除は次 tick の retain）+ set_tables クリア +
             // base table 変更なし
