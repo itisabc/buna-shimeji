@@ -1,4 +1,4 @@
-//! 描画レイヤ。タスク #5: 描画本体（compose + MascotView）。
+//! 描画レイヤ。タスク #5: 描画本体（MascotView）。
 //!
 //! design.md §3-9 の needsRepaint 管理: 画像変化時のみ UpdateLayeredWindow
 //! で再描画し、位置不変なら移動のみ（同一内容の移動はピクセル同等）。両者
@@ -6,13 +6,13 @@
 //! `WindowsTranslucentWindow`（setImage = フィールド代入・updateImage =
 //! validate + repaint 相当）。
 //!
-//! - [`compose_argb`]: straight RGBA8 をプレマルチプライした 0xAARRGGBB
-//!   （行優先・flip は行内水平反転）に変換する純粋関数。
-//!   式は [`crate::win::window::premultiply_rgba_to_argb`] をそのまま再利用
-//!   （切り捨て `(v * a) / 255`）。flip とプレマルチプライはピクセル独立のため順序不変
 //! - [`flipped_offset_x`]: Java ImagePairs.java L85-91 の右画像アンカー相当
 //!   `width - dx`（dx は負でもそのまま int 演算）
 //! - [`MascotView`]: 透過ウィンドウ 1 枚の再描画・移動の状態機械
+//!
+//! フレームはロード時にプレマルチプライド 0xAARRGGBB へ変換済み
+//!（[`crate::render::imageset::Frame::argb`]）。描画時の flip は DIB 転送コピー
+//!（[`crate::win::window::blit_argb`]）に融合する。
 
 pub mod imageset;
 
@@ -24,7 +24,7 @@ use tao::event_loop::EventLoopWindowTarget;
 use tao::window::Window;
 
 use crate::render::imageset::Frame;
-use crate::win::window::{premultiply_rgba_to_argb, LayeredWindow, WindowError};
+use crate::win::window::{LayeredWindow, WindowError};
 
 /// 最後に描画した画像を識別するキー（image_ref + flip + 寸法の同一性のみ。
 /// ピクセル内容は比較しない — 同一 image_ref のフレーム内容は実行中に不変）。
@@ -47,33 +47,6 @@ pub enum DrawAction {
     Redrawn,
     /// 再描画 + 移動。
     MovedAndRedrawn,
-}
-
-/// straight RGBA8 をプレマルチプライした 0xAARRGGBB（行優先）に変換する。
-///
-/// flip=true は各行内で水平反転する（行単位。バッファ全体反転ではない）。
-/// 変換式は [`premultiply_rgba_to_argb`] を行スライスに適用するだけなので
-/// 全体一括と同一結果（flip とプレマルチプライはピクセル独立のため順序不変）。
-pub fn compose_argb(frame: &Frame, flip: bool) -> Vec<u32> {
-    // width=0 は chunks_exact(0) が panic するため空で返す（寸法ガードの最終防衛）
-    if frame.width == 0 {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity((frame.width * frame.height) as usize);
-    let row_bytes = frame.width as usize * 4;
-    let mut row_rgba: Vec<u8> = Vec::with_capacity(row_bytes);
-    for row in frame.rgba.chunks_exact(row_bytes) {
-        row_rgba.clear();
-        if flip {
-            for pixel in row.rchunks_exact(4) {
-                row_rgba.extend_from_slice(pixel);
-            }
-        } else {
-            row_rgba.extend_from_slice(row);
-        }
-        out.extend(premultiply_rgba_to_argb(&row_rgba));
-    }
-    out
 }
 
 /// flip 時の水平描画オフセット（Java ImagePairs.java L85:
@@ -204,8 +177,7 @@ impl MascotView {
             if self.window.buffer_size() != Some((frame.width, frame.height)) {
                 self.window.resize(frame.width, frame.height)?;
             }
-            let pixels = compose_argb(frame, flip);
-            self.window.present(&pixels)?;
+            self.window.present(&frame.argb, flip)?;
         }
 
         if image_changed || pos_changed {

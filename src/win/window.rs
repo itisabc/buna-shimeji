@@ -88,6 +88,39 @@ pub fn premultiply_rgba_to_argb(rgba: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+/// プレマルチプライド ARGB のピクセル列を `dst` へ転送コピーする。
+///
+/// `flip == false` は完全コピー、`flip == true` は `width` 幅の各行を水平反転して書く。
+/// `flip` は転送コピーに融合されるため、描画ごとのフレーム全体コピーを避けられる。
+///
+/// `src` が空なら何もしない（no-op）。非空時の前提:
+/// `dst.len() == src.len()`・`width > 0`・`src.len() % width == 0`（違反は assert）。
+pub fn blit_argb(dst: &mut [u32], src: &[u32], width: usize, flip: bool) {
+    if src.is_empty() {
+        return;
+    }
+    assert_eq!(
+        dst.len(),
+        src.len(),
+        "blit_argb: dst and src length mismatch"
+    );
+    assert!(width > 0, "blit_argb: width must be non-zero");
+    assert_eq!(
+        src.len() % width,
+        0,
+        "blit_argb: src length is not a multiple of width"
+    );
+    if !flip {
+        dst.copy_from_slice(src);
+        return;
+    }
+    for (dst_row, src_row) in dst.chunks_mut(width).zip(src.chunks_exact(width)) {
+        for (d, s) in dst_row.iter_mut().zip(src_row.iter().rev()) {
+            *d = *s;
+        }
+    }
+}
+
 /// style を真の枠なし窓（WS_POPUP）に矯正する純関数。
 ///
 /// 装飾系 6 ビット（WS_CAPTION / WS_SYSMENU / WS_MAXIMIZEBOX / WS_MINIMIZEBOX /
@@ -333,13 +366,15 @@ impl LayeredWindow {
     /// `UpdateLayeredWindow(ULW_ALPHA)` でウィンドウに転送する。
     ///
     /// `pixels` の長さはバッファ（resize で設定した width × height）と一致すること。
+    /// `flip == true` のときは DIB バッファへの書き込み時に各行を水平反転する
+    ///（[`blit_argb`] 参照）。
     ///
     /// ULW には**現在のウィンドウ位置とバッファサイズを毎回明示的に渡す**
     /// （Java 版 `NativeFactory` の updateWindow と同じ呼び方）。
     /// pptDst/psize を NULL にした「内容のみ更新」形式は、この検証環境
     /// （Windows 11 / スパイク検証 2026-09-05）では TRUE を返しながら
     /// 画面に一切合成されないため、明示渡しが必須。
-    pub fn present(&mut self, pixels: &[u32]) -> Result<(), WindowError> {
+    pub fn present(&mut self, pixels: &[u32], flip: bool) -> Result<(), WindowError> {
         let buffer = self.buffer.as_mut().ok_or(WindowError::NoBuffer)?;
         if pixels.len() != buffer.len() {
             return Err(WindowError::SizeMismatch {
@@ -347,7 +382,8 @@ impl LayeredWindow {
                 actual: pixels.len(),
             });
         }
-        buffer.pixels_mut().copy_from_slice(pixels);
+        let width = buffer.width as usize;
+        blit_argb(buffer.pixels_mut(), pixels, width, flip);
 
         // AC_SRC_OVER + AC_SRC_ALPHA + 全体 α 255: DIB の per-pixel α をそのまま使う
         let blend = BLENDFUNCTION {

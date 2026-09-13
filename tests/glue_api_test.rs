@@ -104,11 +104,11 @@ fn image_set_with(name: &str, frames: &[(&str, u32, u32)]) -> Arc<ImageSet> {
     for (file, width, height) in frames {
         map.insert(
             file.to_string(),
-            Frame {
-                width: *width,
-                height: *height,
-                rgba: vec![0; *width as usize * *height as usize * 4],
-            },
+            Frame::from_rgba(
+                *width,
+                *height,
+                vec![0; *width as usize * *height as usize * 4],
+            ),
         );
     }
     Arc::new(ImageSet {
@@ -329,7 +329,8 @@ struct TempExe {
 
 impl TempExe {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("shimeji_t10b2b_{}_{tag}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("shimeji_t10b2b_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root); // 前回残留の掃除
         std::fs::create_dir_all(&root).expect("ルートディレクトリを作れる");
         TempExe { root }

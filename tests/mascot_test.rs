@@ -52,7 +52,9 @@ use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
 use shimeji::mascot::env::{AreaSlot, AreaState};
-use shimeji::mascot::{EnvironmentView, EvalSnapshot, ImageState, Mascot, MascotContext, Rect, Rng};
+use shimeji::mascot::{
+    EnvironmentView, EvalSnapshot, ImageState, Mascot, MascotContext, Rect, Rng,
+};
 use shimeji::render::imageset::{Frame, ImageSet};
 
 // =====================================================================
@@ -503,11 +505,11 @@ fn image_set_with(frames: &[(&str, u32, u32)]) -> Arc<ImageSet> {
     for (name, width, height) in frames {
         map.insert(
             name.to_string(),
-            Frame {
-                width: *width,
-                height: *height,
-                rgba: vec![0u8; (*width as usize) * (*height as usize) * 4],
-            },
+            Frame::from_rgba(
+                *width,
+                *height,
+                vec![0u8; (*width as usize) * (*height as usize) * 4],
+            ),
         );
     }
     Arc::new(ImageSet {

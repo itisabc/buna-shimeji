@@ -3,12 +3,13 @@
 //! 検証対象は公開契約のみ（構造・文言・ハッシュ照合は検査しない。実資産は
 //! 集計レベル＝件数・キー集合・代表 1 枚の一括 assert で検証）:
 //! - PNG ヘッダ（IHDR）のみで寸法を読む（全体デコード不要。非 PNG/破損ヘッダは Err）
-//! - set ロード: PNG を straight RGBA8（非プレマルチプル）に一括展開。
+//! - set ロード: PNG を straight RGBA8 にデコードし、ロード時にプレマルチプライド
+//!   ARGB（`Frame::argb`）へ 1 回変換して保持する。
 //!   非 PNG は無言スキップ、デコード失敗 PNG は IHDR 寸法の全透明フレームで代替 + 警告、
 //!   ヘッダ自体が読めない PNG はフレーム欠落 + 警告、サイズ混在は警告して続行、
 //!   set ディレクトリ不在は Err（スキップ判断は呼び出し側の責務）
-//! - set 単位 scale のロード時プリスケール（java_round 寸法・Lanczos3 フィルタ。
-//!   straight RGBA8 のまま。premultiply はしない）
+//! - set 単位 scale のロード時プリスケール（java_round 寸法・Lanczos3 フィルタ）。
+//!   プリスケールは straight RGBA8 で行い、その後プレマルチプライド ARGB に変換する
 //! - java_round（Java Math.round = floor(x+0.5)。負の半端で Rust f64::round と異なる）
 //!   と scale_anchor（補正なし）/ scale_velocity（非ゼロ→0 を符号付き ±1 補正）/ scale_pose
 //!   （Java AnimationBuilder.java L206-211・ImagePairs.java L81-82 の丸め規則）
@@ -22,11 +23,11 @@
 use std::path::{Path, PathBuf};
 
 use shimeji::config::{parse_actions, ActionDef, ActionsConfig, Animation, Pose, SequenceChild};
-use shimeji::render::compose_argb;
 use shimeji::render::imageset::{
     available_refs, check_references, enumerate_sets, java_round, normalize_image_ref,
     read_png_size, scale_anchor, scale_pose, scale_velocity, Frame, ImageSet,
 };
+use shimeji::win::window::premultiply_rgba_to_argb;
 
 // =====================================================================
 // 共通ヘルパ
@@ -146,11 +147,6 @@ fn truncated_png_bytes(width: u32, height: u32) -> Vec<u8> {
     bytes.extend_from_slice(&PNG_SIGNATURE);
     bytes.extend_from_slice(&ihdr_chunk(width, height));
     bytes
-}
-
-/// rgba 中の 1 ピクセル（4 バイト境界）を [u8; 4] として取り出す。
-fn as_px(chunk: &[u8]) -> [u8; 4] {
-    <[u8; 4]>::try_from(chunk).expect("RGBA 境界")
 }
 
 /// set から指定キーのフレーム寸法を取り出す（省略用ヘルパ）。
@@ -498,12 +494,12 @@ fn load_real_shimeji_set_has_46_frames() {
         "frames のキー集合 == available_refs"
     );
 
-    // 全 frames が 128×128 straight RGBA8（一括 assert 一発）
+    // 全 frames が 128×128 のプレマルチプライド ARGB（一括 assert 一発）
     for frame in set.frames.values() {
         assert_eq!(
-            (frame.width, frame.height, frame.rgba.len()),
-            (128, 128, (128 * 128 * 4) as usize),
-            "全 frames は 128×128 straight RGBA8"
+            (frame.width, frame.height, frame.argb.len()),
+            (128, 128, (128 * 128) as usize),
+            "全 frames は 128×128 プレマルチプライド ARGB"
         );
     }
 }
@@ -516,7 +512,7 @@ fn load_real_frame_lookup_normalizes_leading_slash() {
     let slashed = set.frame("/shime1.png").expect("/shime1.png が引ける");
     assert_eq!((plain.width, plain.height), (128, 128));
     assert_eq!((slashed.width, slashed.height), (128, 128));
-    assert_eq!(plain.rgba, slashed.rgba, "両ルックアップは同一フレーム");
+    assert_eq!(plain.argb, slashed.argb, "両ルックアップは同一フレーム");
     assert!(set.frame("no_such.png").is_none());
     assert!(set.frame("/no_such.png").is_none());
 }
@@ -533,8 +529,8 @@ fn load_real_set_with_half_scale_prescales_frames() {
     // 一括 assert 一発: 全 frames が java_round(128*0.5)=64 の正方形
     for frame in set.frames.values() {
         assert_eq!(
-            (frame.width, frame.height, frame.rgba.len()),
-            (64, 64, (64 * 64 * 4) as usize),
+            (frame.width, frame.height, frame.argb.len()),
+            (64, 64, (64 * 64) as usize),
             "128×0.5 → 64×64 にプリスケールされる"
         );
     }
@@ -545,10 +541,9 @@ fn load_real_set_with_half_scale_prescales_frames() {
 // =====================================================================
 
 #[test]
-fn load_preserves_straight_rgba_bytes() {
-    // 非プレマルチプル契約: 半透明ピクセルの RGB は据え置き。
-    // Java 版は premultiply するが、Rust 版は UpdateLayeredWindow 向け straight RGBA を保持する
-    //（premultiply 実装なら [10,20,30,128] が [5,10,15,128] になる）
+fn load_premultiplies_straight_rgba_to_argb() {
+    // 契約: ロード時に straight RGBA8 がプレマルチプライド ARGB へ 1 回変換される。
+    // 半透明 [10,20,30,128] は切り捨て (v*a)/255 で [5,10,15,128] になる。
     let img = TempImg::new("rgba");
     let mut pixels = image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 0]));
     pixels.put_pixel(0, 0, image::Rgba([10, 20, 30, 128]));
@@ -558,17 +553,20 @@ fn load_preserves_straight_rgba_bytes() {
     let set = ImageSet::load(img.path(), "SetA", None).expect("ロードできる");
     let frame = set.frame("alpha.png").expect("alpha.png が引ける");
     assert_eq!((frame.width, frame.height), (2, 2));
-    assert_eq!(frame.rgba.len(), 16);
+    assert_eq!(frame.argb.len(), 4);
+
+    // 行優先の straight RGBA（自己参照回避のため焼き込み値も併記する）
+    let straight: Vec<u8> = vec![
+        10, 20, 30, 128, // 半透明 → 0x80050A0F
+        0, 0, 0, 0, // 透明 → 0
+        255, 255, 255, 255, // 不透明 → 0xFFFFFFFF
+        0, 0, 0, 0, // 透明 → 0
+    ];
+    assert_eq!(frame.argb, premultiply_rgba_to_argb(&straight));
     assert_eq!(
-        as_px(&frame.rgba[0..4]),
-        [10u8, 20, 30, 128],
-        "straight α のまま"
-    );
-    assert_eq!(as_px(&frame.rgba[4..8]), [0u8, 0, 0, 0], "透明ピクセル");
-    assert_eq!(
-        as_px(&frame.rgba[8..12]),
-        [255u8, 255, 255, 255],
-        "不透明ピクセル"
+        frame.argb,
+        vec![0x8005_0A0F, 0x0000_0000, 0xFFFF_FFFF, 0x0000_0000],
+        "半透明は切り捨てプレマルチプライ・不透明/透明はそのまま"
     );
 }
 
@@ -595,13 +593,15 @@ fn load_scale_follows_java_round_dimensions() {
     assert_eq!(dims_of(&half, "four.png"), (2, 2), "java_round(2.0)=2");
     assert_eq!(dims_of(&half, "three.png"), (2, 2), "java_round(1.5)=2");
     assert_eq!(dims_of(&half, "solid.png"), (2, 2));
-    for px in half
-        .frame("solid.png")
-        .expect("solid.png")
-        .rgba
-        .chunks_exact(4)
-    {
-        assert_eq!(as_px(px), OPAQUE_GREEN, "縮小後も単色内容を保持");
+    // 単色 OPAQUE_GREEN [0,255,0,255] はプレマルチプライ後 0xFF00FF00。
+    let solid_argb = premultiply_rgba_to_argb(&OPAQUE_GREEN);
+    assert_eq!(
+        solid_argb,
+        vec![0xFF00_FF00],
+        "不透明緑のプレマルチプライ値"
+    );
+    for &px in &half.frame("solid.png").expect("solid.png").argb {
+        assert_eq!(px, solid_argb[0], "縮小後も単色内容を保持");
     }
 
     let double = ImageSet::load(img.path(), "SetA", Some(2.0)).expect("Some(2.0) ロード");
@@ -635,17 +635,18 @@ fn load_retains_resolved_scale_while_preserving_frame_prescale() {
 
 /// 画像を左半 / 右半に分けた (R合計, G合計, B合計) を返す（配置の集計検証用）。
 /// 1px 単位の絶対値ではなく空間的な優勢色をロバストに比較するために使う。
-fn half_rgb_totals(rgba: &[u8], width: u32, height: u32, left_half: bool) -> (u64, u64, u64) {
+/// 入力はプレマルチプライド ARGB（不透明前提のため α は考慮しない）。
+fn half_rgb_totals(argb: &[u32], width: u32, height: u32, left_half: bool) -> (u64, u64, u64) {
     let (mut r, mut g, mut b) = (0u64, 0u64, 0u64);
     for y in 0..height {
         for x in 0..width {
             if (x < width / 2) != left_half {
                 continue;
             }
-            let idx = ((y * width + x) * 4) as usize;
-            r += u64::from(rgba[idx]);
-            g += u64::from(rgba[idx + 1]);
-            b += u64::from(rgba[idx + 2]);
+            let px = argb[(y * width + x) as usize];
+            r += u64::from((px >> 16) & 0xFF);
+            g += u64::from((px >> 8) & 0xFF);
+            b += u64::from(px & 0xFF);
         }
     }
     (r, g, b)
@@ -654,7 +655,7 @@ fn half_rgb_totals(rgba: &[u8], width: u32, height: u32, left_half: bool) -> (u6
 #[test]
 fn load_scale_uses_lanczos3_interpolation() {
     // 契約: set 単位 scale のロード時プリスケールは Lanczos3 で行われる
-    //（straight RGBA8 のまま。premultiply しない）。
+    //（プリスケールは straight RGBA8 で行い、その後プレマルチプライド ARGB へ変換）。
     // Lanczos3 は補間するため「赤でも青でもない中間色（不透明）」が生成される。
     // Nearest なら中間色は一切生成されない = この断言が RED の根拠。
     let img = TempImg::new("scale_lanczos3");
@@ -669,10 +670,13 @@ fn load_scale_uses_lanczos3_interpolation() {
 
     // 中間色の存在 + 元が全て不透明なので出力も全ピクセル不透明
     let mut intermediate = 0usize;
-    for px in frame.rgba.chunks_exact(4) {
-        let p = as_px(px);
-        assert_eq!(p[3], 255, "元が全て不透明なら出力も不透明: {p:?}");
-        if p != OPAQUE_RED && p != OPAQUE_BLUE {
+    for &px in &frame.argb {
+        assert_eq!(
+            (px >> 24) & 0xFF,
+            255,
+            "元が全て不透明なら出力も不透明: {px:#010X}"
+        );
+        if px != 0xFFFF_0000 && px != 0xFF00_00FF {
             intermediate += 1;
         }
     }
@@ -682,16 +686,16 @@ fn load_scale_uses_lanczos3_interpolation() {
     );
 
     // 空間配置（ロバストな集計）: 左半は赤優勢・右半は青優勢
-    let (lr, _, lb) = half_rgb_totals(&frame.rgba, frame.width, frame.height, true);
-    let (rr, _, rb) = half_rgb_totals(&frame.rgba, frame.width, frame.height, false);
+    let (lr, _, lb) = half_rgb_totals(&frame.argb, frame.width, frame.height, true);
+    let (rr, _, rb) = half_rgb_totals(&frame.argb, frame.width, frame.height, false);
     assert!(lr > lb, "左半は赤優勢のはず（R合計={lr} B合計={lb}）");
     assert!(rb > rr, "右半は青優勢のはず（R合計={rr} B合計={rb}）");
 
     // 決定論: 同一入力・同一 scale の再ロードは同一バイト列
     let reloaded = ImageSet::load(img.path(), "SetA", Some(2.0)).expect("再ロード");
     assert_eq!(
-        reloaded.frame("two.png").expect("two.png").rgba,
-        frame.rgba,
+        reloaded.frame("two.png").expect("two.png").argb,
+        frame.argb,
         "同一入力に対し決定的"
     );
 }
@@ -711,8 +715,8 @@ fn load_corrupt_png_with_readable_ihdr_substitutes_transparent_frame() {
         (8, 6),
         "代替寸法は IHDR から取る"
     );
-    assert_eq!(broken.rgba.len(), (8 * 6 * 4) as usize);
-    assert!(broken.rgba.iter().all(|&b| b == 0), "代替フレームは全透明");
+    assert_eq!(broken.argb.len(), (8 * 6) as usize);
+    assert!(broken.argb.iter().all(|&p| p == 0), "代替フレームは全透明");
     assert_eq!(set.warnings.len(), 1, "代替で警告 1 件: {:?}", set.warnings);
 }
 
@@ -968,17 +972,14 @@ fn load_oversized_scale_skips_frame_without_panic() {
     );
 }
 
-/// 契約（描画側の防御）: width=0 のフレームを compose_argb しても panic せず
-/// 空 Vec を返す（chunks_exact(0) の panic 回避）。
+/// 契約（寸法ガードの最終防衛）: width=0 / 空 RGBA の Frame は panic せず
+/// 空の argb を持つ（chunks_exact(0) 相当の panic 回避）。
 #[test]
-fn compose_argb_zero_width_frame_returns_empty_without_panic() {
-    let frame = Frame {
-        width: 0,
-        height: 0,
-        rgba: Vec::new(),
-    };
-    assert!(compose_argb(&frame, false).is_empty(), "flip=false");
-    assert!(compose_argb(&frame, true).is_empty(), "flip=true");
+fn from_rgba_zero_width_frame_yields_empty_argb_without_panic() {
+    let frame = Frame::from_rgba(0, 6, vec![0u8; 6 * 4]);
+    assert!(frame.argb.is_empty(), "width=0 → argb 空");
+    let frame = Frame::from_rgba(4, 4, Vec::new());
+    assert!(frame.argb.is_empty(), "rgba 空 → argb 空");
 }
 
 /// 回帰: 通常寸法 PNG + 中程度 scale（2.0）は警告なしで正しくプリスケールされる

@@ -121,11 +121,7 @@ fn image_set_with(name: &str, file: &str, width: u32, height: u32) -> Arc<ImageS
         name: name.to_string(),
         frames: BTreeMap::from([(
             file.to_string(),
-            Frame {
-                width,
-                height,
-                rgba: vec![0; width as usize * height as usize * 4],
-            },
+            Frame::from_rgba(width, height, vec![0; width as usize * height as usize * 4]),
         )]),
         warnings: Vec::new(),
         scale: 1.0,

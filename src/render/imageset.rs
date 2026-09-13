@@ -1,13 +1,15 @@
 //! 画像セット（`img/<SetName>/*.png`）の一括展開と conf↔set 整合チェック。
 //!
 //! Java `ImagePairs` / `ImageUtils` / `AnimationBuilder` の画像読み込み部分相当:
-//! - PNG を straight RGBA8（非プレマルチプル）で保持する。premultiply は
-//!   win/window.rs 側の描画時処理（UpdateLayeredWindow の要件）なのでここでは行わない
+//! - PNG を straight RGBA8（非プレマルチプル）でデコードし、ロード時に 1 回だけ
+//!   プレマルチプライド 0xAARRGGBB（[`Frame::argb`]）へ変換して保持する。
+//!   premultiply は描画時（win/window.rs）ではなくロード時（`ImageSet::load`）に行う
 //! - 丸め規則は Java に一致させる（Java `Math.round` = floor(x + 0.5)。
 //!   Rust `f64::round` は負の半端で 0 から遠ざかるため使用しない）
 //! - scale のロード時プリスケール: 寸法は Java ImageUtils.scale の
 //!   `(int) Math.round(width * effectiveScaling)`。フィルタは **Lanczos3**
-//!   （straight RGBA8 のまま。premultiply しない）。アンカーは ImagePairs.java
+//!   （straight RGBA8 のまま。プレマルチプライド形式への変換はプリスケール後）。
+//!   アンカーは ImagePairs.java
 //!   L81-82 の `(int) Math.round(anchorX * scaling)`（±1 補正なし）、速度は
 //!   AnimationBuilder.java L206-211（非ゼロ→0 に丸まった成分を符号付き ±1 に補正）
 //! - 逐語移植の例外: Java のフィルタ機構（nearest/bicubic/hqx）に lanczos は無く、
@@ -60,12 +62,32 @@ pub enum ImagesetError {
     NotPng(String),
 }
 
-/// 1 フレーム（1 ポーズ画像）。straight RGBA8（行優先・非プレマルチプル）。
+/// 1 フレーム（1 ポーズ画像）。プレマルチプライド 0xAARRGGBB（行優先・非反転）。
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pub argb: Vec<u32>,
+}
+
+impl Frame {
+    /// straight RGBA8 をプレマルチプライド 0xAARRGGBB に変換して保持する。
+    ///
+    /// `width == 0 || height == 0 || rgba.is_empty()` のとき `argb` は空になる。
+    /// それ以外は [`crate::win::window::premultiply_rgba_to_argb`] で変換する
+    ///（切り捨て `(v * a) / 255`。整合入力なら `argb.len() == width * height`）。
+    pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Self {
+        let argb = if width == 0 || height == 0 || rgba.is_empty() {
+            Vec::new()
+        } else {
+            crate::win::window::premultiply_rgba_to_argb(&rgba)
+        };
+        Frame {
+            width,
+            height,
+            argb,
+        }
+    }
 }
 
 /// 画像セット。frames のキーは正規化済み PNG 名（例: "shime1.png"）。
@@ -216,22 +238,25 @@ fn scaled_dimension(dimension: u32, scale: f64) -> u32 {
 }
 
 impl ImageSet {
-    /// set ディレクトリ直下の PNG をすべて straight RGBA8 に展開する
-    ///（Java `ImagePairs.load` + `ImageUtils.scale` 相当）。
+    /// set ディレクトリ直下の PNG をすべてプレマルチプライド ARGB の [`Frame`] に
+    /// 展開する（Java `ImagePairs.load` + `ImageUtils.scale` 相当）。
     ///
     /// - 非 PNG（拡張子判定）は無言スキップ（banner.bmp 等）
     /// - デコード失敗 PNG は IHDR 寸法の全透明フレームで代替 + 警告、
     ///   ヘッダ自体が読めない PNG はフレーム欠落 + 警告
     /// - サイズ混在 set は警告 1 件を追加して続行（フレームは各自の寸法を保持）
     /// - `scale` が Some(s) かつ s != 1.0 のとき全フレームを java_round 寸法・
-    ///   Lanczos3（straight RGBA8・premultiply なし）でプリスケール
+    ///   Lanczos3（straight RGBA8 のまま）でプリスケールし、その後
+    ///   [`Frame::from_rgba`] でプレマルチプライド ARGB に変換する
     /// - set ディレクトリ不在 / 列挙 I/O エラーは Err（set 単位のスキップ判断は呼び出し側）
     pub fn load(
         img_dir: &Path,
         set_name: &str,
         scale: Option<f64>,
     ) -> Result<ImageSet, ImagesetError> {
-        let mut frames = BTreeMap::new();
+        // straight RGBA8 の中間表現（プリスケール後に Frame::from_rgba で変換する。
+        // プレマルチプライド形式を常駐させないため、スケールは変換前に適用する）。
+        let mut rgba_frames: BTreeMap<String, image::RgbaImage> = BTreeMap::new();
         let mut warnings = Vec::new();
         // 解決済み scale（None → 1.0）。フレームのプリスケール判定と保持に共用する。
         let resolved_scale = scale.unwrap_or(1.0);
@@ -256,14 +281,7 @@ impl ImageSet {
                         ));
                         continue;
                     }
-                    frames.insert(
-                        file_name,
-                        Frame {
-                            width,
-                            height,
-                            rgba: rgba.into_raw(),
-                        },
-                    );
+                    rgba_frames.insert(file_name, rgba);
                 }
                 Err(_) => match read_png_size(&path) {
                     // ヘッダが読める: IHDR 寸法の全透明フレームで代替
@@ -277,13 +295,9 @@ impl ImageSet {
                         warnings.push(format!(
                             "{file_name}: decode failed; substituted a fully transparent {width}x{height} frame"
                         ));
-                        frames.insert(
+                        rgba_frames.insert(
                             file_name,
-                            Frame {
-                                width,
-                                height,
-                                rgba: vec![0; (u64::from(width) * u64::from(height) * 4) as usize],
-                            },
+                            image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 0])),
                         );
                     }
                     // ヘッダも読めない: フレーム欠落 + 警告
@@ -297,7 +311,7 @@ impl ImageSet {
         }
 
         // サイズ混在は 1 件の警告で続行（Frame は各自の寸法を保持）
-        let sizes: BTreeSet<(u32, u32)> = frames.values().map(|f| (f.width, f.height)).collect();
+        let sizes: BTreeSet<(u32, u32)> = rgba_frames.values().map(|f| f.dimensions()).collect();
         if sizes.len() > 1 {
             let dims: Vec<String> = sizes.iter().map(|(w, h)| format!("{w}x{h}")).collect();
             warnings.push(format!(
@@ -306,40 +320,40 @@ impl ImageSet {
             ));
         }
 
-        // scale 指定（1.0 以外）なら全フレームをプリスケール
+        // scale 指定（1.0 以外）なら全フレームを straight RGBA8 のままプリスケール
         if let Some(s) = scale.filter(|&s| s != 1.0) {
             let mut oversized: Vec<String> = Vec::new();
-            for (file_name, frame) in frames.iter_mut() {
-                let new_width = scaled_dimension(frame.width, s);
-                let new_height = scaled_dimension(frame.height, s);
+            for (file_name, src) in rgba_frames.iter_mut() {
+                let new_width = scaled_dimension(src.width(), s);
+                let new_height = scaled_dimension(src.height(), s);
                 // resize 実行前に上限検査（巨大 alloc / u32 オーバーフロー回避）
                 if !valid_frame_dimensions(new_width, new_height) {
                     oversized.push(file_name.clone());
                     continue;
                 }
-                let src = image::RgbaImage::from_raw(
-                    frame.width,
-                    frame.height,
-                    std::mem::take(&mut frame.rgba),
-                )
-                .expect("frame rgba length is consistent with its dimensions");
-                let dst = image::imageops::resize(
-                    &src,
+                *src = image::imageops::resize(
+                    src,
                     new_width,
                     new_height,
                     image::imageops::FilterType::Lanczos3,
                 );
-                frame.width = dst.width();
-                frame.height = dst.height();
-                frame.rgba = dst.into_raw();
             }
             for file_name in oversized {
-                frames.remove(&file_name);
+                rgba_frames.remove(&file_name);
                 warnings.push(format!(
                     "{file_name}: skipped because dimensions after applying scale {s} exceed the limit"
                 ));
             }
         }
+
+        // straight RGBA8 → プレマルチプライド ARGB（ロード時 1 回）
+        let frames: BTreeMap<String, Frame> = rgba_frames
+            .into_iter()
+            .map(|(file_name, img)| {
+                let (width, height) = img.dimensions();
+                (file_name, Frame::from_rgba(width, height, img.into_raw()))
+            })
+            .collect();
 
         Ok(ImageSet {
             name: set_name.to_string(),
