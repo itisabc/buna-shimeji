@@ -8,8 +8,16 @@ It is a derivative work of:
   * Shimeji-ee / Shimeji-Desktop (including the DalekCraft2/Shimeji-Desktop fork)
     -- source code is distributed under the New BSD license (see Section 2).
   * The original Shimeji by Yuki Yamada (Group Finity)
-    -- the mascot image assets bundled under img/ are distributed under the
-       zlib/libpng license (see Section 3).
+    -- the mascot image assets bundled under img/Shimeji/ are distributed under
+       the zlib/libpng license (see Section 3).
+
+Note on the bundled image assets:
+  The img/ directory (img/Shimeji/ and img/KuroShimeji/) was taken unmodified
+  from the DalekCraft2/Shimeji-Desktop distribution. The origin and licensing
+  of the img/KuroShimeji/ image set are not individually documented upstream;
+  it is redistributed here as part of that upstream distribution under the
+  upstream license terms (see Sections 2-4). If you are the author of
+  img/KuroShimeji/ and wish to apply different terms, please open an issue.
 
 
 Section 1. New BSD (3-Clause) License (original code of this project)
