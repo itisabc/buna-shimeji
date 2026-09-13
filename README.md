@@ -8,14 +8,16 @@ Windows 用デスクトップマスコット「しめじ」の Rust 実装です
 Java 版（Shimeji-ee / Shimeji-Desktop 系）を参考に、主要なマスコット挙動（歩く・落ちる・ジャンプ・
 ドラッグ・スロー・増殖・変身・ウィンドウ運び）を、tao + windows-rs による
 軽量実装で実現しています（透過描画は CreateDIBSection + UpdateLayeredWindow）。
+移植したものの本人が大して詳しくもないのでなんか問題あったら教えてください。
 
 - 挙動: 主要なマスコット挙動を実装済み（アクションの式・定数は Java 版を参考に実装）
 - 追加機能（Rust 版独自）: **ウィンドウを掴んで最前面固定**。マスコットをウィンドウにドラッグ&ドロップすると、
   そのウィンドウが最前面に固定され、しめじがぶら下がって窓の移動に追従します。
   トレイ「Allowed Behaviours」で ON/OFF（既定 OFF）
 - 軽量化: メモリ 5〜20MB / アイドル CPU ほぼ 0（tick 駆動・変化時のみ描画。実測: アイドル CPU 0.234%・Private 8.8MB・WorkingSet 22.4MB・スレッド 2）
-- 拡張性: Phase 2 で OpenAI 互換 API による LLM エージェント化（Think/Chat）
 - 画像差し替え容易: `img/<SetName>/` にフォルダを置くだけで新しい画像セットを利用可能
+-デフォルトのしめじ以外ほとんど使わないので差し替え機能は検証不足です。
+
 
 ## ディレクトリ構成
 
@@ -44,11 +46,10 @@ cargo test              # 単体テスト
 
 現状: 主要挙動の実装は完了（`cargo test` 504/504 PASS、2026-09-13）。
 実装済み機能の一覧は [`doc/feature-status.md`](doc/feature-status.md) を参照してください。
-今後の主開発は Phase 2（LLM エージェントによる Think/Chat、効果音）です。
 
 ## 対応環境・既知の制限
 
-- **対応 OS: Windows のみ**（Win32 API・windows-rs による直描きに依存）。macOS / Linux は非対応です。要望があれば検討します。
+- **対応 OS: Windows のみ**（Win32 API・windows-rs による直描きに依存）。macOS / Linux は非対応です。
 - **長時間の連続起動は未検証**です（数時間〜日単位の連続稼働テストは未実施）。
 
 ## ライセンス
