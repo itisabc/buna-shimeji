@@ -657,6 +657,12 @@ impl OsSource for Win32OsSource {
         }
     }
 
+    /// 窓が生存（`IsWindow`）かつ最大化（`IsZoomed`）かどうか（#30 案A/B）。
+    fn is_window_maximized(&self, id: i64) -> bool {
+        let hwnd = hwnd_from_id(id);
+        unsafe { IsWindow(Some(hwnd)).as_bool() && IsZoomed(hwnd).as_bool() }
+    }
+
     /// 窓をフォアグラウンド化する（pin 解除後の unpin-activate）。生存する窓のみ
     /// `SetForegroundWindow` を呼び、成否を返す。
     fn activate_window(&self, id: i64) -> bool {

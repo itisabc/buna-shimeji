@@ -121,6 +121,11 @@ pub trait OsSource {
         false
     }
 
+    /// 窓が現在最大化（`IsZoomed`）されているかどうか（#30 案A/B 判定用）。既定 false。
+    fn is_window_maximized(&self, id: i64) -> bool {
+        false
+    }
+
     /// 窓をアクティブ化（フォアグラウンド化）し、成功可否を返す。既定 false。
     /// pin 解除後に呼び、非フォアグラウンドのまま TOPMOST を剥がした窓が手前に
     /// 残って見える問題を防ぐ（§1.10(z) 追補）。
@@ -397,13 +402,19 @@ impl Environment {
         // None（破棄/不可視/最小化/クローク）なら自動 unpin（was_topmost 規則で復帰）。
         let pin_id = self.pinned.borrow().as_ref().map(|pin| pin.id);
         if let Some(id) = pin_id {
-            match self.source.window_frame(id) {
-                Some(rect) => {
-                    if let Some(pin) = self.pinned.borrow_mut().as_mut() {
-                        pin.area.set(rect.left, rect.top, rect.right, rect.bottom);
+            // #30 案B: pin 中に固定対象窓自身が最大化されたら自動解除する
+            // （副作用は window_frame=None の自動解除と同一）。
+            if self.source.is_window_maximized(id) {
+                self.unpin_window();
+            } else {
+                match self.source.window_frame(id) {
+                    Some(rect) => {
+                        if let Some(pin) = self.pinned.borrow_mut().as_mut() {
+                            pin.area.set(rect.left, rect.top, rect.right, rect.bottom);
+                        }
                     }
+                    None => self.unpin_window(),
                 }
-                None => self.unpin_window(),
             }
         }
     }
@@ -526,6 +537,11 @@ impl Environment {
     /// - `set_window_topmost(id, true)` が成功したときのみ pin を立てて true を返す
     ///   （UIPI 等の失敗は false・pin しない）。
     pub fn pin_window(&self, id: i64, holder: usize) -> bool {
+        // #30 案A: 最大化中の窓は TOPMOST 化しない。`unpin_window()` より前に判定し、
+        // 既存 pin を温存する（最大化窓をドロップしただけで既存 pin を剥がさない）。
+        if self.source.is_window_maximized(id) {
+            return false;
+        }
         self.unpin_window();
 
         let was_topmost = self.source.is_window_topmost(id);
