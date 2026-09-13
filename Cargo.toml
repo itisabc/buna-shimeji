@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "BSD-3-Clause"
 description = "Shimeji desktop mascot reimplementation in Rust (tao + windows-rs)"
+repository = "https://github.com/itisabc/buna-shimeji"
+homepage = "https://github.com/itisabc/buna-shimeji"
+readme = "README.md"
+keywords = ["shimeji", "desktop-mascot", "windows", "tao"]
 
 [dependencies]
 # ウィンドウ / イベントループ（tao 0.37: WaitUntil 対応、Phase 0 ビルド実績あり）

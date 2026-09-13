@@ -1,0 +1,7 @@
+# 改行コードの自動正規化（リポジトリ内は LF）
+* text=auto
+
+# バイナリ資産（差分・マージ対象外）
+*.png binary
+*.ico binary
+*.bmp binary

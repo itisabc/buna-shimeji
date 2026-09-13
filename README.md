@@ -1,9 +1,13 @@
 # Shimeji (Rust 実装)
 
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
+![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)
+![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)
+
 Windows 用デスクトップマスコット「しめじ」の Rust 実装です。
 Java 版（Shimeji-ee / Shimeji-Desktop 系）を参考に、主要なマスコット挙動（歩く・落ちる・ジャンプ・
 ドラッグ・スロー・増殖・変身・ウィンドウ運び）を、tao + windows-rs による
-軽量実装で実現しています（透過描画は CreateDIBSection + UpdateLayeredWindow。
+軽量実装で実現しています（透過描画は CreateDIBSection + UpdateLayeredWindow）。
 
 - 挙動: 主要なマスコット挙動を実装済み（アクションの式・定数は Java 版を参考に実装）
 - 追加機能（Rust 版独自）: **ウィンドウを掴んで最前面固定**。マスコットをウィンドウにドラッグ&ドロップすると、
