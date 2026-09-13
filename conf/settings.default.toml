@@ -1,0 +1,26 @@
+[general]
+show_console = false
+language = "en"
+# --- [general] language 記入例 ---
+# language = "ja"   # 同梱: "en"（英語・既定） / "ja"（日本語）
+
+[allowed]
+breeding = true
+transients = true
+transformation = true
+throwing = true
+sounds = true
+multiscreen = true
+pin_dropped_window = false
+
+[disabled_behaviors]
+
+[imagesets.scale]
+
+[interactive_windows]
+whitelist = []
+blacklist = []
+# --- [interactive_windows] 記入例 ---
+# whitelist = ["メモ帳", "Visual Studio Code"]   # タイトル部分一致で反応対象にする
+# blacklist = ["タスク マネージャー"]              # 部分一致で除外する（whitelist より優先）
+# 注意: whitelist と blacklist の両方が空のときは、どのウィンドウにも反応しません。
