@@ -1,17 +1,51 @@
 License Notice
 ==============
 
-This project is a Rust reimplementation of Shimeji. It is a derivative work of:
+This project is a Rust reimplementation of Shimeji. The original code of this
+project is distributed under the New BSD (3-Clause) License (see Section 1).
+It is a derivative work of:
 
   * Shimeji-ee / Shimeji-Desktop (including the DalekCraft2/Shimeji-Desktop fork)
-    -- source code is distributed under the New BSD license (see Section 1).
+    -- source code is distributed under the New BSD license (see Section 2).
   * The original Shimeji by Yuki Yamada (Group Finity)
     -- the mascot image assets bundled under img/ are distributed under the
-       zlib/libpng license (see Section 2).
+       zlib/libpng license (see Section 3).
 
 
-Section 1. New BSD License (Shimeji-ee / Shimeji-Desktop source code)
+Section 1. New BSD (3-Clause) License (original code of this project)
 ---------------------------------------------------------------------
+
+Copyright (c) 2026 itisabc
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+Section 2. New BSD License (upstream Shimeji-ee / Shimeji-Desktop source code)
+-----------------------------------------------------------------------------
 
 Copyright (c) Shimeji-ee Group
 All rights reserved.
@@ -38,7 +72,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
-Section 2. zlib/libpng License (original Shimeji, applies to bundled image assets)
+Section 3. zlib/libpng License (original Shimeji, applies to bundled image assets)
 ----------------------------------------------------------------------------------
 
 Copyright (c) 2009-2011 Yuki Yamada
@@ -76,7 +110,7 @@ case of any conflict.
 3.ソースの頒布物から、この表示を削除したり、表示の内容を変更したりしてはなりません。
 
 
-Section 3. Attribution (from Shimeji-Desktop)
+Section 4. Attribution (from Shimeji-Desktop)
 ---------------------------------------------
 
 By Kilkakon
