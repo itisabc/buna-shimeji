@@ -120,6 +120,13 @@ pub trait OsSource {
     fn is_window_topmost(&self, id: i64) -> bool {
         false
     }
+
+    /// 窓をアクティブ化（フォアグラウンド化）し、成功可否を返す。既定 false。
+    /// pin 解除後に呼び、非フォアグラウンドのまま TOPMOST を剥がした窓が手前に
+    /// 残って見える問題を防ぐ（§1.10(z) 追補）。
+    fn activate_window(&self, id: i64) -> bool {
+        false
+    }
 }
 
 /// Environment から参照する eval context（`mascot.environment.*` は MascotContext が
@@ -544,13 +551,16 @@ impl Environment {
 
     /// pin を解除する。`was_topmost == false` のときのみ `set_window_topmost(id, false)`
     /// で剥がし（元から TOPMOST の窓は我々が付けたのではないので触らない）、pin を
-    /// clear する（再入 call は no-op = 二重解除ガード）。
+    /// clear する（再入 call は no-op = 二重解除ガード）。解除後は必ず
+    /// `activate_window(id)` で対象窓をアクティブ化する（非フォアグラウンドの窓を
+    /// 剥がすと手前に残って見える問題への対処・§1.10(z) 追補）。
     pub fn unpin_window(&self) {
         let pin = self.pinned.borrow_mut().take();
         if let Some(pin) = pin {
             if !pin.was_topmost {
                 self.source.set_window_topmost(pin.id, false);
             }
+            self.source.activate_window(pin.id);
         }
     }
 

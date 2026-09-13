@@ -44,8 +44,9 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GetClassNameW, GetCursorPos, GetWindow, GetWindowLongPtrW,
     GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindow, IsWindowVisible, IsZoomed, SetWindowPos, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST,
-    HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOPMOST,
+    IsWindow, IsWindowVisible, IsZoomed, SetForegroundWindow, SetWindowPos, GWL_EXSTYLE,
+    GW_HWNDPREV, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    WS_EX_TOPMOST,
 };
 
 use crate::app::environment::OsSource;
@@ -653,6 +654,18 @@ impl OsSource for Win32OsSource {
         unsafe {
             let style = GetWindowLongPtrW(hwnd_from_id(id), GWL_EXSTYLE);
             (style & WS_EX_TOPMOST.0 as isize) != 0
+        }
+    }
+
+    /// 窓をフォアグラウンド化する（pin 解除後の unpin-activate）。生存する窓のみ
+    /// `SetForegroundWindow` を呼び、成否を返す。
+    fn activate_window(&self, id: i64) -> bool {
+        let hwnd = hwnd_from_id(id);
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                return false;
+            }
+            SetForegroundWindow(hwnd).as_bool()
         }
     }
 }
