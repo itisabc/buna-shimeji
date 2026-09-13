@@ -21,9 +21,9 @@
 
 use std::path::{Path, PathBuf};
 
-use simeji::config::{parse_actions, ActionDef, ActionsConfig, Animation, Pose, SequenceChild};
-use simeji::render::compose_argb;
-use simeji::render::imageset::{
+use shimeji::config::{parse_actions, ActionDef, ActionsConfig, Animation, Pose, SequenceChild};
+use shimeji::render::compose_argb;
+use shimeji::render::imageset::{
     available_refs, check_references, enumerate_sets, java_round, normalize_image_ref,
     read_png_size, scale_anchor, scale_pose, scale_velocity, Frame, ImageSet,
 };
@@ -56,7 +56,7 @@ struct TempImg {
 
 impl TempImg {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("simeji_t4_{}_{tag}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("shimeji_t4_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root); // 前回残留の掃除
         std::fs::create_dir_all(&root).expect("テンポラリ img ディレクトリを作れる");
         TempImg { root }
@@ -190,7 +190,7 @@ fn actions_xml_doc(actions: &[String]) -> String {
 
 fn parse_actions_xml(tag: &str, body: &str) -> ActionsConfig {
     let mut path = std::env::temp_dir();
-    path.push(format!("simeji_t4_{}_{tag}.xml", std::process::id()));
+    path.push(format!("shimeji_t4_{}_{tag}.xml", std::process::id()));
     std::fs::write(&path, body).expect("一時 actions.xml を書ける");
     let result = parse_actions(&path);
     let _ = std::fs::remove_file(&path);
@@ -432,7 +432,7 @@ fn enumerate_sets_on_real_img_dir_finds_both_sets() {
 #[test]
 fn enumeration_on_missing_directories_is_err() {
     let missing =
-        std::env::temp_dir().join(format!("simeji_t4_no_such_dir_{}", std::process::id()));
+        std::env::temp_dir().join(format!("shimeji_t4_no_such_dir_{}", std::process::id()));
     assert!(enumerate_sets(&missing).is_err(), "img_dir 不在 → Err");
     assert!(
         available_refs(&missing, "Shimeji").is_err(),

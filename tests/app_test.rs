@@ -27,7 +27,7 @@
 //!     fn windows(&self) -> Vec<(i64, Rect)>;       // #9b: interactive 窓列挙（OUT_OF_BOUNDS 判定前）
 //!     fn raise_window(&self, id: i64);             // #9b: BringWindowToTop 相当
 //! }
-//! // Rect 型 = `simeji::mascot::Rect`。
+//! // Rect 型 = `shimeji::mascot::Rect`。
 //!
 //! // Environment は EnvironmentView を全実装する（default todo!() を全置換）。
 //! pub fn Environment::new(source: impl OsSource + 'static) -> Environment
@@ -107,26 +107,26 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use simeji::app::environment::{Environment, OsSource};
-use simeji::app::manager::Manager;
-use simeji::config::script::Variable;
-use simeji::config::{
+use shimeji::app::environment::{Environment, OsSource};
+use shimeji::app::manager::Manager;
+use shimeji::config::script::Variable;
+use shimeji::config::{
     ActionDef, ActionsConfig, Animation, BehaviorDef, BehaviorEntry, BehaviorsConfig, Pose,
     SequenceChild, VarMap,
 };
-use simeji::mascot::action::build_action;
-use simeji::mascot::behavior::{Action, BehaviorError, BehaviorFactory, BehaviorTable};
-use simeji::mascot::env::{resolve_border, AreaSlot, AreaState, BorderKind, BorderRef, Edge};
-use simeji::mascot::{EnvironmentView, ImageState, Mascot, Rng};
-use simeji::render::imageset::ImageSet;
+use shimeji::mascot::action::build_action;
+use shimeji::mascot::behavior::{Action, BehaviorError, BehaviorFactory, BehaviorTable};
+use shimeji::mascot::env::{resolve_border, AreaSlot, AreaState, BorderKind, BorderRef, Edge};
+use shimeji::mascot::{EnvironmentView, ImageState, Mascot, Rng};
+use shimeji::render::imageset::ImageSet;
 
 // =====================================================================
 // 合成データヘルパ（自己完結）
 // =====================================================================
 
 /// 矩形ヘルパ。
-fn rect(left: i32, top: i32, right: i32, bottom: i32) -> simeji::mascot::Rect {
-    simeji::mascot::Rect {
+fn rect(left: i32, top: i32, right: i32, bottom: i32) -> shimeji::mascot::Rect {
+    shimeji::mascot::Rect {
         left,
         top,
         right,
@@ -158,9 +158,9 @@ fn empty_image_set(name: &str) -> Arc<ImageSet> {
 /// OS 供給の状態（テストから RefCell 経由で差し替える）。
 #[derive(Default)]
 struct FakeState {
-    monitors: Vec<(simeji::mascot::Rect, simeji::mascot::Rect)>,
+    monitors: Vec<(shimeji::mascot::Rect, shimeji::mascot::Rect)>,
     cursor: Option<(i32, i32)>,
-    active_window: Option<(i64, simeji::mascot::Rect)>,
+    active_window: Option<(i64, shimeji::mascot::Rect)>,
     moved: Vec<(i64, i32, i32)>,
 }
 
@@ -169,7 +169,7 @@ struct FakeSource {
 }
 
 impl OsSource for FakeSource {
-    fn monitors(&self) -> Vec<(simeji::mascot::Rect, simeji::mascot::Rect)> {
+    fn monitors(&self) -> Vec<(shimeji::mascot::Rect, shimeji::mascot::Rect)> {
         self.state.borrow().monitors.clone()
     }
 
@@ -177,7 +177,7 @@ impl OsSource for FakeSource {
         self.state.borrow().cursor
     }
 
-    fn active_window(&self) -> Option<(i64, simeji::mascot::Rect)> {
+    fn active_window(&self) -> Option<(i64, shimeji::mascot::Rect)> {
         self.state.borrow().active_window
     }
 
@@ -185,7 +185,7 @@ impl OsSource for FakeSource {
         self.state.borrow_mut().moved.push((id, x, y));
     }
 
-    fn windows(&self) -> Vec<(i64, simeji::mascot::Rect)> {
+    fn windows(&self) -> Vec<(i64, shimeji::mascot::Rect)> {
         Vec::new()
     }
 
@@ -196,7 +196,7 @@ type EnvHandle = Rc<RefCell<FakeState>>;
 
 /// モニタ構成つき Environment（handle も返す・tick 間に状態差し替え可能）。
 fn env_with_monitors(
-    monitors: Vec<(simeji::mascot::Rect, simeji::mascot::Rect)>,
+    monitors: Vec<(shimeji::mascot::Rect, shimeji::mascot::Rect)>,
 ) -> (Environment, EnvHandle) {
     let state = Rc::new(RefCell::new(FakeState {
         monitors,

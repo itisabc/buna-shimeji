@@ -29,14 +29,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use simeji::app::environment::{Environment, OsSource};
-use simeji::app::manager::Manager;
-use simeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
-use simeji::mascot::behavior::{
+use shimeji::app::environment::{Environment, OsSource};
+use shimeji::app::manager::Manager;
+use shimeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
-use simeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
-use simeji::render::imageset::ImageSet;
+use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
+use shimeji::render::imageset::ImageSet;
 
 // =====================================================================
 // 合成ヘルパ

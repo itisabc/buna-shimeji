@@ -8,10 +8,10 @@
 //! 実装側の設計判断に委ねるため、テストではメソッド呼び出しを固定しない。
 //! Phase 1 は空実装のため契約が薄く、これ以上の過剰テストは書かない。
 //!
-//! TDD RED: simeji::agent は未実装のため「解決できない名前」の
+//! TDD RED: shimeji::agent は未実装のため「解決できない名前」の
 //! コンパイルエラーになることが正常。
 
-use simeji::agent::{Agent, NoopAgent};
+use shimeji::agent::{Agent, NoopAgent};
 
 /// NoopAgent は Agent を実装し、Box<dyn Agent> として構築できる
 ///（トレイトがオブジェクト安全であることの smoke）。

@@ -16,8 +16,8 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{eval_ok, norm_ws, source_of, MockCtx};
-use simeji::config::script::{ConstantValue, EvalValue, Variable, Variables};
-use simeji::config::{
+use shimeji::config::script::{ConstantValue, EvalValue, Variable, Variables};
+use shimeji::config::{
     parse_actions, parse_behaviors, validate_required_behaviors, ActionDef, ActionsConfig,
     Animation, BehaviorDef, BehaviorEntry, BehaviorsConfig, BorderType, Pose, SequenceChild,
 };
@@ -207,7 +207,7 @@ fn cond_sources(conds: &[Variable]) -> Vec<String> {
 
 fn temp_conf(tag: &str, content: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
-    path.push(format!("simeji_t3_{}_{tag}.xml", std::process::id()));
+    path.push(format!("shimeji_t3_{}_{tag}.xml", std::process::id()));
     std::fs::write(&path, content).expect("一時 conf ファイルを書ける");
     path
 }
@@ -849,7 +849,7 @@ fn real_actions_climb_along_wall_nan_targetx() {
     // lookRight=false → else 側 → NaN（Java 挙動: (int)NaN = 0）
     let v = eval_parsed_num(&ctx_false, ceiling_ref.get("TargetX").unwrap(), &[]);
     assert!(v.is_nan(), "else 側は NaN になる（実測 {v}）");
-    assert_eq!(simeji::config::script::to_java_int(v), 0);
+    assert_eq!(shimeji::config::script::to_java_int(v), 0);
     // lookRight=true → 真側 → workArea.left + random*100 ∈ [0, 100)
     for _ in 0..50 {
         let v = eval_parsed_num(&ctx, ceiling_ref.get("TargetX").unwrap(), &[]);

@@ -4,10 +4,10 @@
 //! 自己完結・tests/common 不使用）。期待値には Java 行番号をコメント焼き込み。
 //!
 //! pin する構築 API（2 経路）:
-//! - `simeji::mascot::action::create(kind: ActionKind, attrs: &VarMap,
+//! - `shimeji::mascot::action::create(kind: ActionKind, attrs: &VarMap,
 //!   animations: Vec<Animation>, scale: f64) -> Result<Box<dyn Action>, BehaviorError>`
 //!   （Java ActionBuilder.buildAction switch L386-437 相当・直接構築用）
-//! - `simeji::mascot::action::build_action(actions: &ActionsConfig, name: &str,
+//! - `shimeji::mascot::action::build_action(actions: &ActionsConfig, name: &str,
 //!   extra: &VarMap, scale: f64) -> Result<Box<dyn Action>, BehaviorError>`
 //!   （Java Configuration.buildAction(name, params) 相当・config 駆動・Ref/Inline
 //!   マージ込み）
@@ -32,18 +32,18 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use simeji::config::script::{EvalContext, Variable};
-use simeji::config::{
+use shimeji::config::script::{EvalContext, Variable};
+use shimeji::config::{
     parse_actions, ActionDef, ActionsConfig, Animation, BehaviorDef, BehaviorEntry, BorderType,
     Pose, SequenceChild, VarMap,
 };
-use simeji::mascot::action::{build_action, create, ActionKind};
-use simeji::mascot::behavior::{
+use shimeji::mascot::action::{build_action, create, ActionKind};
+use shimeji::mascot::behavior::{
     Action, BehaviorError, BehaviorFactory, BehaviorRunner, BehaviorTable,
 };
-use simeji::mascot::env::{AreaSlot, AreaState, CursorState};
-use simeji::mascot::{EnvironmentView, ImageState, Mascot, Rect, Rng};
-use simeji::render::imageset::{Frame, ImageSet};
+use shimeji::mascot::env::{AreaSlot, AreaState, CursorState};
+use shimeji::mascot::{EnvironmentView, ImageState, Mascot, Rect, Rng};
+use shimeji::render::imageset::{Frame, ImageSet};
 
 // =====================================================================
 // 合成モニタ状態の test-double
@@ -405,7 +405,7 @@ fn actions_config(entries: Vec<(&str, ActionDef)>) -> ActionsConfig {
 }
 
 fn single_table(name: &str, frequency: i32) -> BehaviorTable {
-    BehaviorTable::new(&simeji::config::BehaviorsConfig {
+    BehaviorTable::new(&shimeji::config::BehaviorsConfig {
         entries: vec![BehaviorEntry::Single(BehaviorDef {
             name: name.to_string(),
             frequency,
@@ -600,7 +600,7 @@ fn refresh_hotspots_cleared_on_animation_condition_error() {
     let env = SynthEnv::new();
     let mut rng = FakeRng::repeated(0.5, 16);
     let mut m = mascot_at((1000, 500));
-    m.set_hotspots(vec![simeji::mascot::Hotspot {
+    m.set_hotspots(vec![shimeji::mascot::Hotspot {
         behaviour: "Stare".to_string(),
     }]);
     let table = single_table("X", 1);
@@ -1381,7 +1381,7 @@ fn dragged_offset_type_origin_uses_pre_apply_image_center() {
     );
     // fixture: 画像 A（center (100,50)）をドラッグ開始前に適用済みにする
     //（Java Pose.apply 経由・look_right 既定 false → center = pose.anchor）
-    simeji::mascot::animation::apply_pose(&pose("a.png", (100, 50), (0, 0), 1), &mut m);
+    shimeji::mascot::animation::apply_pose(&pose("a.png", (100, 50), (0, 0), 1), &mut m);
     assert_eq!(
         m.image().map(|i| i.center),
         Some((100, 50)),

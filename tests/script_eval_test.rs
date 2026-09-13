@@ -19,10 +19,10 @@ use common::{
     describe_value, describe_value_from, eval_bool, eval_bool_injected, eval_num,
     eval_num_injected, eval_ok, norm_ws, script_var, standard_vars, MockCtx,
 };
-use simeji::config::script::{
+use shimeji::config::script::{
     to_java_int, ConstantValue, EvalContext, EvalValue, Variable, Variables,
 };
-use simeji::config::VarMap;
+use shimeji::config::VarMap;
 
 // =====================================================================
 // to_java_int（Java (int) キャスト準拠 / JLS 5.1.3）

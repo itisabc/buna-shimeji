@@ -95,24 +95,24 @@ use windows::Win32::System::Console::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
-use simeji::app::assets::{resolve_assets, AssetDirs};
-use simeji::app::environment::Environment;
-use simeji::app::manager::Manager;
-use simeji::app::reload::load_materials;
-use simeji::config::parse_actions;
-use simeji::i18n::{Lang, UiKey};
-use simeji::mascot::action::factory::XmlBehaviorFactory;
-use simeji::mascot::rng::JavaRandom;
-use simeji::render::imageset::ImageSet;
-use simeji::render::MascotView;
-use simeji::tray::{
+use shimeji::app::assets::{resolve_assets, AssetDirs};
+use shimeji::app::environment::Environment;
+use shimeji::app::manager::Manager;
+use shimeji::app::reload::load_materials;
+use shimeji::config::parse_actions;
+use shimeji::i18n::{Lang, UiKey};
+use shimeji::mascot::action::factory::XmlBehaviorFactory;
+use shimeji::mascot::rng::JavaRandom;
+use shimeji::render::imageset::ImageSet;
+use shimeji::render::MascotView;
+use shimeji::tray::{
     apply_tray_command, load_tray_icon_rgba, Settings, TrayCommand, TrayContext, TrayMenuModel,
 };
-use simeji::win::os_source::{ensure_window_above, restore_topmost_on_panic, Win32OsSource};
-use simeji::win::window::{SingleInstance, SingleInstanceError};
+use shimeji::win::os_source::{ensure_window_above, restore_topmost_on_panic, Win32OsSource};
+use shimeji::win::window::{SingleInstance, SingleInstanceError};
 
 /// 単一起動 mutex 名（ユーザーセッション内単一・`Local\` 名前空間）。
-const SINGLE_INSTANCE_MUTEX: &str = "Local\\SimejiSingleInstance";
+const SINGLE_INSTANCE_MUTEX: &str = "Local\\ShimejiSingleInstance";
 
 /// [`Settings`] の走査 scale map を [`load_materials`] 入力の `HashMap` に変換する
 /// ([`Settings::scales`] BTreeMap 契約 → HashMap 化・tray.rs Reload 分岐と同一変換)。
@@ -456,7 +456,7 @@ fn handle_draws(
         };
 
         // `pose_anchor` は「flip 前」のポーズアンカー（dx/dy）を渡す:
-        // - [`MascotView::draw`] は flip=true 時に [`simeji::render::flipped_offset_x`]
+        // - [`MascotView::draw`] は flip=true 時に [`shimeji::render::flipped_offset_x`]
         //   = `width - pose_anchor.0`（Java `ImagePairs.getImage(right)` L85-91 の
         //   `rightImage.getWidth() - scaledAnchorX` 相当）をオフセットに使用する
         // - [`ImageState::center`] は flip 調整済み（look_right 時 width - dx・

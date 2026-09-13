@@ -45,20 +45,20 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use simeji::app::reload::load_materials;
-use simeji::config::script::{EvalContext, Variable};
-use simeji::config::{
+use shimeji::app::reload::load_materials;
+use shimeji::config::script::{EvalContext, Variable};
+use shimeji::config::{
     ActionDef, ActionsConfig, Animation, BehaviorDef, BehaviorEntry, BehaviorsConfig, Pose,
     SequenceChild, VarMap,
 };
-use simeji::mascot::action::factory::XmlBehaviorFactory;
-use simeji::mascot::action::{create, ActionKind};
-use simeji::mascot::behavior::{
+use shimeji::mascot::action::factory::XmlBehaviorFactory;
+use shimeji::mascot::action::{create, ActionKind};
+use shimeji::mascot::behavior::{
     Action, BehaviorError, BehaviorFactory, BehaviorRunner, BehaviorTable,
 };
-use simeji::mascot::env::{AreaSlot, AreaState, CursorState};
-use simeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
-use simeji::render::imageset::{Frame, ImageSet};
+use shimeji::mascot::env::{AreaSlot, AreaState, CursorState};
+use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
+use shimeji::render::imageset::{Frame, ImageSet};
 
 // =====================================================================
 // 合成環境（action_test.rs の SynthEnv 縮小版・自己完結）
@@ -807,7 +807,7 @@ struct TempAssets {
 
 impl TempAssets {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("simeji_t10b_{}_{tag}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("shimeji_t10b_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root); // 前回残留の掃除
         std::fs::create_dir_all(root.join("conf")).expect("conf ディレクトリを作れる");
         std::fs::create_dir_all(root.join("img")).expect("img ディレクトリを作れる");

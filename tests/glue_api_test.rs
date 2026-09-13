@@ -3,7 +3,7 @@
 //!
 //! 設計正本: .tmp/design.md L89-96（起動は exe と同じ場所の conf/ と img/ を使う）+
 //! AGENTS §9。実装（#10b-2 分）未着手のため cargo test は compile error = RED が正常
-//! （E0432: `simeji::app::assets` 未存在 / E0599: `Mascot::image_set_arc`・
+//! （E0432: `shimeji::app::assets` 未存在 / E0599: `Mascot::image_set_arc`・
 //! `Manager::take_removed` の未存在メソッド）。
 //!
 //! pin する API 契約（coder への指示・シグネチャは tests が固定する）:
@@ -63,15 +63,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use simeji::app::assets::{resolve_assets, AssetDirs, AssetError};
-use simeji::app::environment::{Environment, OsSource};
-use simeji::app::manager::Manager;
-use simeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
-use simeji::mascot::behavior::{
+use shimeji::app::assets::{resolve_assets, AssetDirs, AssetError};
+use shimeji::app::environment::{Environment, OsSource};
+use shimeji::app::manager::Manager;
+use shimeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
-use simeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
-use simeji::render::imageset::{Frame, ImageSet};
+use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
+use shimeji::render::imageset::{Frame, ImageSet};
 
 // =====================================================================
 // 合成データヘルパ（自己完結・app_manager_ext_test.rs / mascot_test.rs 踏襲）
@@ -329,7 +329,7 @@ struct TempExe {
 
 impl TempExe {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("simeji_t10b2b_{}_{tag}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("shimeji_t10b2b_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root); // 前回残留の掃除
         std::fs::create_dir_all(&root).expect("ルートディレクトリを作れる");
         TempExe { root }

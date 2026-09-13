@@ -23,7 +23,7 @@
 //! TDD RED: correct_style / correct_exstyle は未実装のため
 //! 「解決できない名前」のコンパイルエラーになることが正常。
 
-use simeji::win::window::{correct_exstyle, correct_style};
+use shimeji::win::window::{correct_exstyle, correct_style};
 
 use windows::Win32::UI::WindowsAndMessaging::{
     WS_CAPTION, WS_CLIPSIBLINGS, WS_GROUP, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,

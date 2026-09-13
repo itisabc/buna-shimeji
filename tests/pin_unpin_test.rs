@@ -31,16 +31,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use simeji::app::environment::{Environment, OsSource};
-use simeji::app::manager::Manager;
-use simeji::app::reload::ReloadMaterial;
-use simeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
-use simeji::mascot::behavior::{
+use shimeji::app::environment::{Environment, OsSource};
+use shimeji::app::manager::Manager;
+use shimeji::app::reload::ReloadMaterial;
+use shimeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
-use simeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
-use simeji::render::imageset::ImageSet;
-use simeji::tray::{apply_tray_command, AllowedKind, Settings, TrayCommand, TrayContext};
+use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
+use shimeji::render::imageset::ImageSet;
+use shimeji::tray::{apply_tray_command, AllowedKind, Settings, TrayCommand, TrayContext};
 
 // =====================================================================
 // 合成ヘルパ（pin_drop_test.rs 踏襲・ヘルパ重複は許容）
@@ -355,7 +355,7 @@ struct TempDir {
 impl TempDir {
     fn new(tag: &str) -> Self {
         let root =
-            std::env::temp_dir().join(format!("simeji_pinunpin_{}_{tag}", std::process::id()));
+            std::env::temp_dir().join(format!("shimeji_pinunpin_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temp dir を作れる");
         TempDir { root }

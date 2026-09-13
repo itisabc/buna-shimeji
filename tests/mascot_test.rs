@@ -39,21 +39,21 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use simeji::config::script::{EvalContext, EvalError, Variable, Variables};
-use simeji::config::{
+use shimeji::config::script::{EvalContext, EvalError, Variable, Variables};
+use shimeji::config::{
     Animation, BehaviorDef, BehaviorEntry, BehaviorRef, BehaviorsConfig, NextBehaviorList, Pose,
     SequenceChild, VarMap,
 };
-use simeji::mascot::animation::{
+use shimeji::mascot::animation::{
     animation_duration, animation_init_condition, animation_is_effective, animation_pose_at,
     animation_reset_condition, apply_pose,
 };
-use simeji::mascot::behavior::{
+use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
-use simeji::mascot::env::{AreaSlot, AreaState};
-use simeji::mascot::{EnvironmentView, EvalSnapshot, ImageState, Mascot, MascotContext, Rect, Rng};
-use simeji::render::imageset::{Frame, ImageSet};
+use shimeji::mascot::env::{AreaSlot, AreaState};
+use shimeji::mascot::{EnvironmentView, EvalSnapshot, ImageState, Mascot, MascotContext, Rect, Rng};
+use shimeji::render::imageset::{Frame, ImageSet};
 
 // =====================================================================
 // 共通モック（自己完結。tests/common は使わない・変更しない）

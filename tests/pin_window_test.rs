@@ -20,8 +20,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use simeji::app::environment::{Environment, OsSource, PinnedWindow};
-use simeji::mascot::{EnvironmentView, Rect};
+use shimeji::app::environment::{Environment, OsSource, PinnedWindow};
+use shimeji::mascot::{EnvironmentView, Rect};
 
 // =====================================================================
 // 合成ヘルパ
@@ -36,7 +36,7 @@ fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
     }
 }
 
-fn area_rect(state: &simeji::mascot::env::AreaState) -> Rect {
+fn area_rect(state: &shimeji::mascot::env::AreaState) -> Rect {
     rect(state.left, state.top, state.right, state.bottom)
 }
 

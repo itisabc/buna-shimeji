@@ -419,7 +419,7 @@ pub enum SingleInstanceError {
 impl SingleInstance {
     /// 名前付き mutex で単一起動を保証する。
     ///
-    /// `name` は `Local\` プレフィックス付きの名前を想定（例: `Local\SimejiSingleInstance`）。
+    /// `name` は `Local\` プレフィックス付きの名前を想定（例: `Local\ShimejiSingleInstance`）。
     /// `CreateMutexW` は既存 mutex があっても有効なハンドルを返し（成功扱い）、
     /// その直後の `GetLastError() == ERROR_ALREADY_EXISTS` で既起動を判別する。
     pub fn acquire(name: &str) -> Result<Self, SingleInstanceError> {

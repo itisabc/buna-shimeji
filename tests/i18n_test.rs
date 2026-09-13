@@ -38,8 +38,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use simeji::i18n::{Lang, UiKey, DEFAULT_LANGUAGE};
-use simeji::tray::{GeneralSettings, Settings};
+use shimeji::i18n::{Lang, UiKey, DEFAULT_LANGUAGE};
+use shimeji::tray::{GeneralSettings, Settings};
 
 /// 設計 §3-A の UI キー数。
 const UI_KEY_COUNT: usize = 21;
@@ -93,7 +93,7 @@ struct TempLangDir {
 
 impl TempLangDir {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("simeji_i18n_{}_{tag}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("shimeji_i18n_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root); // 前回残留の掃除
         std::fs::create_dir_all(&root).expect("temp 辞書ディレクトリを作れる");
         TempLangDir { root }
@@ -225,7 +225,7 @@ fn shipped_ja_dictionary_values_take_priority() {
 #[test]
 fn missing_external_dictionary_falls_back_to_embedded_english() {
     let en = read_dict(&en_dict_path());
-    let missing = std::env::temp_dir().join(format!("simeji_i18n_missing_{}", std::process::id()));
+    let missing = std::env::temp_dir().join(format!("shimeji_i18n_missing_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&missing);
 
     let lang = Lang::load(&missing, DEFAULT_LANGUAGE);

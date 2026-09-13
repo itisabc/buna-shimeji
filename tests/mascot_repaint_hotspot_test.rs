@@ -35,12 +35,12 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use simeji::config::script::{EvalContext, Variable};
-use simeji::config::{Animation, Pose, VarMap};
-use simeji::mascot::action::{create, ActionKind};
-use simeji::mascot::env::{AreaSlot, AreaState, CursorState};
-use simeji::mascot::{EnvironmentView, Hotspot, Mascot, Rect, Rng};
-use simeji::render::imageset::{Frame, ImageSet};
+use shimeji::config::script::{EvalContext, Variable};
+use shimeji::config::{Animation, Pose, VarMap};
+use shimeji::mascot::action::{create, ActionKind};
+use shimeji::mascot::env::{AreaSlot, AreaState, CursorState};
+use shimeji::mascot::{EnvironmentView, Hotspot, Mascot, Rect, Rng};
+use shimeji::render::imageset::{Frame, ImageSet};
 
 // =====================================================================
 // 合成モニタ状態の test-double（tests/action_test.rs 流儀の踏襲）

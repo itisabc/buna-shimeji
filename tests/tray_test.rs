@@ -111,16 +111,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use simeji::app::environment::{Environment, OsSource};
-use simeji::app::manager::{BehaviorMenu, Manager};
-use simeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
-use simeji::i18n::Lang;
-use simeji::mascot::behavior::{
+use shimeji::app::environment::{Environment, OsSource};
+use shimeji::app::manager::{BehaviorMenu, Manager};
+use shimeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use shimeji::i18n::Lang;
+use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
-use simeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
-use simeji::render::imageset::{Frame, ImageSet};
-use simeji::tray::{
+use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
+use shimeji::render::imageset::{Frame, ImageSet};
+use shimeji::tray::{
     apply_tray_command, AllowedKind, AllowedSettings, GeneralSettings, ImagesetsSettings,
     InteractiveWindowsSettings, Settings, SettingsError, TrayCommand, TrayContext, TrayMenuModel,
 };
@@ -522,7 +522,7 @@ struct TempHome {
 
 impl TempHome {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("simeji_t9c_{}_{tag}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("shimeji_t9c_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root); // 前回残留の掃除
         std::fs::create_dir_all(&root).expect("ルートディレクトリを作れる");
         TempHome { root }
@@ -2435,7 +2435,7 @@ fn tray_icon_uses_valid_custom_png_pixels_and_dimensions() {
     custom.put_pixel(1, 1, image::Rgba([10, 11, 12, 0]));
     let path = write_icon_png(&home, "icon.png", &custom);
 
-    let (rgba, width, height) = simeji::tray::load_tray_icon_rgba(&path);
+    let (rgba, width, height) = shimeji::tray::load_tray_icon_rgba(&path);
 
     assert_eq!(
         (width, height),
@@ -2456,7 +2456,7 @@ fn tray_icon_missing_custom_falls_back_to_embedded_default() {
     let home = TempHome::new("icon_missing");
     let missing = home.root.join("no_such_dir").join("icon.png");
 
-    let (rgba, width, height) = simeji::tray::load_tray_icon_rgba(&missing);
+    let (rgba, width, height) = shimeji::tray::load_tray_icon_rgba(&missing);
 
     assert_eq!((width, height), (16, 16), "既定アイコンは 16×16");
     assert_eq!(rgba.len(), 16 * 16 * 4, "既定アイコンは RGBA 長 1024");
@@ -2470,7 +2470,7 @@ fn tray_icon_corrupt_custom_falls_back_without_panic() {
     let path = home.root.join("icon.png");
     std::fs::write(&path, b"this is definitely not a PNG file").expect("壊れたバイト列を書ける");
 
-    let (rgba, width, height) = simeji::tray::load_tray_icon_rgba(&path);
+    let (rgba, width, height) = shimeji::tray::load_tray_icon_rgba(&path);
 
     assert_eq!((width, height), (16, 16), "デコード失敗 → 既定 16×16");
     assert_eq!(

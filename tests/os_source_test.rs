@@ -27,7 +27,7 @@
 //! TDD RED: `src/win/os_source.rs` は未作成のため import 未解決の
 //! コンパイルエラーになることが正常。
 
-use simeji::win::os_source::is_interactive_by_title;
+use shimeji::win::os_source::is_interactive_by_title;
 
 // =====================================================================
 // 契約 1: 空タイトルは最短で false（L97-100）

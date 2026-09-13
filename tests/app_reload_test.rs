@@ -6,7 +6,7 @@
 //! Java 全消しを pin するテストは書かない。
 //!
 //! 実装（#9d 分）未着手のため cargo test は compile error = RED が正常
-//! （E0432: `simeji::app::reload` の未存在 item / E0599:
+//! （E0432: `shimeji::app::reload` の未存在 item / E0599:
 //! `Mascot::rebind_image_set`・`Mascot::image_set`・`Manager::reload` の未存在メソッド）。
 //!
 //! pin する API 契約（coder への指示・シグネチャは tests が固定する）:
@@ -90,16 +90,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use simeji::app::environment::{Environment, OsSource};
-use simeji::app::manager::Manager;
-use simeji::app::reload::{load_materials, MaterialError, ReloadMaterial};
-use simeji::config::script::EvalError;
-use simeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
-use simeji::mascot::behavior::{
+use shimeji::app::environment::{Environment, OsSource};
+use shimeji::app::manager::Manager;
+use shimeji::app::reload::{load_materials, MaterialError, ReloadMaterial};
+use shimeji::config::script::EvalError;
+use shimeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
-use simeji::mascot::{Mascot, Rect, Rng};
-use simeji::render::imageset::{Frame, ImageSet};
+use shimeji::mascot::{Mascot, Rect, Rng};
+use shimeji::render::imageset::{Frame, ImageSet};
 
 // =====================================================================
 // 合成データヘルパ（自己完結）
@@ -275,7 +275,7 @@ impl Action for ScriptedAction {
     fn init(
         &mut self,
         _mascot: &mut Mascot,
-        _env: &dyn simeji::mascot::EnvironmentView,
+        _env: &dyn shimeji::mascot::EnvironmentView,
         _rng: &mut dyn Rng,
     ) -> Result<(), ActionError> {
         match self.script.init {
@@ -287,7 +287,7 @@ impl Action for ScriptedAction {
     fn has_next(
         &mut self,
         _mascot: &mut Mascot,
-        _env: &dyn simeji::mascot::EnvironmentView,
+        _env: &dyn shimeji::mascot::EnvironmentView,
         _rng: &mut dyn Rng,
     ) -> Result<bool, ActionError> {
         self.has_next_calls += 1;
@@ -297,7 +297,7 @@ impl Action for ScriptedAction {
     fn next(
         &mut self,
         _mascot: &mut Mascot,
-        _env: &dyn simeji::mascot::EnvironmentView,
+        _env: &dyn shimeji::mascot::EnvironmentView,
         _rng: &mut dyn Rng,
     ) -> Result<(), ActionError> {
         Ok(())
@@ -502,7 +502,7 @@ struct TempAssets {
 
 impl TempAssets {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("simeji_t9d_{}_{tag}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("shimeji_t9d_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root); // 前回残留の掃除
         std::fs::create_dir_all(root.join("conf")).expect("conf ディレクトリを作れる");
         std::fs::create_dir_all(root.join("img")).expect("img ディレクトリを作れる");

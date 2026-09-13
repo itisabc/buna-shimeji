@@ -15,8 +15,8 @@
 //! （nextDouble の結果は n / 2^53（n < 2^53）の厳密表現のため bit-exact が成立する）。
 //!
 //! 契約:
-//! - `simeji::mascot::rng::JavaRandom::new(seed: i64)` — seed 指定構築。
-//!   連続 `unit()`（= `simeji::mascot::Rng::unit`）が JDK nextDouble 列と
+//! - `shimeji::mascot::rng::JavaRandom::new(seed: i64)` — seed 指定構築。
+//!   連続 `unit()`（= `shimeji::mascot::Rng::unit`）が JDK nextDouble 列と
 //!   呼び出し順・値とも完全一致（seed 42 / 0 / -42 / 987654321098765432 × 各 10 値）。
 //!   seed 0（scramble のみで立つ経路）と負 seed（内部マスク正規化経路）を含む。
 //! - 全 pin 値が [0, 1) に収まる。
@@ -38,8 +38,8 @@
 //! TDD RED: `src/mascot/rng.rs` は未作成のため import 未解決（E0432）の
 //! コンパイルエラーになることが正常。
 
-use simeji::mascot::rng::JavaRandom;
-use simeji::mascot::Rng;
+use shimeji::mascot::rng::JavaRandom;
+use shimeji::mascot::Rng;
 
 /// seed 42 の `new Random(42).nextDouble()` × 10 値（javac 17.0.19 実行出力の
 /// `Double.doubleToLongBits` 16 進・RngRef.java SEED 42 ブロック）。

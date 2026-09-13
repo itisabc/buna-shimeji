@@ -38,7 +38,7 @@ cargo run --release     # 実行（exe と同じ場所に conf/ と img/ が必�
 cargo test              # 単体テスト
 ```
 
-現状: 主要挙動の実装は完了（`cargo test` 495/495 PASS、2026-09-12）。
+現状: 主要挙動の実装は完了（`cargo test` 504/504 PASS、2026-09-13）。
 実装済み機能の一覧は [`doc/feature-status.md`](doc/feature-status.md) を参照してください。
 今後の主開発は Phase 2（LLM エージェントによる Think/Chat、効果音）です。
 

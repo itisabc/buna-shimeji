@@ -47,13 +47,13 @@
 
 use std::cell::RefCell;
 
-use simeji::config::script::EvalContext;
-use simeji::mascot::env::{
+use shimeji::config::script::EvalContext;
+use shimeji::mascot::env::{
     active_ie_effective, border_is_on, border_move, is_screen_left_right, is_screen_top_bottom,
     resolve_border, resolve_work_area, AreaSlot, AreaState, BorderKind, BorderRef, CursorState,
     Edge,
 };
-use simeji::mascot::{EnvironmentView, EvalSnapshot, MascotContext, Rect};
+use shimeji::mascot::{EnvironmentView, EvalSnapshot, MascotContext, Rect};
 
 // =====================================================================
 // 合成モニタ状態の test-double（design §1.7(g): test-double EnvironmentView）

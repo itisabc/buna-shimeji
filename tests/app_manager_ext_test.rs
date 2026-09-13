@@ -90,15 +90,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use simeji::app::environment::{Environment, OsSource};
-use simeji::app::manager::{BehaviorMenu, Manager};
-use simeji::config::script::Variable;
-use simeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
-use simeji::mascot::behavior::{
+use shimeji::app::environment::{Environment, OsSource};
+use shimeji::app::manager::{BehaviorMenu, Manager};
+use shimeji::config::script::Variable;
+use shimeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
-use simeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
-use simeji::render::imageset::ImageSet;
+use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
+use shimeji::render::imageset::ImageSet;
 
 // =====================================================================
 // 合成データヘルパ（自己完結）

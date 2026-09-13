@@ -11,7 +11,7 @@
 ## 2. ディレクトリ構造
 
 ```text
-<simeji.exe と同じ場所>/
+<shimeji.exe と同じ場所>/
 ├─ conf/                  全セット共通で 1 つだけ（セット毎の conf は存在しない）
 │   ├─ actions.xml        アクション定義（画像の参照はここ）
 │   ├─ behaviors.xml      行動と頻度

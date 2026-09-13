@@ -22,9 +22,9 @@
 
 use std::path::Path;
 
-use simeji::render::imageset::{Frame, ImageSet};
-use simeji::render::{compose_argb, flipped_offset_x};
-use simeji::win::window::premultiply_rgba_to_argb;
+use shimeji::render::imageset::{Frame, ImageSet};
+use shimeji::render::{compose_argb, flipped_offset_x};
+use shimeji::win::window::premultiply_rgba_to_argb;
 
 // =====================================================================
 // 共通ヘルパ

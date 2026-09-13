@@ -1,13 +1,13 @@
 //! タスク #3 テスト共通モック（script_eval_test / config_parse_test から `mod common;` で使用）。
 //!
 //! MockCtx は asset-report.md §1-3 の mascot.* 網羅リストに対応する EvalContext 実装。
-//! モックは公開契約（simeji::config::script::EvalContext）のみに依存し、
+//! モックは公開契約（shimeji::config::script::EvalContext）のみに依存し、
 //! 未対応パスは None / false を返す（= 評価器が未知パスを要求したら Err になる検出器として働く）。
 #![allow(dead_code)]
 
 use std::cell::RefCell;
 
-use simeji::config::script::{ConstantValue, EvalContext, EvalValue, Variable, Variables};
+use shimeji::config::script::{ConstantValue, EvalContext, EvalValue, Variable, Variables};
 
 /// mascot 状態のモック。フィールドは各テストで書き換えてよい（すべて pub）。
 /// 既定値は「十分に内側の画面・ WorkArea / IE」を想定し、資産 194 式が全て定義値を持つように選んである。
@@ -225,7 +225,7 @@ pub fn eval_bool_injected(ctx: &MockCtx, source: &str, injected: &[(&str, f64)])
 
 /// Result 版の値説明（Err も型名だけで表す。EvalError の Debug に依存しない）。
 pub fn describe_value_from(
-    r: Result<EvalValue, simeji::config::script::EvalError>,
+    r: Result<EvalValue, shimeji::config::script::EvalError>,
 ) -> &'static str {
     match r {
         Ok(v) => describe_value(&v),
