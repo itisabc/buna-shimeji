@@ -40,8 +40,8 @@ pub mod complex;
 pub mod factory;
 
 use bordered::{
-    AnimateAction, BreedAction, FallWithIEAction, MoveAction, StayAction, ThrowIEAction,
-    WalkWithIEAction,
+    AnimateAction, BreedAction, FallWithIEAction, MoveAction, ScanMoveAction, StayAction,
+    ThrowIEAction, WalkWithIEAction,
 };
 use complex::Complex;
 
@@ -67,14 +67,14 @@ pub enum ActionKind {
     WalkWithIE,
     ThrowIE,
     FallWithIE,
-    // stub 17（資産外・has_next=false 即完了+警告）
+    /// ScanMove（アフォーダンス探索移動・#32・デレマスしめじ v1.9 が使用）。
+    /// Java は `Broadcast*` 4 種もクラスとして存在するが、いずれも
+    /// Animate / Stay / Move / Jump を継承し override 0 個の空サブクラスのため
+    /// variant を持たず [`fqn_to_kind`] で基底種別へ写す。
     ScanMove,
+    // stub 12（資産外・has_next=false 即完了+警告）
     ScanJump,
     ScanInteract,
-    BroadcastStay,
-    BroadcastMove,
-    BroadcastJump,
-    Broadcast,
     ComplexMove,
     ComplexJump,
     BreedMove,
@@ -119,10 +119,14 @@ pub fn fqn_to_kind(fqn: &str) -> Option<ActionKind> {
         "com.group_finity.mascot.action.ScanMove" => ScanMove,
         "com.group_finity.mascot.action.ScanJump" => ScanJump,
         "com.group_finity.mascot.action.ScanInteract" => ScanInteract,
-        "com.group_finity.mascot.action.BroadcastStay" => BroadcastStay,
-        "com.group_finity.mascot.action.BroadcastMove" => BroadcastMove,
-        "com.group_finity.mascot.action.BroadcastJump" => BroadcastJump,
-        "com.group_finity.mascot.action.Broadcast" => Broadcast,
+        // Java の Broadcast 4 種は Animate / Stay / Move / Jump を継承し
+        // メソッドを 1 つも override しない空サブクラス（放送実体は ActionBase の
+        // Affordance 属性）。variant を持たず基底種別へ写す（デレマスしめじ v1.9 が
+        // Broadcast を 6 箇所で使う）。
+        "com.group_finity.mascot.action.Broadcast" => Animate,
+        "com.group_finity.mascot.action.BroadcastStay" => Stay,
+        "com.group_finity.mascot.action.BroadcastMove" => Move,
+        "com.group_finity.mascot.action.BroadcastJump" => Jump,
         "com.group_finity.mascot.action.ComplexMove" => ComplexMove,
         "com.group_finity.mascot.action.ComplexJump" => ComplexJump,
         "com.group_finity.mascot.action.BreedMove" => BreedMove,
@@ -1259,14 +1263,10 @@ pub fn create(
         ActionKind::WalkWithIE => Box::new(WalkWithIEAction::new(attrs.clone(), scaled)),
         ActionKind::ThrowIE => Box::new(ThrowIEAction::new(attrs.clone(), scaled)),
         ActionKind::FallWithIE => Box::new(FallWithIEAction::new(attrs.clone(), scaled)),
-        // stub 17 種
-        ActionKind::ScanMove
-        | ActionKind::ScanJump
+        ActionKind::ScanMove => Box::new(ScanMoveAction::new(attrs.clone(), scaled)),
+        // stub 12 種
+        ActionKind::ScanJump
         | ActionKind::ScanInteract
-        | ActionKind::BroadcastStay
-        | ActionKind::BroadcastMove
-        | ActionKind::BroadcastJump
-        | ActionKind::Broadcast
         | ActionKind::ComplexMove
         | ActionKind::ComplexJump
         | ActionKind::BreedMove

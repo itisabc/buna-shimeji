@@ -39,9 +39,43 @@ pub struct ConfigError {
 }
 
 /// actions.xml のパース結果。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ActionsConfig {
     pub actions: BTreeMap<String, ActionDef>,
+}
+
+impl ActionsConfig {
+    /// `(action 名, animation index)` の組に該当するアニメを定義から除去する
+    /// （check_references が検出した欠落参照アニメの実無効化・#10b-1）。
+    /// index は除去前の animations 内位置を指すため、組ごとに重複除去のうえ
+    /// 降順で除去し、先に除去した index が後続 index をずらさないようにする。
+    pub fn strip_animations(&mut self, disabled: &[(String, usize)]) {
+        for (name, def) in self.actions.iter_mut() {
+            let animations = match def {
+                ActionDef::Embedded { animations, .. }
+                | ActionDef::Stay { animations, .. }
+                | ActionDef::Move { animations, .. }
+                | ActionDef::Animate { animations, .. }
+                | ActionDef::Sequence { animations, .. }
+                | ActionDef::Select { animations, .. } => animations,
+            };
+            let mut indices: Vec<usize> = disabled
+                .iter()
+                .filter(|(action, _)| action == name)
+                .map(|(_, index)| *index)
+                .collect();
+            if indices.is_empty() {
+                continue;
+            }
+            indices.sort_unstable();
+            indices.dedup();
+            for index in indices.into_iter().rev() {
+                if index < animations.len() {
+                    animations.remove(index);
+                }
+            }
+        }
+    }
 }
 
 /// 境界種別（Action の BorderType 属性）。
@@ -787,12 +821,12 @@ fn parse_behavior_def(
     };
     let action_attr = node.attribute("Action").map(|s| s.to_string());
 
-    // 子要素: NextBehaviorList / ActionReference / 匿名 Action
+    // 子要素: NextBehaviorList（別名 NextBehavior / UK 綴り）/ ActionReference / 匿名 Action
     let mut next = None;
     let mut child_action: Option<SequenceChild> = None;
     for child in node.children().filter(|c| c.is_element()) {
         match child.tag_name().name() {
-            "NextBehaviorList" | "NextBehaviourList" => {
+            "NextBehaviorList" | "NextBehaviourList" | "NextBehavior" | "NextBehaviour" => {
                 // 複数ある場合は後勝ち（Java は references を連結するが、契約は 1 リストのみ。
                 // 資産では Behavior あたり 1 個しか現れない）
                 next = Some(parse_next_behavior_list(cx, child)?);

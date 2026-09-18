@@ -15,7 +15,12 @@
 //! Phase 1 の意図的な範囲外（doc 開示）:
 //! - (C) Hotspot の contains 判定 / isBehaviorEnabled（behavior.rs 注記）— 資産 hotspot
 //!   0 件のため placeholder。実装は #7/#9
-//! - affordances は資産 XML 未使用（asset-report.md §2）のためフィールド+API 保持のみ
+//! - affordances は デレマスしめじ v1.9 資産が使用する（Java ActionBase の
+//!   `Affordance` 属性放送・ScanMove の探索対象）。broadcast は action 側で実装済み
+//! - ScanMove 到達時の自分自身の Behavior 差し替えは
+//!   [`Mascot::request_behavior`] に要求を積み、Manager がループ後に反映する
+//!   （Java `ScanMove.tick` の `mascot.setBehavior(...)` 即時呼び出しとの
+//!   意図的差異・design §1.10 記録）
 //! - image_anchor() は flip 調整済み center を返す（flip 前値は #8 renderer glue が
 //!   flip フラグと併用して復元）
 //! - needs_repaint のクリア（Java apply 相当）とウィンドウ描画は #8 renderer glue
@@ -52,6 +57,37 @@ impl Rect {
     }
 }
 
+/// ScanMove（アフォーダンス探索）用の、あるマスコット 1 体分の観測値。
+/// Manager が個体 tick の後にスナップショットを更新するため、後続の個体は
+/// 同 tick の最新状態を見る（Java の `Manager.getMascotWithAffordance` が live に
+/// リストを走査する挙動の観察等価）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffordanceScanEntry {
+    /// Manager の `mascots` 内 index（[`AffordanceReaction`] の宛先指定に使う）。
+    pub index: usize,
+    /// 現在の anchor（Java `Mascot.getAnchor()` 相当）。
+    pub anchor: (i32, i32),
+    /// 放送中の affordance（Java `Mascot.getAffordances()` 相当）。
+    pub affordances: Vec<String>,
+}
+
+/// ScanMove が到達時に要求する反応（自分と相手の Behavior 差し替え・向き反転）。
+/// Java は action の中から `mascot.setBehavior(...)` / `targetMascot.setBehavior(...)`
+/// を直接呼ぶが、Rust の action は他個体へ触れない（`&dyn EnvironmentView` + 自 mascot
+/// の `&mut` のみ）ため、要求を積んで Manager がループ後に Java と同じ順序
+/// （自分 → 相手 → 向き反転）で適用する（pin の前後で要求を溜める既存パターンと同型）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffordanceArrival {
+    /// 自分に設定する Behavior 名（Java `Behaviour` 属性）。
+    pub behavior: String,
+    /// 相手の index（[`AffordanceScanEntry::index`]）。相手不在は None。
+    pub target_index: Option<usize>,
+    /// 相手に設定する Behavior 名（Java `TargetBehaviour` 属性）。
+    pub target_behavior: String,
+    /// 相手の向きを自分と逆にするか（Java `TargetLook` 属性）。
+    pub flip_look: bool,
+}
+
 /// マスコットから見たデスクトップ環境の抽象（Java `MascotEnvironment` / `Environment`
 /// 相当）。#8 の Environment が実装する。
 ///
@@ -62,6 +98,11 @@ impl Rect {
 /// 実装者（テストダブル等）を compile 可能に保つため default 実装は `todo!` であり、
 /// 呼ばれると panic する。純関数側（env.rs）はこれらの primitive からスナップショットを
 /// 取って評価する。
+///
+/// #32 で追加した ScanMove 用 2 メソッド（[`EnvironmentView::affordance_scan`] /
+/// [`EnvironmentView::queue_affordance_reaction`]）は default 実装を持ち、未実装の
+/// テストダブルでもスキャン相手なし / 要求破棄として振る舞う（既存メソッドの
+/// `todo!` 方針とは異なる: 呼ばれても panic しない方が安全なため）。
 // default 実装は todo! スタブ（引数を消費しない）のため、trait 配下のみ
 // 未使用引数警告を抑止する（実装者側の impl には影響しない）。
 #[allow(unused_variables)]
@@ -197,6 +238,13 @@ pub trait EnvironmentView {
     fn behavior_disabled(&self, image_set: &str, behavior_name: &str) -> bool {
         false
     }
+
+    /// ScanMove 用の読み取り専用スナップショット（Manager が個体 tick の後に更新）。
+    /// 既定は空 = スキャン相手なし（Java の「該当 affordance を持つ個体が居ない」
+    /// と同じ扱いになる）。実装は clone を返す（小型・呼び出しは 1 tick 数回）。
+    fn affordance_scan(&self) -> Vec<AffordanceScanEntry> {
+        Vec::new()
+    }
 }
 
 /// Java `Math.random()` 相当の [0,1) 一様乱数の抽象。
@@ -317,6 +365,10 @@ pub struct Mascot {
     /// #30 item 5: pin 窓の holder 特定用ミラー。真実は `Environment.pinned` で、
     /// Manager が必ず同期する（非保持・非 pin は None）。
     pinned_window: Option<i64>,
+    /// ScanMove 到達時に要求された反応（#32・Manager がループ後に適用）。
+    /// action は自 Behavior を構築できない（table / factory を持たない）ため要求を積む
+    /// （Java `ScanMove.tick` L122-137 の setBehavior 呼び出し相当・意図的差異）。
+    affordance_arrival: Option<AffordanceArrival>,
 }
 
 impl Mascot {
@@ -348,6 +400,7 @@ impl Mascot {
             hotspots: Vec::new(),
             remove_pending: false,
             pinned_window: None,
+            affordance_arrival: None,
         }
     }
 
@@ -635,6 +688,18 @@ impl Mascot {
     /// affordances に 1 件追加する（Java ActionBase.next L112 相当）。
     pub(crate) fn add_affordance(&mut self, affordance: String) {
         self.affordances.push(affordance);
+    }
+
+    /// ScanMove 到達時の反応を要求する（#32）。action は自 Behavior を構築できないため
+    /// 要求を積み、Manager がループ後に Java と同じ順序（自分 → 相手 → 向き反転）で
+    /// 適用する。1 tick に 1 回しか到達しないため後勝ちで実質 1 件。
+    pub(crate) fn request_affordance_arrival(&mut self, arrival: AffordanceArrival) {
+        self.affordance_arrival = Some(arrival);
+    }
+
+    /// 溜まった到達時要求を取り出す（Manager がループ後に適用・#32）。
+    pub fn take_affordance_arrival(&mut self) -> Option<AffordanceArrival> {
+        self.affordance_arrival.take()
     }
 
     /// スクリプト用カスタム変数マップ（Java getVariables L1339-1344）。

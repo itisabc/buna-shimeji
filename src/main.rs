@@ -99,7 +99,6 @@ use shimeji::app::assets::{resolve_assets, AssetDirs};
 use shimeji::app::environment::Environment;
 use shimeji::app::manager::Manager;
 use shimeji::app::reload::load_materials;
-use shimeji::config::parse_actions;
 use shimeji::i18n::{Lang, UiKey};
 use shimeji::mascot::action::factory::XmlBehaviorFactory;
 use shimeji::mascot::rng::JavaRandom;
@@ -383,6 +382,14 @@ impl App {
                     .iter()
                     .map(|material| (material.name.clone(), Arc::clone(&material.image_set)))
                     .collect();
+                // #32: per-set 定義集合も素材の一部なのでファクトリを作り直す
+                //（reload より先に差し替える = 再構築は新定義集合で行われる）
+                self.manager
+                    .set_factory(Box::new(XmlBehaviorFactory::from_sets(
+                        materials
+                            .iter()
+                            .map(|material| (material.name.clone(), Arc::clone(&material.actions))),
+                    )));
                 // 参照付け替え（ImageSet Arc / 行動表 / behavior 再構築）
                 self.manager.reload(materials);
                 // 全 view reset（ImageKey に set 名を含まないため必須・design §1.10(c)）
@@ -591,24 +598,17 @@ fn try_main() -> anyhow::Result<()> {
         .map(|material| material.name.clone())
         .collect();
 
-    // factory 用 ActionsConfig（XmlBehaviorFactory は disabled 除去を構築時 1 回のみ行う。
-    // load_materials 内部でも parse_actions するが、ActionsConfig は外へ出ないため
-    // 同内容の 2 度パース・同期ロード許容内。Err は行番号付き表示）
-    let actions = match parse_actions(&conf_dir.join("actions.xml")) {
-        Ok(actions) => actions,
-        Err(err) => bail!("failed to parse actions.xml: {err}"),
-    };
-    // factory は Manager が 1 個のみ保持する（manager.rs 既存設計追従・差し替え API 無し）。
-    // per-set DisabledAnimation（check_references は set 毎列挙に依存）は
-    // 既定 set（= materials[0]）の分を factory に適用する。scale は構築の都度
+    // factory 用定義集合（#32）: per-set の actions を Reload 素材から受け取り、
+    // 構築時に set 名で選択する（BehaviorFactory::set_image_set が
+    // マスコットの image set を構築直前に注入する）。scale は構築の都度
     // BehaviorTable::build_behavior_direct がマスコットの ImageSet.scale を
-    // factory.set_scale で注入する（per-set scale を行動へ反映）
-    let default_disables: Vec<(String, usize)> = materials[0]
-        .disabled_animations
-        .iter()
-        .map(|disabled| (disabled.action.clone(), disabled.animation_index))
-        .collect();
-    let factory = XmlBehaviorFactory::new(actions, &default_disables);
+    // factory.set_scale で注入する（per-set scale を行動へ反映）。
+    // disabled アニメの除去は load_materials が set 毎に済ませている。
+    let factory = XmlBehaviorFactory::from_sets(
+        materials
+            .iter()
+            .map(|material| (material.name.clone(), Arc::clone(&material.actions))),
+    );
 
     let mut manager = Manager::new(
         Environment::new(Win32OsSource::new(

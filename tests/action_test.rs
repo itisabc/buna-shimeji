@@ -37,12 +37,12 @@ use shimeji::config::{
     parse_actions, ActionDef, ActionsConfig, Animation, BehaviorDef, BehaviorEntry, BorderType,
     Pose, SequenceChild, VarMap,
 };
-use shimeji::mascot::action::{build_action, create, ActionKind};
+use shimeji::mascot::action::{build_action, create, fqn_to_kind, ActionKind};
 use shimeji::mascot::behavior::{
     Action, BehaviorError, BehaviorFactory, BehaviorRunner, BehaviorTable,
 };
 use shimeji::mascot::env::{AreaSlot, AreaState, CursorState};
-use shimeji::mascot::{EnvironmentView, ImageState, Mascot, Rect, Rng};
+use shimeji::mascot::{AffordanceScanEntry, EnvironmentView, ImageState, Mascot, Rect, Rng};
 use shimeji::render::imageset::{Frame, ImageSet};
 
 // =====================================================================
@@ -105,6 +105,8 @@ struct SynthEnv {
     transformation: bool,
     moved_to: RefCell<Vec<(i32, i32)>>,
     spawns: RefCell<Vec<SpawnRec>>,
+    /// #32: ScanMove 用スナップショット（テストから差し替える）。
+    scan: RefCell<Vec<AffordanceScanEntry>>,
     ctx: ProbeCtx,
 }
 
@@ -128,8 +130,21 @@ impl SynthEnv {
             transformation: true,
             moved_to: RefCell::new(Vec::new()),
             spawns: RefCell::new(Vec::new()),
+            scan: RefCell::new(Vec::new()),
             ctx: ProbeCtx,
         }
+    }
+
+    /// #32: スキャン相手（index / anchor / affordances）を設定する。
+    fn set_scan(&self, entries: Vec<(usize, (i32, i32), &[&str])>) {
+        *self.scan.borrow_mut() = entries
+            .into_iter()
+            .map(|(index, anchor, affordances)| AffordanceScanEntry {
+                index,
+                anchor,
+                affordances: affordances.iter().map(|a| a.to_string()).collect(),
+            })
+            .collect();
     }
 }
 
@@ -232,6 +247,11 @@ impl EnvironmentView for SynthEnv {
 
     fn transformation_allowed(&self) -> bool {
         self.transformation
+    }
+
+    /// #32: ScanMove が参照するスナップショット。
+    fn affordance_scan(&self) -> Vec<AffordanceScanEntry> {
+        self.scan.borrow().clone()
     }
 
     fn queue_spawn(
@@ -625,17 +645,12 @@ fn refresh_hotspots_cleared_on_animation_condition_error() {
     assert!(m.remove_pending(), "Eval エラーは dispose 経路に伝播する");
 }
 
-/// stub 17 種: has_next=false で即完了 + 警告ログ（design §1.8(a)）。
+/// stub 12 種: has_next=false で即完了 + 警告ログ（design §1.8(a)）。
 #[test]
 fn stub_kinds_complete_immediately() {
-    let stub_kinds: [ActionKind; 17] = [
-        ActionKind::ScanMove,
+    let stub_kinds: [ActionKind; 12] = [
         ActionKind::ScanJump,
         ActionKind::ScanInteract,
-        ActionKind::BroadcastStay,
-        ActionKind::BroadcastMove,
-        ActionKind::BroadcastJump,
-        ActionKind::Broadcast,
         ActionKind::ComplexMove,
         ActionKind::ComplexJump,
         ActionKind::BreedMove,
@@ -677,6 +692,181 @@ fn unknown_embedded_fqn_fails_fast() {
         build_action(&cfg, "Bogus", &extra, 1.0).is_err(),
         "未知 FQN は BehaviorError で fail-fast"
     );
+}
+
+// =====================================================================
+// Broadcast 別名（Java Broadcast* は override 0 個の空サブクラス）
+// =====================================================================
+
+/// Java の `Broadcast` / `BroadcastStay` / `BroadcastMove` / `BroadcastJump` は
+/// それぞれ `Animate` / `Stay` / `Move` / `Jump` を継承しメソッドを 1 つも
+/// override しない（= 同一挙動）。放送実体は ActionBase の `Affordance` 属性が担う。
+/// デレマスしめじ v1.9 は `Broadcast` を 6 箇所で使うため、stub のままだと
+/// ノートの放送アクションが無音で即完了する。
+#[test]
+fn broadcast_fqns_alias_to_their_base_kinds() {
+    assert_eq!(
+        fqn_to_kind("com.group_finity.mascot.action.Broadcast"),
+        Some(ActionKind::Animate)
+    );
+    assert_eq!(
+        fqn_to_kind("com.group_finity.mascot.action.BroadcastStay"),
+        Some(ActionKind::Stay)
+    );
+    assert_eq!(
+        fqn_to_kind("com.group_finity.mascot.action.BroadcastMove"),
+        Some(ActionKind::Move)
+    );
+    assert_eq!(
+        fqn_to_kind("com.group_finity.mascot.action.BroadcastJump"),
+        Some(ActionKind::Jump)
+    );
+}
+
+/// Class=`...Broadcast` の定義は Animate として解決され、即完了せず
+/// アニメ duration の間だけ動き続ける（stub からの回帰検出）。
+#[test]
+fn broadcast_class_animates_like_animate() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let cfg = actions_config(vec![(
+        "Broadcast",
+        ActionDef::Embedded {
+            class: "com.group_finity.mascot.action.Broadcast".to_string(),
+            border: Some(BorderType::Floor),
+            attrs: attrs(&[("Affordance", "test_broadcast")]),
+            animations: vec![anim(None, false, vec![pose("p.png", (64, 64), (1, 0), 3)])],
+        },
+    )]);
+    let action = build_action(&cfg, "Broadcast", &VarMap::new(), 1.0).expect("構築できる");
+    // BorderType=Floor なので床（SynthEnv の work area bottom = 1040）に立たせる
+    let mut m = mascot_at((1000, 1040));
+    let table = single_table("Broadcast", 1);
+    set_action(&mut m, &env, "Broadcast", Ok(action), &mut rng).unwrap();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(
+        m.anchor(),
+        (1001, 1040),
+        "Animate としてアニメが適用される（stub の即完了なら anchor は不変）"
+    );
+    assert_eq!(
+        m.affordances(),
+        ["test_broadcast"],
+        "Affordance 属性は ActionBase が放送する（Broadcast 固有実装ではない）"
+    );
+}
+
+// =====================================================================
+// ScanMove 契約（Java ScanMove.java L21-182・#32）
+// =====================================================================
+
+/// ScanMove の最小定義（実資産と同じ形: 相手方向へ velocity -2 のポーズ 1 本）。
+fn scan_move_def(action_attrs: &[(&str, &str)]) -> ActionDef {
+    ActionDef::Embedded {
+        class: "com.group_finity.mascot.action.ScanMove".to_string(),
+        border: Some(BorderType::Floor),
+        attrs: attrs(action_attrs),
+        animations: vec![anim(
+            None,
+            false,
+            vec![pose("walk.png", (64, 64), (-2, 0), 30)],
+        )],
+    }
+}
+
+/// 放送中の相手（index 1・同じ床上）へ近づき、到達した tick で
+/// 「自分の Behavior / 相手の Behavior / TargetLook」を要求する。
+/// 到達後は自分の affordance が空になり、相手が affordance を失うと即完了する。
+#[test]
+fn scan_move_approaches_affordance_and_requests_arrival() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    // 相手: index 1・x=996（4px 左）・affordance "talk"
+    env.set_scan(vec![(1, (996, 1040), &["talk"])]);
+    let cfg = actions_config(vec![(
+        "Scan",
+        scan_move_def(&[
+            ("Affordance", "talk"),
+            ("Behavior", "Arrived"),
+            ("TargetBehavior", "Sit"),
+            ("TargetLook", "true"),
+        ]),
+    )]);
+    let action = build_action(&cfg, "Scan", &VarMap::new(), 1.0).expect("構築できる");
+    let mut m = mascot_at((1000, 1040));
+    set_action(&mut m, &env, "Scan", Ok(action), &mut rng).unwrap();
+
+    // tick1: 1000 → 998（velocity -2）。到達前なので要求は出ない
+    m.tick(
+        &env,
+        &single_table("Scan", 1),
+        &mut FnFactory::constant(make_idle_fallback),
+        &mut rng,
+    );
+    assert_eq!(m.anchor(), (998, 1040), "相手方向へ移動する");
+    assert!(
+        m.take_affordance_arrival().is_none(),
+        "到達前は Behavior 差し替えを要求しない"
+    );
+
+    // tick2: 998 → 996 = 相手 anchor に到達（クランプ）
+    m.tick(
+        &env,
+        &single_table("Scan", 1),
+        &mut FnFactory::constant(make_idle_fallback),
+        &mut rng,
+    );
+    assert_eq!(m.anchor(), (996, 1040), "相手 anchor で停止する");
+    let arrival = m
+        .take_affordance_arrival()
+        .expect("到達 tick で自分の Behavior / 相手の Behavior を要求する");
+    assert_eq!(arrival.behavior, "Arrived", "Behaviour 属性（US 綴り）");
+    assert_eq!(arrival.target_index, Some(1), "探索で見つけた相手 index");
+    assert_eq!(
+        arrival.target_behavior, "Sit",
+        "TargetBehaviour 属性は US 綴り"
+    );
+    assert!(arrival.flip_look, "TargetLook 属性");
+    assert!(
+        m.affordances().is_empty(),
+        "スキャン中は自分の affordance を放送しない（Java L48/L77）"
+    );
+
+    // 相手が affordance を失ったら即完了（Java hasNext L68-69）
+    env.set_scan(vec![(1, (996, 1040), &[])]);
+    let mut action = build_action(&cfg, "Scan", &VarMap::new(), 1.0).expect("再構築");
+    let mut rng2 = FakeRng::repeated(0.5, 16);
+    action.init(&mut m, &env, &mut rng2).unwrap();
+    assert!(
+        !action.has_next(&mut m, &env, &mut rng2).unwrap(),
+        "相手が affordance を失えば即完了する"
+    );
+}
+
+/// 相手が見つからない場合は 1 tick も動かず即完了する（Java hasNext L64-69:
+/// target == null → false。資産では Broadcast 側が先に終わった場合に相当）。
+#[test]
+fn scan_move_without_target_completes_immediately() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let cfg = actions_config(vec![(
+        "Scan",
+        scan_move_def(&[("Affordance", "talk"), ("Behavior", "Arrived")]),
+    )]);
+    let action = build_action(&cfg, "Scan", &VarMap::new(), 1.0).expect("構築できる");
+    let mut m = mascot_at((1000, 1040));
+    let before = m.anchor();
+    set_action(&mut m, &env, "Scan", Ok(action), &mut rng).unwrap();
+    m.tick(
+        &env,
+        &single_table("Scan", 1),
+        &mut FnFactory::constant(make_idle_fallback),
+        &mut rng,
+    );
+    assert_eq!(m.anchor(), before, "相手不在では移動しない");
+    assert!(m.take_affordance_arrival().is_none());
 }
 
 // =====================================================================

@@ -33,7 +33,9 @@ use std::time::Instant;
 use shimeji::app::environment::{Environment, OsSource};
 use shimeji::app::manager::Manager;
 use shimeji::app::reload::ReloadMaterial;
-use shimeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use shimeji::config::{
+    ActionsConfig, BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap,
+};
 use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
@@ -622,6 +624,7 @@ fn reload_activates_window() {
         name: "TestSet".to_string(),
         image_set: empty_image_set("TestSet"),
         table: table(vec![row("Idle", 100)]),
+        actions: Arc::new(ActionsConfig::default()),
         disabled_animations: Vec::new(),
     }];
     manager.reload(materials);

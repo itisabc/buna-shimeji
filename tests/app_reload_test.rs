@@ -94,7 +94,9 @@ use shimeji::app::environment::{Environment, OsSource};
 use shimeji::app::manager::Manager;
 use shimeji::app::reload::{load_materials, MaterialError, ReloadMaterial};
 use shimeji::config::script::EvalError;
-use shimeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use shimeji::config::{
+    ActionDef, ActionsConfig, BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap,
+};
 use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
@@ -416,6 +418,8 @@ fn material(name: &str, image_set: Arc<ImageSet>, entries: Vec<BehaviorEntry>) -
         name: name.to_string(),
         image_set,
         table: table(entries),
+        // manager 側テストは action 定義集合を使わない（空集合）
+        actions: Arc::new(ActionsConfig::default()),
         disabled_animations: Vec::new(),
     }
 }
@@ -491,6 +495,40 @@ const MINIMAL_BEHAVIORS_XML: &str = concat!(
     "</Mascot>\n"
 );
 
+/// 1 Action（`Walk`・Stay・pose 1 個）だけを持つ actions XML（#32 の set 別内容
+/// 観察用・参照画像を差し替えて「同名 Action 別内容」を作る）。
+fn actions_xml(image: &str) -> String {
+    format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n",
+            "<Mascot xmlns=\"http://www.group-finity.com/Mascot\">\n",
+            "  <ActionList>\n",
+            "    <Action Name=\"Walk\" Type=\"Stay\">\n",
+            "      <Animation>\n",
+            "        <Pose Image=\"{image}\" ImageAnchor=\"0,0\" Velocity=\"0,0\" Duration=\"1\"/>\n",
+            "      </Animation>\n",
+            "    </Action>\n",
+            "  </ActionList>\n",
+            "</Mascot>\n"
+        ),
+        image = image
+    )
+}
+
+/// 必須 4 種 + `Walk` + `Sit` の behaviors XML（#32 の set 別 behaviors 観察用）。
+const SET_BEHAVIORS_XML: &str = concat!(
+    "<Mascot xmlns=\"http://www.group-finity.com/Mascot\">\n",
+    "  <BehaviorList>\n",
+    "    <Behavior Name=\"ChaseMouse\" Frequency=\"1\"/>\n",
+    "    <Behavior Name=\"Fall\" Frequency=\"1\"/>\n",
+    "    <Behavior Name=\"Dragged\" Frequency=\"1\"/>\n",
+    "    <Behavior Name=\"Thrown\" Frequency=\"1\"/>\n",
+    "    <Behavior Name=\"Walk\" Frequency=\"1\"/>\n",
+    "    <Behavior Name=\"Sit\" Frequency=\"1\"/>\n",
+    "  </BehaviorList>\n",
+    "</Mascot>\n"
+);
+
 /// conf/ + img/ を持つ使い捨てディレクトリ（Drop で再帰削除）。
 struct TempAssets {
     root: PathBuf,
@@ -515,6 +553,20 @@ impl TempAssets {
 
     fn write_conf(&self, name: &str, content: &str) {
         std::fs::write(self.conf_dir().join(name), content).expect("conf ファイルを書ける");
+    }
+
+    /// `conf/<set>/<name>` を書き込む（set 専用 conf・#32）。
+    fn write_set_conf(&self, set: &str, name: &str, content: &str) {
+        let dir = self.conf_dir().join(set);
+        std::fs::create_dir_all(&dir).expect("set conf ディレクトリを作れる");
+        std::fs::write(dir.join(name), content).expect("set conf ファイルを書ける");
+    }
+
+    /// `img/<set>/conf/<name>` を書き込む（探索順 1 番目・#32）。
+    fn write_img_conf(&self, set: &str, name: &str, content: &str) {
+        let dir = self.img_dir().join(set).join("conf");
+        std::fs::create_dir_all(&dir).expect("img 側 conf ディレクトリを作れる");
+        std::fs::write(dir.join(name), content).expect("img 側 conf ファイルを書ける");
     }
 
     /// 最小有効な actions.xml + behaviors.xml（必須 4 種含む）を書き込む。
@@ -705,16 +757,20 @@ fn load_materials_propagates_config_parse_and_required_errors() {
     }
 }
 
-/// conf ファイル不在 → Config / img_dir 不在 → Imageset（enumerate_sets の Err 伝播）。
+/// conf ファイルが見つからない set は warn + スキップ（素材全体は失敗しない・
+/// Java failedConfigurations 相当）/ img_dir 不在 → Imageset（enumerate_sets の Err 伝播）。
 #[test]
-fn load_materials_propagates_missing_conf_and_missing_img_dir() {
-    // conf ファイル不在（actions.xml を読めない）
+fn load_materials_skips_sets_without_config_and_propagates_missing_img_dir() {
+    // conf ファイル不在（画像だけ置かれた set）
     {
         let assets = TempAssets::new("missing_conf");
-        let err = load_materials(&assets.conf_dir(), &assets.img_dir(), &HashMap::new())
-            .expect_err("conf ファイル不在は Err");
-        assert!(matches!(err, MaterialError::Config(_)));
-        assert!(!err.to_string().is_empty(), "Display は日本語メッセージ");
+        assets.write_png("Orphan", "walk1.png", 8, 8);
+        let materials = load_materials(&assets.conf_dir(), &assets.img_dir(), &HashMap::new())
+            .expect("conf 不在の set はスキップされ、素材全体は失敗しない");
+        assert!(
+            materials.is_empty(),
+            "conf を持つ set が 1 つも無ければ空素材（従来の Err から #32 で変更）"
+        );
     }
 
     // img_dir 不在（enumerate_sets の I/O エラー）
@@ -730,6 +786,122 @@ fn load_materials_propagates_missing_conf_and_missing_img_dir() {
         );
         assert!(!err.to_string().is_empty(), "Display は日本語メッセージ");
     }
+}
+
+// =====================================================================
+// 契約 A2 (#32): per-set 設定ファイルの解決（Java Main の探索順）
+// =====================================================================
+
+/// ActionDef の先頭アニメ先頭 Pose の参照画像（set 別内容の観察点）。
+fn first_pose_image(def: &ActionDef) -> &str {
+    let animations = match def {
+        ActionDef::Embedded { animations, .. }
+        | ActionDef::Stay { animations, .. }
+        | ActionDef::Move { animations, .. }
+        | ActionDef::Animate { animations, .. }
+        | ActionDef::Sequence { animations, .. }
+        | ActionDef::Select { animations, .. } => animations,
+    };
+    animations[0].poses[0].image.as_str()
+}
+
+/// `conf/<set>/Actions.xml` は `conf/actions.xml` より優先され、**同名 Action でも
+/// set ごとに別内容**になる（デレマスしめじ v1.9 の `Stand` が set ごとに別画像を
+/// 参照する状況の最小再現）。専用ファイルを持たない set は共通 conf へフォールバック。
+#[test]
+fn load_materials_prefers_set_specific_config_over_shared() {
+    let assets = TempAssets::new("per_set_conf");
+    assets.write_conf("actions.xml", &actions_xml("/shared.png"));
+    assets.write_conf("behaviors.xml", MINIMAL_BEHAVIORS_XML);
+    assets.write_set_conf("SetA", "Actions.xml", &actions_xml("/a.png"));
+    assets.write_set_conf("SetA", "Behavior.xml", MINIMAL_BEHAVIORS_XML);
+    assets.write_png("SetA", "a.png", 8, 8);
+    assets.write_png("SetB", "shared.png", 8, 8);
+
+    let materials = load_materials(&assets.conf_dir(), &assets.img_dir(), &HashMap::new())
+        .expect("set 専用 conf + 共通 conf でロードできる");
+    assert_eq!(materials.len(), 2, "2 set とも material 化される");
+
+    let set_a = materials
+        .iter()
+        .find(|m| m.name == "SetA")
+        .expect("SetA が material 化される");
+    let set_b = materials
+        .iter()
+        .find(|m| m.name == "SetB")
+        .expect("SetB が material 化される");
+
+    let walk_a = set_a.actions.actions.get("Walk").expect("SetA の Walk");
+    let walk_b = set_b.actions.actions.get("Walk").expect("SetB の Walk");
+    assert_eq!(
+        first_pose_image(walk_a),
+        "/a.png",
+        "set 専用 conf が優先される"
+    );
+    assert_eq!(
+        first_pose_image(walk_b),
+        "/shared.png",
+        "専用 conf を持たない set は共通 conf へフォールバックする"
+    );
+}
+
+/// 探索順 1 番目 `img/<set>/conf/` が `conf/<set>/` より優先される
+/// （Java `Main.getActionsFilePath` L392-396 逐語）。
+#[test]
+fn load_materials_prefers_img_side_conf_over_conf_dir() {
+    let assets = TempAssets::new("img_conf");
+    assets.write_conf("behaviors.xml", MINIMAL_BEHAVIORS_XML);
+    assets.write_set_conf("SetA", "Actions.xml", &actions_xml("/conf_side.png"));
+    assets.write_img_conf("SetA", "Actions.xml", &actions_xml("/img_side.png"));
+    assets.write_png("SetA", "img_side.png", 8, 8);
+
+    let materials = load_materials(&assets.conf_dir(), &assets.img_dir(), &HashMap::new())
+        .expect("img 側 conf でロードできる");
+    let set_a = materials
+        .iter()
+        .find(|m| m.name == "SetA")
+        .expect("SetA が material 化される");
+    let walk = set_a.actions.actions.get("Walk").expect("Walk");
+    assert_eq!(
+        first_pose_image(walk),
+        "/img_side.png",
+        "img/<set>/conf/ が最優先（探索順 1 番目）"
+    );
+}
+
+/// behaviors も set ごとに解決され、当該 set の行動表になる（#32）。
+#[test]
+fn load_materials_uses_set_specific_behaviors() {
+    let assets = TempAssets::new("per_set_behaviors");
+    assets.write_conf("actions.xml", &actions_xml("/shared.png"));
+    assets.write_conf("behaviors.xml", MINIMAL_BEHAVIORS_XML);
+    assets.write_set_conf("SetA", "Behavior.xml", SET_BEHAVIORS_XML);
+    assets.write_png("SetA", "shared.png", 8, 8);
+    assets.write_png("SetB", "shared.png", 8, 8);
+
+    let materials = load_materials(&assets.conf_dir(), &assets.img_dir(), &HashMap::new())
+        .expect("set 専用 behaviors でロードできる");
+    let rows_of = |name: &str| -> Vec<String> {
+        materials
+            .iter()
+            .find(|m| m.name == name)
+            .expect("material がある")
+            .table
+            .rows
+            .iter()
+            .map(|row| row.name.clone())
+            .collect()
+    };
+    assert!(
+        rows_of("SetA").iter().any(|row| row == "Sit"),
+        "set 専用 behaviors の行が当該 set の table に入る: {:?}",
+        rows_of("SetA")
+    );
+    assert!(
+        !rows_of("SetB").iter().any(|row| row == "Sit"),
+        "専用 behaviors を持たない set は共通 behaviors のまま: {:?}",
+        rows_of("SetB")
+    );
 }
 
 // =====================================================================

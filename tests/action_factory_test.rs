@@ -623,7 +623,7 @@ fn build_behavior_direct_applies_mascot_scale_to_pose() {
     let mut m = mascot_with_scale((1000, 500), &[("p.png", 128, 128)], 2.0);
     assert_eq!(m.scale(), 2.0, "ImageSet.scale を保持");
     let runner = table
-        .build_behavior_direct("Walk", &mut factory, m.scale())
+        .build_behavior_direct("Walk", &mut factory, &m)
         .expect("scale 引数付きで構築できる");
     m.set_behavior(
         Some(runner),
@@ -765,6 +765,145 @@ fn factory_filter_propagates_through_sequence_ref_children() {
         tick_image_ref(&mut m, &env).as_deref(),
         Some("b.png"),
         "Ref 子の参照先定義からも disabled #0 が除去されている"
+    );
+}
+
+// =====================================================================
+// 契約 6 (#32): per-set 定義集合の選択（from_sets + set_image_set）
+// =====================================================================
+
+/// `Stand` の参照画像だけが違う 2 set 分の定義集合フィクスチャ。
+fn per_set_actions() -> [Arc<ActionsConfig>; 2] {
+    [
+        Arc::new(config_from(vec![(
+            "Stand",
+            animate_def(vec![anim(
+                None,
+                false,
+                vec![pose("a.png", (32, 48), (1, 0), 30)],
+            )]),
+        )])),
+        Arc::new(config_from(vec![(
+            "Stand",
+            animate_def(vec![anim(
+                None,
+                false,
+                vec![pose("b.png", (32, 48), (2, 0), 30)],
+            )]),
+        )])),
+    ]
+}
+
+/// 同名 Action でも set ごとに内容が違う資産（デレマスしめじ v1.9 の `Stand` は
+/// set ごとに別画像を参照する）では、`from_sets` + `set_image_set` が set 名で
+/// 定義集合を選ぶ。スコープ未設定 / 未知 set は先頭 set（= 既定 set）へ落ちる。
+#[test]
+fn from_sets_selects_definition_set_by_image_set() {
+    let env = SynthEnv::new();
+    let [set_a, set_b] = per_set_actions();
+    let mut factory =
+        XmlBehaviorFactory::from_sets([("SetA".to_string(), set_a), ("SetB".to_string(), set_b)]);
+
+    // スコープ未設定 → 先頭 set（既定 set）
+    let action = factory
+        .build_action(&ref_child("Stand"))
+        .expect("既定 set から構築できる");
+    let mut m = Mascot::new("SetA", image_set_with(&[("a.png", 32, 48)]), (1000, 500));
+    set_action(
+        &mut m,
+        &env,
+        "Stand",
+        Ok(action),
+        &mut FakeRng::repeated(0.5, 16),
+    );
+    assert_eq!(
+        tick_image_ref(&mut m, &env).as_deref(),
+        Some("a.png"),
+        "スコープ未設定は先頭 set の定義"
+    );
+
+    // SetB を指定 → b.png / velocity (2,0)
+    factory.set_image_set("SetB");
+    let action = factory
+        .build_action(&ref_child("Stand"))
+        .expect("SetB から構築できる");
+    let mut m = Mascot::new("SetB", image_set_with(&[("b.png", 32, 48)]), (1000, 500));
+    set_action(
+        &mut m,
+        &env,
+        "Stand",
+        Ok(action),
+        &mut FakeRng::repeated(0.5, 16),
+    );
+    assert_eq!(
+        tick_image_ref(&mut m, &env).as_deref(),
+        Some("b.png"),
+        "指定 set の定義が選ばれる"
+    );
+    assert_eq!(
+        m.anchor(),
+        (1002, 500),
+        "SetB の velocity (2,0) が適用される"
+    );
+
+    // 未知 set → 既定集合（先頭 set）へフォールバック
+    factory.set_image_set("NoSuchSet");
+    let action = factory
+        .build_action(&ref_child("Stand"))
+        .expect("未知 set は既定集合で構築できる");
+    let mut m = Mascot::new(
+        "NoSuchSet",
+        image_set_with(&[("a.png", 32, 48)]),
+        (1000, 500),
+    );
+    set_action(
+        &mut m,
+        &env,
+        "Stand",
+        Ok(action),
+        &mut FakeRng::repeated(0.5, 16),
+    );
+    assert_eq!(
+        tick_image_ref(&mut m, &env).as_deref(),
+        Some("a.png"),
+        "未知 set は既定集合へフォールバックする"
+    );
+}
+
+/// 構築の唯一のファネル `build_behavior_direct` がマスコットの image set を
+/// ファクトリへ注入する（= set ごとの定義集合が呼び出し側の指定なしで選ばれる）。
+#[test]
+fn build_behavior_direct_injects_mascot_image_set_into_factory() {
+    let env = SynthEnv::new();
+    let [set_a, set_b] = per_set_actions();
+    let mut factory =
+        XmlBehaviorFactory::from_sets([("SetA".to_string(), set_a), ("SetB".to_string(), set_b)]);
+    let table = single_table("Stand");
+    let mut rng = FakeRng::repeated(0.5, 16);
+    // a.png も持たせて「SetB の定義（b.png）が選ばれた」ことを区別可能にする
+    let mut m = Mascot::new(
+        "SetB",
+        image_set_with(&[("a.png", 32, 48), ("b.png", 32, 48)]),
+        (1000, 500),
+    );
+
+    let runner = table
+        .build_behavior_direct("Stand", &mut factory, &m)
+        .expect("SetB の定義で構築できる");
+    m.set_behavior(
+        Some(runner),
+        &env,
+        &table,
+        &mut FnFactory::constant(make_idle_fallback),
+        &mut rng,
+    )
+    .expect("set_behavior 成功");
+    let mut fallback = FnFactory::constant(make_idle_fallback);
+    m.tick(&env, &table, &mut fallback, &mut rng);
+    assert_eq!(
+        m.image().map(|img| img.image_ref.clone()).as_deref(),
+        Some("b.png"),
+        "マスコットの image set (SetB) の定義が選ばれる"
     );
 }
 

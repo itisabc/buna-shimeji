@@ -694,6 +694,12 @@ impl<'s> Parser<'s> {
                 depth,
             });
         }
+        // 単項 `+`。JS の ToNumber 変換（`+true` → 1）ではなく恒等として扱う。
+        // 実資産の出現 6 件（Nagi / Anzu の InitialVX・TargetX）はいずれも数値に
+        // 適用されるため観測差はない（論理値に適用した場合は後段の型検査で Err）。
+        if self.eat(Sym::Plus) {
+            return self.parse_unary();
+        }
         self.parse_primary()
     }
 

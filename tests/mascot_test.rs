@@ -1153,9 +1153,7 @@ fn build_behavior_builds_named_runner_and_errors_on_unknown() {
         .unwrap();
     assert_eq!(runner.name, "Walk");
 
-    let runner = t
-        .build_behavior_direct("Walk", &mut factory, m.scale())
-        .unwrap();
+    let runner = t.build_behavior_direct("Walk", &mut factory, &m).unwrap();
     assert_eq!(runner.name, "Walk");
 
     match t.build_behavior("Nope", &mut m, &env, &mut factory, &mut rng) {
@@ -1164,7 +1162,7 @@ fn build_behavior_builds_named_runner_and_errors_on_unknown() {
         Err(_) => panic!("エラー種別は UnknownBehavior が期待されます"),
     }
 
-    match t.build_behavior_direct("Nope", &mut factory, m.scale()) {
+    match t.build_behavior_direct("Nope", &mut factory, &m) {
         Err(BehaviorError::UnknownBehavior(n)) => assert_eq!(n, "Nope"),
         Ok(_) => panic!("存在しない Behavior への build_behavior_direct は Err が期待されます"),
         Err(_) => panic!("エラー種別は UnknownBehavior が期待されます"),

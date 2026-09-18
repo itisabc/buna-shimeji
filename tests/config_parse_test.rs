@@ -1195,6 +1195,46 @@ fn real_behaviors_next_lists_and_references() {
 // 合成 XML: 正常系・エラー系
 // =====================================================================
 
+// =====================================================================
+// #32: `<NextBehavior>` 別名（デレマスしめじ v1.9 資産）
+// =====================================================================
+
+/// デレマスしめじ v1.9 の Behavior.xml は `<NextBehavior Add="false">` を 120 箇所で
+/// 使う（Class 名ではなく短縮要素名）。パーサは `NextBehaviorList` /
+/// `NextBehaviourList` しか見ないため、未知の子要素は `_ => {}` で無音に捨てられ、
+/// 遷移が黙って壊れる。US 綴りの短縮形も list として読めること。
+#[test]
+fn synthetic_next_behavior_singular_alias_parses() {
+    let xml = concat!(
+        "<Mascot xmlns=\"http://www.group-finity.com/Mascot\">\n",
+        "<BehaviorList>\n",
+        "  <Behavior Name=\"A\" Frequency=\"1\">\n",
+        "    <NextBehavior Add=\"false\">\n",
+        "      <BehaviorReference Name=\"B\" Frequency=\"7\" />\n",
+        "    </NextBehavior>\n",
+        "  </Behavior>\n",
+        "  <Behavior Name=\"B\" Frequency=\"0\"/>\n",
+        "</BehaviorList></Mascot>\n"
+    );
+    let path = temp_conf("next_behavior_alias", xml);
+    let cfg = parse_behaviors(&path).expect("NextBehavior 別名を読める");
+    let _ = std::fs::remove_file(&path);
+
+    let a = walk_behaviors(&cfg)
+        .into_iter()
+        .find(|(_, b)| b.name == "A")
+        .expect("A が存在する")
+        .1;
+    let next = a
+        .next
+        .as_ref()
+        .expect("NextBehavior が遷移リストとして読まれる（無音破棄されない）");
+    assert!(!next.add, "Add=\"false\" が反映される");
+    assert_eq!(next.references.len(), 1);
+    assert_eq!(next.references[0].name, "B");
+    assert_eq!(next.references[0].frequency, 7);
+}
+
 #[test]
 fn synthetic_bom_and_crlf_actions_parse() {
     // 資産と同じ UTF-8 BOM + CRLF でも壊れないこと

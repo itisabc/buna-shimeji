@@ -50,7 +50,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::config::script::EvalContext;
 use crate::mascot::env::{AreaSlot, AreaState, CursorState};
-use crate::mascot::{EnvironmentView, Rect};
+use crate::mascot::{AffordanceScanEntry, EnvironmentView, Rect};
 
 /// spawn キューの 1 件（Breed 出生要求・Java Breed.java L73-101 相当）。
 /// `behavior_name`:
@@ -250,6 +250,9 @@ pub struct Environment {
     /// #30: 現在 tick 中のマスコット index（保持者スコープ）。pin 窓を activeIE として
     /// 見せるのは `Some(holder)` のときだけ（非保持者隔離・Advisor P0-1）。
     holder_scope: Cell<Option<usize>>,
+    /// #32: ScanMove 用の放送スナップショット。Manager が個体 tick の後に
+    /// [`Environment::set_affordance_scan`] で差し替える（`&self` 更新・RefCell）。
+    affordance_scan: RefCell<Vec<AffordanceScanEntry>>,
     null_ctx: NullEnvCtx,
     /// Settings.java L32-37 / L45 既定値（settings.properties 無しのため既定適用）。
     breeding: bool,
@@ -297,6 +300,7 @@ impl Environment {
             disabled_behaviors: RefCell::new(HashMap::new()),
             pinned: RefCell::new(None),
             holder_scope: Cell::new(None),
+            affordance_scan: RefCell::new(Vec::new()),
             null_ctx: NullEnvCtx,
             breeding: true,
             transients: true,
@@ -615,6 +619,12 @@ impl Environment {
         self.holder_scope.set(holder);
     }
 
+    /// ScanMove 用の放送スナップショットを差し替える（#32）。
+    /// Manager が個体 tick の後に呼ぶため、後続の個体は同 tick の最新状態を見る。
+    pub fn set_affordance_scan(&self, entries: Vec<AffordanceScanEntry>) {
+        *self.affordance_scan.borrow_mut() = entries;
+    }
+
     /// 点 `(x, y)` を含む最前面のトップレベル窓 `(id, rect)` を返す
     /// （[`OsSource::window_at_point`] への passthrough・#30 item 4）。
     /// whitelist / blacklist 非適用の生の窓取得（R12）。Manager の
@@ -851,5 +861,13 @@ impl EnvironmentView for Environment {
             .borrow()
             .get(image_set)
             .is_some_and(|list| list.iter().any(|behavior| behavior == behavior_name))
+    }
+
+    /// ScanMove 用スナップショット（Manager が更新した最新値の clone・#32）。
+    /// `&[T]` を返すには内部 `RefCell` の借用ガードを trait 越しに持ち出す必要があり、
+    /// `unsafe` か `Ref` 型の露出を招くため clone を返す（スナップショットは小型で、
+    /// 呼び出しもスキャン中の個体の 1 tick あたり数回）。
+    fn affordance_scan(&self) -> Vec<AffordanceScanEntry> {
+        self.affordance_scan.borrow().clone()
     }
 }

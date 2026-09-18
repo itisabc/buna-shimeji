@@ -54,7 +54,7 @@ use std::time::{Duration, Instant};
 use crate::app::environment::{Environment, PinnedWindow};
 use crate::app::reload::ReloadMaterial;
 use crate::mascot::behavior::{BehaviorError, BehaviorFactory, BehaviorTable};
-use crate::mascot::{EnvironmentView, Mascot, Rng};
+use crate::mascot::{AffordanceArrival, AffordanceScanEntry, EnvironmentView, Mascot, Rng};
 use crate::render::imageset::ImageSet;
 
 /// image set resolver の型（Java `Main.getConfiguration(imageSet)` 相当の注入点）。
@@ -284,7 +284,32 @@ impl Manager {
             self.mascots.extend(added);
         }
 
-        // ② spawn キュー drain（Java Breed L94 は manager.add() 即時だが
+        // ② 除去反映（Java L217-220 → Rust は remove_pending フラグ一括反映）。
+        //    #32 で drain より前に移した: 新規 mascot の behavior init（ScanMove）が
+        //    放送スナップショットの index を読むため、index 空間を確定させてから
+        //    spawn する必要がある（Java は WeakReference なので順序に依存しない・
+        //    意図的差異 design §1.10 (z-6)）。除去した mascot の除去前 index は
+        //    removed_indices に記録する（#10b-2b・glue の view 同期用。昇順になる）
+        let mut index = 0usize;
+        let mut removed = Vec::new();
+        self.mascots.retain(|mascot| {
+            let keep = !mascot.remove_pending();
+            if !keep {
+                removed.push(index);
+            }
+            index += 1;
+            keep
+        });
+        self.removed_indices.append(&mut removed);
+
+        // ③ #32: 放送スナップショットを「index 確定後」の状態で配る
+        //    （drain の behavior init と同 tick の個体 tick がこの内容を読む。
+        //    以降は各個体 tick の後に更新する）。放送中の個体が居なければ空になり、
+        //    内容は「全個体を再構築した場合」と等価（scan_snapshot の先頭で短絡）。
+        self.environment
+            .set_affordance_scan(Self::scan_snapshot(&self.mascots));
+
+        // ④ spawn キュー drain（Java Breed L94 は manager.add() 即時だが
         //   AGENTS §5-6 により次 tick 一括反映・意図的差異 design §1.8(f)）。
         //   set 不在 / behavior 構築失敗 → log + スキップ（Java Breed L95-99 逐語）。
         //   構築は「要求 set」の table を使う（Java L298
@@ -358,20 +383,7 @@ impl Manager {
             }
         }
 
-        // Java L217-220（removed → Rust は remove_pending フラグ一括反映）。
-        // 除去した mascot の除去前 index を removed_indices に記録する
-        // （#10b-2b・glue の view 同期用。昇順になる）
-        let mut index = 0usize;
-        let mut removed = Vec::new();
-        self.mascots.retain(|mascot| {
-            let keep = !mascot.remove_pending();
-            if !keep {
-                removed.push(index);
-            }
-            index += 1;
-            keep
-        });
-        self.removed_indices.append(&mut removed);
+        // Java L217-220（removed）は上（②）で spawn より前に反映済み（#32）。
 
         // タスク #17: Java Mascot.getTotalCount L986-988 = manager.getCount() の
         // live 参照を再現する。spawn 反映 / 除去反映の後・全員 tick の前に
@@ -402,7 +414,11 @@ impl Manager {
         if !no_mascots {
             let pin = self.environment.pinned_window();
             let env: &dyn EnvironmentView = &self.environment;
-            for mascot in &mut self.mascots {
+            // index ループにするのは、各個体 tick の後にスナップショットを更新するため
+            // （`for mascot in &mut self.mascots` では self.mascots を再借用できない）。
+            // ループ前の内容は ③ で配り済み（index 確定後の状態）。
+            for index in 0..self.mascots.len() {
+                let mascot = &mut self.mascots[index];
                 // #30 item 2: pin 窓を activeIE として見せるのは保持者の tick 中のみ。
                 // 非保持者はグローバルな active window のまま（Advisor P0-1 隔離）。
                 let is_holder = pin.is_some_and(|pin| mascot.pinned_window() == Some(pin.id));
@@ -430,11 +446,7 @@ impl Manager {
                     // #30-9(C): 保持者が飛び降り系行動へ入っていたら、同系統の
                     // 「飛び降りない」行動へ差し替える（30-8b による pin 自動解除を防ぐ）。
                     if let Some(safe) = pin_safe_replacement(mascot.behavior_name()) {
-                        match table.build_behavior_direct(
-                            safe,
-                            self.factory.as_mut(),
-                            mascot.scale(),
-                        ) {
+                        match table.build_behavior_direct(safe, self.factory.as_mut(), mascot) {
                             Ok(runner) => {
                                 log::info!(
                                     "pin guard: replacing jump behavior with `{safe}` (Allowed bypass)"
@@ -475,6 +487,12 @@ impl Manager {
                     }
                 }
                 self.environment.set_holder_scope(None);
+                // #32: 個体 tick の後にスナップショットを更新する。これにより後続の
+                // 個体は同 tick の最新状態を見る（Java の live 走査の観察等価）。
+                // 自個体の affordances は既に ScanMove.tick が消しているため、
+                // スキャン中の個体は自分自身を相手として拾わない（Java と同じ）。
+                self.environment
+                    .set_affordance_scan(Self::scan_snapshot(&self.mascots));
             }
         }
 
@@ -483,6 +501,23 @@ impl Manager {
         self.pin_has_clung = has_clung;
         if request_unpin {
             self.unpin_pinned_window();
+        }
+
+        // #32: ScanMove の到達時要求（自分の Behavior / 相手の Behavior / 向き反転）を
+        // ループ後に適用する。Java は action 内で即時呼び出しするが、action は他個体へ
+        // 触れないため要求を溜めて起点順に適用する（意図的差異・design §1.10）。
+        let arrivals: Vec<(usize, AffordanceArrival)> = self
+            .mascots
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, mascot)| {
+                mascot
+                    .take_affordance_arrival()
+                    .map(|arrival| (index, arrival))
+            })
+            .collect();
+        for (index, arrival) in arrivals {
+            self.apply_affordance_arrival(index, arrival);
         }
         // Java L232-234（mascot.apply ループ）は #10 が [`Manager::apply_all`] で
         // 実施する（Manager 自体は描画しない）
@@ -497,6 +532,132 @@ impl Manager {
     /// #10 が draw + `clear_needs_repaint` を実施できる形）。
     pub fn apply_all(&mut self, apply: impl FnMut(&mut Mascot)) {
         self.mascots.iter_mut().for_each(apply);
+    }
+
+    /// ScanMove 用スナップショットを組む（#32）。index 順 = Java
+    /// `Manager.getMascotWithAffordance` の線形走査順（同順で最初の一致が選ばれる）。
+    ///
+    /// 放送中の個体（affordance 非空）が 1 体も居なければ空を返す（コスト削減・
+    /// red-team R1）。空は「全個体を再構築した場合」と内容が等価（全 entry が
+    /// affordance 空になり、スキャン側の照合はどのみち一致しない）ため、
+    /// 意味を変えずに clone / String alloc を丸ごと省ける。同梱 `conf/` のように
+    /// ScanMove を使わない資産では常にこの短絡経路を通る。
+    fn scan_snapshot(mascots: &[Mascot]) -> Vec<AffordanceScanEntry> {
+        if !mascots
+            .iter()
+            .any(|mascot| !mascot.affordances().is_empty())
+        {
+            return Vec::new();
+        }
+        mascots
+            .iter()
+            .enumerate()
+            .map(|(index, mascot)| AffordanceScanEntry {
+                index,
+                anchor: mascot.anchor(),
+                affordances: mascot.affordances().to_vec(),
+            })
+            .collect()
+    }
+
+    /// ScanMove の到達時要求を Java `ScanMove.tick` L122-137 と同じ順序で適用する:
+    /// 1. 自分の Behavior（L125）— 失敗したら相手には触らない（Java の catch 位置と同じ）
+    /// 2. 相手の Behavior（L127）
+    /// 3. `TargetLook` かつ両者の向きが同じなら相手を反転（L128-130）
+    ///
+    /// index は要求時点のスナップショット値だが、tick 内での削除はループ前のみ・
+    /// spawn は次 tick 反映のため、ループ直後の本適用まで index は安定する。
+    fn apply_affordance_arrival(&mut self, index: usize, arrival: AffordanceArrival) {
+        let env: &dyn EnvironmentView = &self.environment;
+
+        // 1. 自分の Behavior（自分の set の table で構築・Java L125）
+        let Some(set_name) = self
+            .mascots
+            .get(index)
+            .map(|mascot| mascot.image_set_name().to_string())
+        else {
+            return;
+        };
+        let table = table_for(&self.set_tables, &self.table, &set_name);
+        let built = table.build_behavior(
+            &arrival.behavior,
+            &mut self.mascots[index],
+            env,
+            self.factory.as_mut(),
+            self.rng.as_mut(),
+        );
+        match built {
+            Ok(runner) => {
+                if let Err(err) = self.mascots[index].set_behavior(
+                    Some(runner),
+                    env,
+                    table,
+                    self.factory.as_mut(),
+                    self.rng.as_mut(),
+                ) {
+                    log::error!(
+                        r#"scan arrival: failed to set behavior "{}" for mascot #{index}: {err}"#,
+                        arrival.behavior
+                    );
+                    return;
+                }
+            }
+            Err(err) => {
+                log::error!(
+                    r#"scan arrival: failed to build behavior "{}" for mascot #{index}: {err}"#,
+                    arrival.behavior
+                );
+                return;
+            }
+        }
+
+        // 2-3. 相手の Behavior + 向き反転（相手の set の table で構築・Java L127-130）
+        let Some(target_index) = arrival.target_index else {
+            return;
+        };
+        let Some(target_set) = self
+            .mascots
+            .get(target_index)
+            .map(|mascot| mascot.image_set_name().to_string())
+        else {
+            return;
+        };
+        let target_table = table_for(&self.set_tables, &self.table, &target_set);
+        let built = target_table.build_behavior(
+            &arrival.target_behavior,
+            &mut self.mascots[target_index],
+            env,
+            self.factory.as_mut(),
+            self.rng.as_mut(),
+        );
+        match built {
+            Ok(runner) => {
+                if let Err(err) = self.mascots[target_index].set_behavior(
+                    Some(runner),
+                    env,
+                    target_table,
+                    self.factory.as_mut(),
+                    self.rng.as_mut(),
+                ) {
+                    log::error!(
+                        r#"scan arrival: failed to set behavior "{}" for mascot #{target_index}: {err}"#,
+                        arrival.target_behavior
+                    );
+                    return;
+                }
+                // Java L128-130: 自分と相手の向きが同じときだけ相手を反転する
+                let mine = self.mascots[index].look_right();
+                if arrival.flip_look && self.mascots[target_index].look_right() == mine {
+                    self.mascots[target_index].set_look_right(!mine);
+                }
+            }
+            Err(err) => {
+                log::error!(
+                    r#"scan arrival: failed to build behavior "{}" for mascot #{target_index}: {err}"#,
+                    arrival.target_behavior
+                );
+            }
+        }
     }
 
     /// tick の retain で除去した mascot の「除去前 index」を昇順で返し、
@@ -959,7 +1120,7 @@ impl Manager {
         } else {
             "ClimbIEBottom"
         };
-        match table.build_behavior_direct(name, factory, mascot.scale()) {
+        match table.build_behavior_direct(name, factory, mascot) {
             Ok(runner) => {
                 log::info!("pin clamp: forcing behavior `{name}` (Allowed bypass)");
                 if let Err(err) = mascot.set_behavior(Some(runner), env, table, factory, rng) {
@@ -990,6 +1151,15 @@ impl Manager {
             return;
         };
         mascot.dispose();
+    }
+
+    /// 行動構築ファクトリを差し替える（#32）。
+    /// per-set 定義集合（`Actions.xml`）は Reload 素材の一部のため、素材を差し替える
+    /// 場合はファクトリも同じ素材から作り直す必要がある
+    /// （[`XmlBehaviorFactory::from_sets`](crate::mascot::action::factory::XmlBehaviorFactory::from_sets)）。
+    /// 呼び出し責務は wiring（main）で、[`Manager::reload`] の直前に呼ぶ。
+    pub fn set_factory(&mut self, factory: Box<dyn BehaviorFactory>) {
+        self.factory = factory;
     }
 
     /// Reload（タスク #9d）: 全マスコットの画像セット参照付け替え + 行動表の全入れ替え。

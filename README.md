@@ -11,6 +11,10 @@ Java 版（Shimeji-ee / Shimeji-Desktop 系）を参考に、主要なマスコ�
 移植したものの本人が大して詳しくもないのでなんか問題あったら教えてください。
 
 - 挙動: 主要なマスコット挙動を実装済み（アクションの式・定数は Java 版を参考に実装）
+- アフォーダンス: 他個体へ「放送」して相手を探させ、到達したら互いの行動を差し替える
+  Shimeji-ee のアフォーダンス機能（`Broadcast` / `ScanMove`）を実装済み
+- set ごとの設定: `img/<Set>/conf/` → `conf/<Set>/` → `conf/` の順に `Actions.xml` /
+  `Behavior.xml` を解決するため、set ごとに同名アクションでも別の内容を持てます
 - 追加機能（Rust 版独自）: **ウィンドウを掴んで最前面固定**。マスコットをウィンドウにドラッグ&ドロップすると、
   そのウィンドウが最前面に固定され、しめじがぶら下がって窓の移動に追従します。
   最大化中のウィンドウは固定対象外で、固定中にその窓が最大化されたら自動で解除します。
@@ -24,12 +28,14 @@ Java 版（Shimeji-ee / Shimeji-Desktop 系）を参考に、主要なマスコ�
 
 ```text
 conf/            アクション・ビヘイビア定義（Shimeji-ee 互換 XML）
-  actions.xml      アクション定義
-  behaviors.xml    ビヘイビア（行動）定義と頻度
+  actions.xml      アクション定義（set 専用ファイルが無い場合の共通定義）
+  behaviors.xml    ビヘイビア（行動）定義と頻度（同上）
   Mascot.xsd       XML スキーマ（ドキュメント用。実行時の検証には使われない）
+  <SetName>/       set 専用の Actions.xml / Behavior.xml（任意・共通定義より優先）
 img/
   Shimeji/         標準しめじ画像セット（shime1.png〜shime46.png + banner.bmp）
   KuroShimeji/     くろしめじ画像セット（同構成）
+  <SetName>/conf/  set 専用 conf を画像側に置く場合の位置（最優先）
 ```
 
 `conf/`・`img/` の資産は
@@ -45,7 +51,7 @@ cargo run --release     # 実行（exe と同じ場所に conf/ と img/ が必�
 cargo test              # 単体テスト
 ```
 
-現状: 主要挙動の実装は完了（`cargo test` 512/512 PASS、2026-09-13）。
+現状: 主要挙動の実装は完了（`cargo test` 525/525 PASS、2026-09-18）。
 実装済み機能の一覧は [`doc/feature-status.md`](doc/feature-status.md) を参照してください。
 
 ## 対応環境・既知の制限

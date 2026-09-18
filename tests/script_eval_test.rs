@@ -139,6 +139,42 @@ fn unary_minus() {
     assert_eq!(eval_num(&ctx, "-Math.abs(0-7)"), -7.0);
 }
 
+/// 単項 `+`（実資産に 6 出現）。デレマスしめじ v1.9 の Nagi
+/// 「カーソルに近づきジャンプしてグライダー」が
+/// `mascot.lookRight ? +20 : -20` / `+15+Math.random()*5` を使う。
+/// 未対応だと式が Err → 既定値フォールバックになり落下・ジャンプが壊れる。
+#[test]
+fn unary_plus() {
+    let ctx = MockCtx::new();
+    assert_eq!(eval_num(&ctx, "+15"), 15.0);
+    assert_eq!(eval_num(&ctx, "+15-Math.abs(0-5)"), 10.0);
+    assert_eq!(eval_num(&ctx, "+mascot.environment.cursor.x+50"), 350.0);
+    // 三項の両腕に単項 + / - が現れる実資産形（Nagi InitialVX）
+    assert_eq!(eval_num(&ctx, "mascot.lookRight ? +20 : -20"), 20.0);
+    let mut facing_left = MockCtx::new();
+    facing_left.look_right = false;
+    assert_eq!(
+        eval_num(&facing_left, "mascot.lookRight ? +20 : -20"),
+        -20.0
+    );
+    assert_eq!(
+        eval_num(
+            &facing_left,
+            "mascot.lookRight ? +mascot.environment.cursor.x+50 : mascot.environment.cursor.x-50"
+        ),
+        250.0
+    );
+    // Math.random と混在する形（参照実装の InitialVX）
+    let v = eval_num(
+        &ctx,
+        "mascot.lookRight ? +15+Math.random()*5 : -15-Math.random()*5",
+    );
+    assert!(
+        (15.0..20.0).contains(&v),
+        "単項 + 付き三項が有限値へ評価される: {v}"
+    );
+}
+
 #[test]
 fn multiline_and_extra_whitespace_sources() {
     // 資産には物理複数行にまたがる式が 14 件ある（空白・改行を許すこと）

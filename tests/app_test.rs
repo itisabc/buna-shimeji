@@ -111,8 +111,8 @@ use shimeji::app::environment::{Environment, OsSource};
 use shimeji::app::manager::Manager;
 use shimeji::config::script::Variable;
 use shimeji::config::{
-    ActionDef, ActionsConfig, Animation, BehaviorDef, BehaviorEntry, BehaviorsConfig, Pose,
-    SequenceChild, VarMap,
+    ActionDef, ActionsConfig, Animation, BehaviorDef, BehaviorEntry, BehaviorsConfig, BorderType,
+    Pose, SequenceChild, VarMap,
 };
 use shimeji::mascot::action::build_action;
 use shimeji::mascot::behavior::{Action, BehaviorError, BehaviorFactory, BehaviorTable};
@@ -1132,5 +1132,202 @@ fn scheduler_tick_due_and_next_delay_clamps_bursts() {
         Manager::next_delay(Duration::from_millis(100)),
         Duration::from_millis(40),
         "大遅延でも補填なし・次回 40ms 後"
+    );
+}
+
+// =====================================================================
+// #32: ScanMove の Manager 結線（per-set 定義集合 + 到達時の差し替え）
+// =====================================================================
+
+/// 放送（`Affordance`）/ 探索（ScanMove）/ 到達後の 2 行動からなる actions 定義。
+fn scan_fixture_actions() -> ActionsConfig {
+    let mut map = BTreeMap::new();
+    map.insert(
+        "Idle".to_string(),
+        ActionDef::Animate {
+            border: None,
+            attrs: attrs(&[("Affordance", "talk")]),
+            animations: vec![anim(
+                None,
+                false,
+                vec![pose("idle.png", (64, 64), (0, 0), 100)],
+            )],
+        },
+    );
+    map.insert(
+        "Scan".to_string(),
+        ActionDef::Embedded {
+            class: "com.group_finity.mascot.action.ScanMove".to_string(),
+            border: Some(BorderType::Floor),
+            attrs: attrs(&[
+                ("Affordance", "talk"),
+                ("Behavior", "Arrived"),
+                ("TargetBehavior", "Sit"),
+                ("TargetLook", "true"),
+            ]),
+            animations: vec![anim(
+                None,
+                false,
+                vec![pose("walk.png", (64, 64), (-2, 0), 30)],
+            )],
+        },
+    );
+    for name in ["Arrived", "Sit"] {
+        map.insert(
+            name.to_string(),
+            ActionDef::Animate {
+                border: None,
+                attrs: VarMap::new(),
+                animations: vec![anim(
+                    None,
+                    false,
+                    vec![pose("sit.png", (64, 64), (0, 0), 30)],
+                )],
+            },
+        );
+    }
+    ActionsConfig { actions: map }
+}
+
+/// scan_fixture_actions の BehaviorTable（必須 4 種 + Idle / Scan / Arrived / Sit・
+/// すべて frequency 0 = 頻度抽選の候補にならない。behavior は明示指定で設定する）。
+fn scan_fixture_table() -> BehaviorTable {
+    let def = |name: &str| BehaviorDef {
+        name: name.to_string(),
+        frequency: 0,
+        hidden: false,
+        toggleable: false,
+        action: SequenceChild::Ref {
+            name: name.to_string(),
+            attrs: VarMap::new(),
+        },
+        next: None,
+    };
+    BehaviorTable::new(&BehaviorsConfig {
+        entries: [
+            "ChaseMouse",
+            "Fall",
+            "Dragged",
+            "Thrown",
+            "Idle",
+            "Scan",
+            "Arrived",
+            "Sit",
+        ]
+        .iter()
+        .map(|name| BehaviorEntry::Single(def(name)))
+        .collect(),
+    })
+}
+
+/// #32 red-team R2: 同 tick に「低 index の削除」と「ScanMove の spawn（drain の init）」
+/// が重なっても、探索側が正しい相手を見つけられること。
+/// Manager は index 確定（削除反映）→ スナップショット配布 → drain の順で行うため、
+/// init が読む index 空間はループ中と一致する（Java は WeakReference なので順序に
+/// 依存しないが、index 同定の本実装では順序が意味を持つ・design §1.10 (z-6)）。
+#[test]
+fn scan_move_after_lower_index_removal_still_finds_target() {
+    let (env, _state) = single_monitor_env();
+    let mut manager = Manager::new(
+        env,
+        scan_fixture_table(),
+        Box::new(ConfigFactory {
+            actions: scan_fixture_actions(),
+        }),
+        Box::new(BoxedRng {
+            values: vec![0.5; 128],
+            consumed: 0,
+        }),
+    );
+    manager.set_exit_on_last_removed(false);
+    manager.set_image_set_resolver(single_set_resolver("TestSet", empty_image_set("TestSet")));
+
+    // [0] 削除予定（放送しない） / [1] 放送側
+    spawn_into(&mut manager, "TestSet", (500, 1040), false, "Arrived");
+    spawn_into(&mut manager, "TestSet", (996, 1040), false, "Idle");
+    manager.tick(Instant::now());
+
+    // 同じ tick で [0] を削除しつつ探索側を spawn する（放送側は index 1 → 0 へ詰まる）
+    manager.dismiss_at(0);
+    spawn_into(&mut manager, "TestSet", (1000, 1040), false, "Scan");
+    manager.tick(Instant::now());
+
+    let mut states: Vec<(Option<String>, (i32, i32))> = Vec::new();
+    manager.apply_all(|m| states.push((m.behavior_name().map(str::to_string), m.anchor())));
+    assert_eq!(states.len(), 2, "削除 1 体 + spawn 1 体");
+    let (_, anchor) = states
+        .iter()
+        .find(|(behavior, _)| behavior.as_deref() == Some("Scan"))
+        .expect("探索側が残っている");
+    assert_eq!(
+        *anchor,
+        (998, 1040),
+        "index が詰まっても init が相手を見つけて移動する（見つからなければ 1000 のまま）"
+    );
+}
+
+/// ScanMove の統合契約（Manager 結線）: 放送中の個体へ近づき、到達した tick で
+/// Java `ScanMove.tick` L122-137 と同じ順序（自分 → 相手 → 向き反転）で両者の
+/// Behavior が差し替わる。読みは Manager が更新するスナップショット、書きは
+/// ループ後の一括適用（意図的差異）を通る。
+#[test]
+fn scan_move_arrival_swaps_both_behaviors_through_manager() {
+    let (env, _state) = single_monitor_env();
+    let mut manager = Manager::new(
+        env,
+        scan_fixture_table(),
+        Box::new(ConfigFactory {
+            actions: scan_fixture_actions(),
+        }),
+        Box::new(BoxedRng {
+            values: vec![0.5; 128],
+            consumed: 0,
+        }),
+    );
+    manager.set_exit_on_last_removed(false);
+    manager.set_image_set_resolver(single_set_resolver("TestSet", empty_image_set("TestSet")));
+
+    // 放送側（index 0・静止）を先に 1 tick 動かして affordance を放送させる
+    spawn_into(&mut manager, "TestSet", (996, 1040), false, "Idle");
+    manager.tick(Instant::now());
+
+    // 探索側（index 1）は init 時点でスナップショットから相手を見つける
+    spawn_into(&mut manager, "TestSet", (1000, 1040), false, "Scan");
+    manager.tick(Instant::now());
+    let mut after_first: Vec<((i32, i32), Option<String>)> = Vec::new();
+    manager.apply_all(|m| after_first.push((m.anchor(), m.behavior_name().map(str::to_string))));
+    assert_eq!(
+        after_first[1],
+        ((998, 1040), Some("Scan".to_string())),
+        "相手方向（-2px/tick）へ移動し、到達前は差し替えない"
+    );
+
+    manager.tick(Instant::now());
+    let mut final_state: Vec<((i32, i32), Option<String>, bool)> = Vec::new();
+    manager.apply_all(|m| {
+        final_state.push((
+            m.anchor(),
+            m.behavior_name().map(str::to_string),
+            m.look_right(),
+        ))
+    });
+    assert_eq!(
+        final_state[1].0,
+        (996, 1040),
+        "放送側の anchor で停止する（overshoot クランプ）"
+    );
+    assert_eq!(
+        final_state[1].1.as_deref(),
+        Some("Arrived"),
+        "到達で自分の Behavior が `Behaviour` 属性へ差し替わる"
+    );
+    assert_eq!(
+        final_state[0].1.as_deref(),
+        Some("Sit"),
+        "同時に相手の Behavior が `TargetBehaviour` 属性へ差し替わる"
+    );
+    assert!(
+        final_state[0].2,
+        "TargetLook=true で両者の向きが同じとき相手を反転する"
     );
 }

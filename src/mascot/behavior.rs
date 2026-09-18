@@ -119,6 +119,13 @@ pub trait BehaviorFactory {
     /// [`Mascot::scale`] を渡す。XML 資産駆動の実装がこれを構築時
     /// [`scale_pose`](crate::render::imageset::scale_pose) に反映する。
     fn set_scale(&mut self, _scale: f64) {}
+
+    /// 構築に使う action 定義集合（image set）を設定する（既定は no-op）。
+    /// [`BehaviorTable::build_behavior_direct`] が構築前にマスコットの
+    /// [`Mascot::image_set_name`] を渡す。set ごとに `Actions.xml` を持つ資産
+    /// （デレマスしめじ v1.9 等）では同名 Action でも内容が異なるため、
+    /// XML 資産駆動の実装がこれを定義集合の選択に使う。
+    fn set_image_set(&mut self, _image_set: &str) {}
 }
 
 /// next() 内部の流れ制御（Java next の catch 節の対応を明示するための内部表現）。
@@ -261,8 +268,7 @@ impl BehaviorRunner {
             Err(NextFlow::LostGround) => {
                 mascot.set_cursor_position(None);
                 mascot.set_dragging(false);
-                let fall =
-                    table.build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot.scale())?;
+                let fall = table.build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot)?;
                 set_behavior_and_init(fall, mascot, env, table, factory, rng)
             }
         }
@@ -333,7 +339,7 @@ impl BehaviorRunner {
                     log::info!("moved offscreen ({bounds_x}, {bounds_y})");
                     reposition_above_area(mascot, env, rng);
                     let fall = table
-                        .build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot.scale())
+                        .build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot)
                         .map_err(NextFlow::Fatal)?;
                     set_behavior_and_init(fall, mascot, env, table, factory, rng)
                         .map_err(NextFlow::Fatal)?;
@@ -386,8 +392,7 @@ impl BehaviorRunner {
 
         // Java L279-286: ドラッグ開始
         if !handled {
-            let dragged =
-                table.build_behavior_direct(BEHAVIORNAME_DRAGGED, factory, mascot.scale())?;
+            let dragged = table.build_behavior_direct(BEHAVIORNAME_DRAGGED, factory, mascot)?;
             set_behavior_and_init(dragged, mascot, env, table, factory, rng)?;
         }
         Ok(())
@@ -408,8 +413,7 @@ impl BehaviorRunner {
         // ドラッグ中でなければ何もしない（Java コメント踏襲）
         if mascot.is_dragging() {
             mascot.set_dragging(false);
-            let thrown =
-                table.build_behavior_direct(BEHAVIORNAME_THROWN, factory, mascot.scale())?;
+            let thrown = table.build_behavior_direct(BEHAVIORNAME_THROWN, factory, mascot)?;
             set_behavior_and_init(thrown, mascot, env, table, factory, rng)?;
         }
         Ok(())
@@ -559,14 +563,14 @@ impl BehaviorTable {
             for (name, frequency) in &candidates {
                 random -= *frequency as f64;
                 if random < 0.0 {
-                    return self.build_behavior_direct(name, factory, mascot.scale());
+                    return self.build_behavior_direct(name, factory, mascot);
                 }
             }
         }
 
         // Java L517-523: 候補無し → 再配置して Fall へ
         reposition_above_area(mascot, env, rng);
-        self.build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot.scale())
+        self.build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot)
     }
 
     /// 名前で Behavior を構築する（Java Configuration.buildBehavior(name, mascot)
@@ -588,24 +592,28 @@ impl BehaviorTable {
             return Err(BehaviorError::UnknownBehavior(name.to_string()));
         };
         if Self::is_behavior_enabled(row, mascot.image_set_name(), env) {
-            self.build_behavior_direct(name, factory, mascot.scale())
+            self.build_behavior_direct(name, factory, mascot)
         } else {
             log::warn!("Behavior `{name}` is disabled; falling back to Fall");
             reposition_above_area(mascot, env, rng);
-            self.build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot.scale())
+            self.build_behavior_direct(BEHAVIORNAME_FALL, factory, mascot)
         }
     }
 
     /// 名前で Behavior を構築する（Java Configuration.buildBehavior(name) L566-573 逐語）。
-    /// 構築前に `factory.set_scale(scale)` を適用する（per-set scale を
-    /// 構築時 [`scale_pose`](crate::render::imageset::scale_pose) へ伝える）。
+    /// 構築前に `factory.set_scale(scale)` / `factory.set_image_set(set)` を適用する
+    /// （per-set scale を構築時 [`scale_pose`](crate::render::imageset::scale_pose) へ、
+    /// per-set 定義集合を同名 Action の解決へ伝える）。マスコットを受け取るのは
+    /// この 2 つのスコープがどちらもマスコット由来（`scale()` / `image_set_name()`）
+    /// のため（構築の唯一のファネルなので、ここで設定すれば全経路で整合する）。
     pub fn build_behavior_direct(
         &self,
         name: &str,
         factory: &mut dyn BehaviorFactory,
-        scale: f64,
+        mascot: &Mascot,
     ) -> Result<BehaviorRunner, BehaviorError> {
-        factory.set_scale(scale);
+        factory.set_scale(mascot.scale());
+        factory.set_image_set(mascot.image_set_name());
         let row = self
             .find(name)
             .ok_or_else(|| BehaviorError::UnknownBehavior(name.to_string()))?;
