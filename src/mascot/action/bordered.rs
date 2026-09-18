@@ -20,7 +20,9 @@ use super::super::animation::{
 };
 use super::super::behavior::ActionError;
 use super::super::env::{self, BorderRef};
-use super::super::{AffordanceArrival, EnvironmentView, Mascot, MascotContext, Rng};
+use super::super::{
+    AffordanceArrival, EnvironmentView, Mascot, MascotContext, Rng, TransformRequest,
+};
 use super::{Base, FallAction};
 use crate::mascot::behavior::Action;
 use crate::render::imageset::java_round;
@@ -183,6 +185,128 @@ impl Action for AnimateAction {
         _rng: &mut dyn Rng,
     ) -> Result<bool, ActionError> {
         self.bordered.base.draggable(mascot, env)
+    }
+}
+
+// =====================================================================
+// Transform（Java Transform.java L19-62 相当・Animate 派生）
+// =====================================================================
+
+/// Java 定数は UK 綴り `TransformBehaviour` だが実 XML（デレマスしめじ v1.9）は
+/// US 綴り `TransformBehavior` を使うため、実資産に合わせて US を読む
+/// （ScanMove の `PARAM_BEHAVIOR` と同じ判断）。UK 綴りが来た場合のフォールバックも持つ。
+const PARAM_TRANSFORM_BEHAVIOR: &str = "TransformBehavior";
+const PARAM_TRANSFORM_BEHAVIOUR: &str = "TransformBehaviour";
+/// TransformMascot は Java 定数も実 XML も同綴り。
+const PARAM_TRANSFORM_MASCOT: &str = "TransformMascot";
+
+/// アニメ最終フレーム到達時に画像セットと Behavior を差し替える（Java `Transform`）。
+/// 差し替え自体は Manager がループ後に適用する（[`TransformRequest`]・意図的差異）。
+pub(crate) struct TransformAction {
+    animate: AnimateAction,
+}
+
+impl TransformAction {
+    pub(crate) fn new(
+        attrs: crate::config::VarMap,
+        animations: Vec<super::Animation>,
+    ) -> TransformAction {
+        TransformAction {
+            animate: AnimateAction::new(attrs, animations),
+        }
+    }
+
+    /// Java Transform.tick L33-42 逐語:
+    /// `transformation` 許可時のみ、`getTime() == animation.getDuration() - 1
+    /// || animation.getDuration() == 1` で transform()。
+    fn maybe_transform(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+    ) -> Result<(), ActionError> {
+        if !env.transformation_allowed() {
+            return Ok(());
+        }
+        let time = self.animate.bordered.base.get_time(mascot);
+        let duration = self
+            .animate
+            .bordered
+            .base
+            .get_animation(mascot, env)?
+            .map(animation_duration);
+        // Java は getAnimation() が null なら NPE だが、animate_tick が既に
+        // 有効アニメ不在を Err にしているため None はここでは通常到達しない。
+        let Some(duration) = duration else {
+            return Ok(());
+        };
+        if time != duration - 1 && duration != 1 {
+            return Ok(());
+        }
+        // Java getTransformMascot/getTransformBehaviour: 既定は ""（自分の set / 空 Behavior）。
+        let image_set = self
+            .animate
+            .bordered
+            .base
+            .text_attr(PARAM_TRANSFORM_MASCOT)
+            .unwrap_or_default();
+        let behavior = self
+            .animate
+            .bordered
+            .base
+            .text_attr(PARAM_TRANSFORM_BEHAVIOR)
+            .or_else(|| {
+                self.animate
+                    .bordered
+                    .base
+                    .text_attr(PARAM_TRANSFORM_BEHAVIOUR)
+            })
+            .unwrap_or_default();
+        mascot.request_transform(TransformRequest {
+            image_set,
+            behavior,
+        });
+        Ok(())
+    }
+}
+
+impl Action for TransformAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.animate.init(mascot, env, rng)
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java Transform は hasNext を override しない（Animate のもの）
+        self.animate.has_next(mascot, env, rng)
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        // Java Transform.tick: super.tick()（= Animate.tick）→ 変身判定
+        self.animate.next(mascot, env, rng)?;
+        self.maybe_transform(mascot, env)
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.animate.is_draggable(mascot, env, rng)
     }
 }
 
@@ -450,7 +574,7 @@ impl Action for MoveAction {
         env: &dyn EnvironmentView,
         _rng: &mut dyn Rng,
     ) -> Result<bool, ActionError> {
-        // Java L36-54 逐語
+        // Java Move L36-54 の骨格（base_has_next → turning → target 判定）
         if !self.bordered.base.base_has_next(mascot, env)? {
             return Ok(false);
         }
@@ -465,9 +589,19 @@ impl Action for MoveAction {
             .bordered
             .base
             .num_attr(mascot, env, "TargetY", DEFAULT_TARGET_Y)?;
+        let aim_x = target_x != DEFAULT_TARGET_X;
+        let aim_y = target_y != DEFAULT_TARGET_Y;
+        if !aim_x && !aim_y {
+            // target 両方省略。Java L48-53 は false（即終了）だが、デレマス資産は
+            // 「target 無し Move + Duration 明示」をその場アニメ / その場移動として
+            // 使う（`うさぎ` / `うつぶせ` / 会話系 `Walk` 等・実測 22 箇所）。
+            // Duration 明示時のみ継続し、終了は冒頭の base_has_next（time < Duration）が
+            // 担う。未指定は Java 同様の即終了（新規挙動ゼロ）。
+            // 意図的差異・design §1.10 (z-8)。
+            return Ok(self.bordered.base.attrs.contains_key("Duration"));
+        }
         let anchor = mascot.anchor();
-        Ok((target_x != DEFAULT_TARGET_X && anchor.0 != target_x)
-            || (target_y != DEFAULT_TARGET_Y && anchor.1 != target_y))
+        Ok((aim_x && anchor.0 != target_x) || (aim_y && anchor.1 != target_y))
     }
 
     fn next(

@@ -34,8 +34,8 @@ use std::sync::Arc;
 
 use shimeji::config::script::{EvalContext, Variable};
 use shimeji::config::{
-    parse_actions, ActionDef, ActionsConfig, Animation, BehaviorDef, BehaviorEntry, BorderType,
-    Pose, SequenceChild, VarMap,
+    parse_actions, ActionDef, ActionsConfig, Animation, BehaviorDef, BehaviorEntry, BehaviorRef,
+    BehaviorsConfig, BorderType, NextBehaviorList, Pose, SequenceChild, VarMap,
 };
 use shimeji::mascot::action::{build_action, create, fqn_to_kind, ActionKind};
 use shimeji::mascot::behavior::{
@@ -437,6 +437,7 @@ fn single_table(name: &str, frequency: i32) -> BehaviorTable {
             },
             next: None,
         })],
+        ..Default::default()
     })
 }
 
@@ -645,10 +646,10 @@ fn refresh_hotspots_cleared_on_animation_condition_error() {
     assert!(m.remove_pending(), "Eval エラーは dispose 経路に伝播する");
 }
 
-/// stub 12 種: has_next=false で即完了 + 警告ログ（design §1.8(a)）。
+/// stub 11 種: has_next=false で即完了 + 警告ログ（design §1.8(a)）。
 #[test]
 fn stub_kinds_complete_immediately() {
-    let stub_kinds: [ActionKind; 12] = [
+    let stub_kinds: [ActionKind; 11] = [
         ActionKind::ScanJump,
         ActionKind::ScanInteract,
         ActionKind::ComplexMove,
@@ -660,7 +661,6 @@ fn stub_kinds_complete_immediately() {
         ActionKind::Mute,
         ActionKind::MoveWithTurn,
         ActionKind::Turn,
-        ActionKind::Transform,
     ];
     for kind in stub_kinds {
         let mut action = create(kind, &attrs(&[]), vec![], 1.0).unwrap();
@@ -673,6 +673,181 @@ fn stub_kinds_complete_immediately() {
             "stub は 1 tick も続けてはいけない"
         );
     }
+}
+
+// =====================================================================
+// #33: Transform（Java Transform.java L19-62・Animate 派生）
+// =====================================================================
+
+/// Java Transform.tick L33-42: アニメ最終フレーム（`getTime() == duration - 1`）で
+/// 変身を要求する。許可設定（settings.transformation）が false なら要求しない。
+#[test]
+fn transform_requests_on_last_frame_and_respects_permission() {
+    let attrs = attrs(&[
+        ("TransformMascot", "Nagi"),
+        ("TransformBehavior", "なーぬい変化"),
+    ]);
+    let anims = vec![anim(None, false, vec![pose("x.png", (0, 0), (0, 0), 3)])];
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    // transformation = true: duration 3 → time 0 / 1 では要求せず、time 2 で要求する
+    let env = SynthEnv::new();
+    let mut m = mascot_at((100, 500));
+    let mut rng = FakeRng::repeated(0.5, 16);
+    set_action(
+        &mut m,
+        &env,
+        "X",
+        create(ActionKind::Transform, &attrs, anims.clone(), 1.0),
+        &mut rng,
+    )
+    .unwrap();
+    m.tick(&env, &table, &mut factory, &mut rng); // time 0
+    assert!(m.take_transform_request().is_none());
+    m.tick(&env, &table, &mut factory, &mut rng); // time 1
+    assert!(m.take_transform_request().is_none());
+    m.tick(&env, &table, &mut factory, &mut rng); // time 2 == duration - 1
+    let request = m
+        .take_transform_request()
+        .expect("最終フレームで変身要求が積まれる");
+    assert_eq!(request.image_set, "Nagi");
+    assert_eq!(request.behavior, "なーぬい変化");
+
+    // transformation = false → 最終フレームでも要求しない
+    let mut env_off = SynthEnv::new();
+    env_off.transformation = false;
+    let mut m = mascot_at((100, 500));
+    set_action(
+        &mut m,
+        &env_off,
+        "X",
+        create(ActionKind::Transform, &attrs, anims, 1.0),
+        &mut rng,
+    )
+    .unwrap();
+    for _ in 0..3 {
+        m.tick(&env_off, &table, &mut factory, &mut rng);
+    }
+    assert!(
+        m.take_transform_request().is_none(),
+        "settings.transformation = false では変身しない"
+    );
+}
+
+/// Java Transform.tick L38: `animation.getDuration() == 1` は初回 tick で変身する。
+#[test]
+fn transform_with_duration_one_fires_on_first_tick() {
+    let env = SynthEnv::new();
+    let attrs = attrs(&[
+        ("TransformMascot", "Nagi"),
+        ("TransformBehavior", "Arrived"),
+    ]);
+    let anims = vec![anim(None, false, vec![pose("x.png", (0, 0), (0, 0), 1)])];
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+    let mut m = mascot_at((100, 500));
+    let mut rng = FakeRng::repeated(0.5, 8);
+    set_action(
+        &mut m,
+        &env,
+        "X",
+        create(ActionKind::Transform, &attrs, anims, 1.0),
+        &mut rng,
+    )
+    .unwrap();
+
+    m.tick(&env, &table, &mut factory, &mut rng); // time 0
+    let request = m
+        .take_transform_request()
+        .expect("duration == 1 は初回 tick で変身要求");
+    assert_eq!(request.image_set, "Nagi");
+    assert_eq!(request.behavior, "Arrived");
+}
+
+// =====================================================================
+// #34: target 無し Move + Duration（design §1.10 (z-8)）
+// =====================================================================
+
+/// `X` →（完了時）`Y` の 2 行テーブル（Duration 到達で遷移したことを観測するため）。
+fn x_then_y_table() -> BehaviorTable {
+    let ref_child = |name: &str| SequenceChild::Ref {
+        name: name.to_string(),
+        attrs: VarMap::new(),
+    };
+    BehaviorTable::new(&BehaviorsConfig {
+        entries: vec![
+            BehaviorEntry::Single(BehaviorDef {
+                name: "X".to_string(),
+                frequency: 1,
+                hidden: false,
+                toggleable: false,
+                action: ref_child("X"),
+                next: Some(NextBehaviorList {
+                    add: false,
+                    references: vec![BehaviorRef {
+                        name: "Y".to_string(),
+                        frequency: 1,
+                        condition: None,
+                    }],
+                }),
+            }),
+            BehaviorEntry::Single(BehaviorDef {
+                name: "Y".to_string(),
+                frequency: 1,
+                hidden: false,
+                toggleable: false,
+                action: ref_child("Y"),
+                next: None,
+            }),
+        ],
+        ..Default::default()
+    })
+}
+
+/// target 無し Move に `Duration` を明示すると、Java（即終了）と違い Duration まで
+/// 継続し、ちょうど Duration tick で完了して次行動へ遷移する（design §1.10 (z-8)）。
+#[test]
+fn move_without_target_with_duration_runs_until_duration() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+    let table = x_then_y_table();
+    let mut m = mascot_at((100, 500));
+    let action = create(
+        ActionKind::Move,
+        &attrs(&[("Duration", "3")]),
+        vec![anim(None, false, vec![pose("p.png", (64, 64), (2, 0), 30)])],
+        1.0,
+    )
+    .unwrap();
+    m.set_behavior(
+        Some(BehaviorRunner::new("X", action)),
+        &env,
+        &table,
+        &mut factory,
+        &mut rng,
+    )
+    .unwrap();
+
+    // time 0 / 1 / 2 は継続し、velocity が各 tick 適用される
+    for tick in 0..3 {
+        assert_eq!(m.behavior_name(), Some("X"), "time {tick} は X のまま継続");
+        m.tick(&env, &table, &mut factory, &mut rng);
+    }
+    assert_eq!(
+        m.anchor(),
+        (100 + 2 * 3, 500),
+        "Duration=3 の 3 tick 分だけその場移動する（velocity 適用）"
+    );
+
+    // time 3 == Duration → 完了して次行動 Y へ
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(
+        m.behavior_name(),
+        Some("Y"),
+        "Duration 到達で完了し次行動へ遷移する"
+    );
 }
 
 /// 未知 Embedded FQN は fail-fast（Java ActionBuilder L194-206 踏襲）。

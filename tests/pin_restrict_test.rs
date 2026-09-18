@@ -289,7 +289,10 @@ fn row(name: &str, frequency: i32) -> BehaviorEntry {
 }
 
 fn table(entries: Vec<BehaviorEntry>) -> BehaviorTable {
-    BehaviorTable::new(&BehaviorsConfig { entries })
+    BehaviorTable::new(&BehaviorsConfig {
+        entries,
+        ..Default::default()
+    })
 }
 
 /// 差し替え判定・差し替え先構築・clamp のいずれもが名前で引ける表。

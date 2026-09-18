@@ -278,7 +278,10 @@ fn row(name: &str, frequency: i32) -> BehaviorEntry {
 }
 
 fn table(entries: Vec<BehaviorEntry>) -> BehaviorTable {
-    BehaviorTable::new(&BehaviorsConfig { entries })
+    BehaviorTable::new(&BehaviorsConfig {
+        entries,
+        ..Default::default()
+    })
 }
 
 /// no_mascots で exit_flag を立てない構成（既存流儀踏襲）。

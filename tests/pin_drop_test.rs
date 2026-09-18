@@ -380,7 +380,10 @@ fn row(name: &str, frequency: i32) -> BehaviorEntry {
 }
 
 fn table(entries: Vec<BehaviorEntry>) -> BehaviorTable {
-    BehaviorTable::new(&BehaviorsConfig { entries })
+    BehaviorTable::new(&BehaviorsConfig {
+        entries,
+        ..Default::default()
+    })
 }
 
 /// Idle + 下端掴み 3 種（clamp の強制遷移先が構築可能な table）。

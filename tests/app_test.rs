@@ -356,6 +356,7 @@ fn fixture_table() -> BehaviorTable {
             BehaviorEntry::Single(def("Walk")),
             BehaviorEntry::Single(def("Stare")),
         ],
+        ..Default::default()
     })
 }
 
@@ -1217,6 +1218,7 @@ fn scan_fixture_table() -> BehaviorTable {
         .iter()
         .map(|name| BehaviorEntry::Single(def(name)))
         .collect(),
+        ..Default::default()
     })
 }
 

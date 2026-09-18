@@ -285,7 +285,10 @@ fn row(name: &str, frequency: i32) -> BehaviorEntry {
 }
 
 fn table(entries: Vec<BehaviorEntry>) -> BehaviorTable {
-    BehaviorTable::new(&BehaviorsConfig { entries })
+    BehaviorTable::new(&BehaviorsConfig {
+        entries,
+        ..Default::default()
+    })
 }
 
 /// 下端掴み 3 種 + Fall / Thrown + Idle を含む表（clamp と 30-8b の両方が構築可能）。

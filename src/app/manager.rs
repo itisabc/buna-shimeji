@@ -54,7 +54,9 @@ use std::time::{Duration, Instant};
 use crate::app::environment::{Environment, PinnedWindow};
 use crate::app::reload::ReloadMaterial;
 use crate::mascot::behavior::{BehaviorError, BehaviorFactory, BehaviorTable};
-use crate::mascot::{AffordanceArrival, AffordanceScanEntry, EnvironmentView, Mascot, Rng};
+use crate::mascot::{
+    AffordanceArrival, AffordanceScanEntry, EnvironmentView, Mascot, Rng, TransformRequest,
+};
 use crate::render::imageset::ImageSet;
 
 /// image set resolver の型（Java `Main.getConfiguration(imageSet)` 相当の注入点）。
@@ -519,6 +521,24 @@ impl Manager {
         for (index, arrival) in arrivals {
             self.apply_affordance_arrival(index, arrival);
         }
+
+        // #33: Transform の変身要求（画像セット差し替え + 変身先 Behavior 構築）を
+        // ループ後に適用する。Java は action 内で setImageSet / setBehavior を直接
+        // 呼ぶが、action は resolver / 他 set の table を持たないため要求を溜める
+        // （意図的差異・design §1.10）。
+        let transforms: Vec<(usize, TransformRequest)> = self
+            .mascots
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, mascot)| {
+                mascot
+                    .take_transform_request()
+                    .map(|request| (index, request))
+            })
+            .collect();
+        for (index, request) in transforms {
+            self.apply_transform(index, request);
+        }
         // Java L232-234（mascot.apply ループ）は #10 が [`Manager::apply_all`] で
         // 実施する（Manager 自体は描画しない）
 
@@ -657,6 +677,79 @@ impl Manager {
                     arrival.target_behavior
                 );
             }
+        }
+    }
+
+    /// Transform の変身要求を適用する（Java `Transform.transform` L44-54 相当・#33）:
+    /// 1. 変身先 set を決める（Java L45: `configuration(TransformMascot) != null ?
+    ///    TransformMascot : mascot.getImageSet()`）。空 / 未解決は自分の set のまま。
+    /// 2. 解決できた場合のみ [`Mascot::rebind_image_set`] で画像セットを差し替える
+    ///    （Java の `setImageSet` は `buildBehavior` より先）。
+    /// 3. 差し替え後 set の table で `TransformBehavior` を構築して `setBehavior`
+    ///    （Java L49）。
+    ///
+    /// 構築失敗は log + 現状の Behavior 維持（マスコットは生存・Java L50-53 の
+    /// catch + showError 相当）。画像セットは Java 同様に差し替え済みのまま残す。
+    fn apply_transform(&mut self, index: usize, request: TransformRequest) {
+        let env: &dyn EnvironmentView = &self.environment;
+        let own_set = self.mascots[index].image_set_name().to_string();
+
+        // 1. 変身先 set の決定（空 / resolver 未解決は自分の set）
+        let resolved = if request.image_set.is_empty() || request.image_set == own_set {
+            None
+        } else {
+            self.resolver.as_mut().and_then(|r| r(&request.image_set))
+        };
+        let (target_name, target_image_set) = match resolved {
+            Some(arc) => (request.image_set.clone(), Some(arc)),
+            None if request.image_set.is_empty() || request.image_set == own_set => {
+                (own_set.clone(), None)
+            }
+            None => {
+                // Java: configuration(TransformMascot) == null → 自分の set を使う
+                log::warn!(
+                    "transform: could not resolve image set `{}` for mascot #{index}; keeping `{own_set}`",
+                    request.image_set
+                );
+                (own_set.clone(), None)
+            }
+        };
+
+        // 2. 画像セット差し替え（解決できた場合のみ）
+        if let Some(arc) = target_image_set {
+            self.mascots[index].rebind_image_set(target_name.clone(), arc);
+        }
+
+        // 3. 変身先 set の table で Behavior を構築して設定
+        let table = table_for(&self.set_tables, &self.table, &target_name);
+        let built = table.build_behavior(
+            &request.behavior,
+            &mut self.mascots[index],
+            env,
+            self.factory.as_mut(),
+            self.rng.as_mut(),
+        );
+        let runner = match built {
+            Ok(runner) => runner,
+            Err(err) => {
+                log::error!(
+                    r#"transform: failed to build behavior "{}" for mascot #{index}: {err}"#,
+                    request.behavior
+                );
+                return;
+            }
+        };
+        if let Err(err) = self.mascots[index].set_behavior(
+            Some(runner),
+            env,
+            table,
+            self.factory.as_mut(),
+            self.rng.as_mut(),
+        ) {
+            log::error!(
+                r#"transform: failed to set behavior "{}" for mascot #{index}: {err}"#,
+                request.behavior
+            );
         }
     }
 

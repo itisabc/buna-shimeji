@@ -263,7 +263,10 @@ fn row_entry(name: &str, frequency: i32) -> BehaviorEntry {
 }
 
 fn table(entries: Vec<BehaviorEntry>) -> BehaviorTable {
-    BehaviorTable::new(&BehaviorsConfig { entries })
+    BehaviorTable::new(&BehaviorsConfig {
+        entries,
+        ..Default::default()
+    })
 }
 
 /// `Idle` + `Dragged`（mouse_pressed が Dragged を構築できる最小 table）。

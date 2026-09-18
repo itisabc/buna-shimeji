@@ -27,7 +27,9 @@
 use super::env::resolve_work_area;
 use super::{EnvironmentView, Mascot, MascotContext, Rng};
 use crate::config::script::{EvalContext, EvalError, EvalValue, Variable, Variables};
-use crate::config::{BehaviorEntry, BehaviorRef, BehaviorsConfig, NextBehaviorList, SequenceChild};
+use crate::config::{
+    BehaviorEntry, BehaviorRef, BehaviorsConfig, NextBehaviorList, SequenceChild, VarMap,
+};
 
 /// Java UserBehavior.BEHAVIORNAME_FALL 相当。
 const BEHAVIORNAME_FALL: &str = "Fall";
@@ -439,6 +441,10 @@ pub struct BehaviorRow {
 #[derive(Debug, Clone)]
 pub struct BehaviorTable {
     pub rows: Vec<BehaviorRow>,
+    /// Mascot 直下の定数（Java `Configuration.constants`）。行動条件の評価で
+    /// 識別子として解決される（[`build_next_behavior`](Self::build_next_behavior) の
+    /// context へ注入）。値は構築時に `Variable::parse` 済み。
+    pub constants: VarMap,
 }
 
 impl BehaviorTable {
@@ -446,6 +452,14 @@ impl BehaviorTable {
     /// Group は配下の behaviors を全て行に展開し、Group の conditions を AND 積み上げ。
     /// Single は conditions 空でフラット化。
     pub fn new(config: &BehaviorsConfig) -> Self {
+        // 定数は行動条件の文脈で識別子として解決する（Java Configuration.java
+        // L461-462 の context.putAll(constants) 相当）。値の型は
+        // `Variable::parse` の規則（true/false → Bool、数値 → Number、他 → Text）。
+        let constants: VarMap = config
+            .constants
+            .iter()
+            .map(|(name, value)| (name.clone(), Variable::parse(value)))
+            .collect();
         let mut rows = Vec::new();
         for entry in &config.entries {
             match entry {
@@ -476,7 +490,7 @@ impl BehaviorTable {
                 }),
             }
         }
-        BehaviorTable { rows }
+        BehaviorTable { rows, constants }
     }
 
     /// 名前で行を探す（XML 順の線形走査。Java getBehaviorBuilders().get(name) 相当）。
@@ -516,6 +530,9 @@ impl BehaviorTable {
             env,
         };
         let mut vars = Variables::new();
+        // Java Configuration.buildNextBehavior L460-464 逐語: 定数を先に context へ
+        // 載せる（mascot.* は識別子解決側で優先されるため定数に上書きされない）。
+        vars.set_attrs(self.constants.clone());
 
         let mut candidates: Vec<(&str, i64)> = Vec::new();
         let mut total_frequency = 0i64;

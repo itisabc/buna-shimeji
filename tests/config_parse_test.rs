@@ -1380,6 +1380,39 @@ fn synthetic_pose_missing_required_attrs_error() {
 }
 
 #[test]
+fn synthetic_constant_definitions_parse_ja_and_en() {
+    let xml = concat!(
+        "<Mascot xmlns=\"http://www.group-finity.com/Mascot\">\n",
+        "  <Constant Name=\"speed\" Value=\"3\"/>\n",
+        "  <定数 Name=\"maxCount\" 値=\"5\" />\n",
+        "  <Constant Name=\"flag\" Value=\"true\"/>\n",
+        "<BehaviorList>\n",
+        "<Behavior Name=\"A\" Frequency=\"1\"/>\n",
+        "</BehaviorList>\n</Mascot>\n"
+    );
+    let path = temp_conf("constants", xml);
+    let result = parse_behaviors(&path);
+    let _ = std::fs::remove_file(&path);
+    let cfg = result.expect("Constant / 定数 を含む behaviors をパースできる");
+    assert_eq!(cfg.constants.get("speed").map(String::as_str), Some("3"));
+    assert_eq!(cfg.constants.get("maxCount").map(String::as_str), Some("5"));
+    assert_eq!(cfg.constants.get("flag").map(String::as_str), Some("true"));
+}
+
+#[test]
+fn synthetic_constant_missing_value_error() {
+    let xml = concat!(
+        "<Mascot xmlns=\"http://www.group-finity.com/Mascot\">\n",
+        "<定数 Name=\"maxCount\" />\n",
+        "<BehaviorList><Behavior Name=\"A\" Frequency=\"1\"/></BehaviorList>\n</Mascot>\n"
+    );
+    let path = temp_conf("constant_no_value", xml);
+    let result = parse_behaviors(&path);
+    let _ = std::fs::remove_file(&path);
+    assert!(result.is_err(), "Value 属性欠落は Err（Java 必須属性相当）");
+}
+
+#[test]
 fn synthetic_behavior_missing_frequency_error() {
     let xml = concat!(
         "<Mascot xmlns=\"http://www.group-finity.com/Mascot\">\n",

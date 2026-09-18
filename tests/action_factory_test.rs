@@ -412,6 +412,7 @@ fn single_table(name: &str) -> BehaviorTable {
             action: ref_child(name),
             next: None,
         })],
+        ..Default::default()
     })
 }
 

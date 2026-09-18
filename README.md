@@ -51,7 +51,7 @@ cargo run --release     # 実行（exe と同じ場所に conf/ と img/ が必�
 cargo test              # 単体テスト
 ```
 
-現状: 主要挙動の実装は完了（`cargo test` 525/525 PASS、2026-09-18）。
+現状: 主要挙動の実装は完了（`cargo test` 536/536 PASS、2026-09-18）。
 実装済み機能の一覧は [`doc/feature-status.md`](doc/feature-status.md) を参照してください。
 
 ## 対応環境・既知の制限

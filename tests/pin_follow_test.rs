@@ -236,6 +236,7 @@ fn clamp_table() -> BehaviorTable {
             row("GrabIEBottomLeftWall", 100),
             row("GrabIEBottomRightWall", 100),
         ],
+        ..Default::default()
     })
 }
 

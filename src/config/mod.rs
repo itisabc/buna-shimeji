@@ -165,9 +165,14 @@ pub struct Pose {
 }
 
 /// behaviors.xml のパース結果。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BehaviorsConfig {
     pub entries: Vec<BehaviorEntry>,
+    /// Mascot 直下の `<Constant>` / `<定数>` の Name → Value（Java
+    /// `Configuration.constants` 相当）。生文字列のまま保持し、行動条件の評価文脈へ
+    /// 注入する（[`BehaviorTable::new`](crate::mascot::behavior::BehaviorTable::new)
+    /// が [`Variable::parse`] する）。
+    pub constants: BTreeMap<String, String>,
 }
 
 /// Behavior エントリ。Condition ノードで束ねられたグループ（AND 積み上げ）or 単体。
@@ -257,12 +262,28 @@ pub fn parse_behaviors(path: &Path) -> Result<BehaviorsConfig, ConfigError> {
 
     let mut entries = Vec::new();
     let mut seen_names = HashSet::new();
+    let mut constants = BTreeMap::new();
+    // `<Constant>` / `<定数>`（Mascot 直下）。Java Configuration.java L158-171 逐語:
+    // Name / Value は必須（欠落は ConfigurationException = fail-fast）。
+    for node in root
+        .children()
+        .filter(|n| n.is_element() && matches!(n.tag_name().name(), "Constant" | "定数"))
+    {
+        let name = node
+            .attribute("Name")
+            .ok_or_else(|| cx.error_value(node, "Constant is missing the Name attribute"))?;
+        let value = node
+            .attribute("Value")
+            .or_else(|| node.attribute("値"))
+            .ok_or_else(|| cx.error_value(node, "Constant is missing the Value attribute"))?;
+        constants.insert(name.to_string(), value.to_string());
+    }
     for list in root.children().filter(|n| {
         n.is_element() && matches!(n.tag_name().name(), "BehaviorList" | "BehaviourList")
     }) {
         parse_behavior_list(&cx, list, &[], &mut entries, &mut seen_names, 0)?;
     }
-    Ok(BehaviorsConfig { entries })
+    Ok(BehaviorsConfig { entries, constants })
 }
 
 /// 必須 4 種の Behavior（ChaseMouse / Fall / Dragged / Thrown）が揃っているか検証する

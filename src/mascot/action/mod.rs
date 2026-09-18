@@ -11,7 +11,7 @@
 //!   Draggable=true / Affordance=""
 //! - BorderedAction 系（Animate/Stay/Move/ThrowIE/WalkWithIE/Breed）と FallWithIE
 //!   は bordered.rs、ComplexAction 系は complex.rs
-//! - stub 17 種: has_next=false で 1 tick も動かず即完了 + 警告ログ（§1.8(a)）
+//! - stub 11 種: has_next=false で 1 tick も動かず即完了 + 警告ログ（§1.8(a)）
 //! - 未知 Embedded FQN は fail-fast（Java ActionBuilder L194-206 踏襲）
 //!
 //! 構築 API は 2 経路（§1.8(j)）:
@@ -41,7 +41,7 @@ pub mod factory;
 
 use bordered::{
     AnimateAction, BreedAction, FallWithIEAction, MoveAction, ScanMoveAction, StayAction,
-    ThrowIEAction, WalkWithIEAction,
+    ThrowIEAction, TransformAction, WalkWithIEAction,
 };
 use complex::Complex;
 
@@ -72,7 +72,7 @@ pub enum ActionKind {
     /// Animate / Stay / Move / Jump を継承し override 0 個の空サブクラスのため
     /// variant を持たず [`fqn_to_kind`] で基底種別へ写す。
     ScanMove,
-    // stub 12（資産外・has_next=false 即完了+警告）
+    // stub 11（資産外・has_next=false 即完了+警告）
     ScanJump,
     ScanInteract,
     ComplexMove,
@@ -1264,7 +1264,9 @@ pub fn create(
         ActionKind::ThrowIE => Box::new(ThrowIEAction::new(attrs.clone(), scaled)),
         ActionKind::FallWithIE => Box::new(FallWithIEAction::new(attrs.clone(), scaled)),
         ActionKind::ScanMove => Box::new(ScanMoveAction::new(attrs.clone(), scaled)),
-        // stub 12 種
+        // Transform（Java Transform.java・Animate 派生・#33）
+        ActionKind::Transform => Box::new(TransformAction::new(attrs.clone(), scaled)),
+        // stub 11 種
         ActionKind::ScanJump
         | ActionKind::ScanInteract
         | ActionKind::ComplexMove
@@ -1275,8 +1277,7 @@ pub fn create(
         | ActionKind::SelfDestruct
         | ActionKind::Mute
         | ActionKind::MoveWithTurn
-        | ActionKind::Turn
-        | ActionKind::Transform => Box::new(StubAction::new(kind, attrs.clone())),
+        | ActionKind::Turn => Box::new(StubAction::new(kind, attrs.clone())),
         // ComplexAction 系は子アクションが必要なため直接構築不可
         ActionKind::Sequence | ActionKind::Select => {
             return Err(BehaviorError::UnknownBehavior(

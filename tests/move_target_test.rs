@@ -18,6 +18,10 @@
 //! 4. **属性無し Move は既存挙動不変**（TargetX/Y 属性なし・条件なしアニメ =
 //!    従来どおり選択・適用され、変数化追加で破壊されない）
 //!
+//! 注（#34・design §1.10 (z-8)）: 上の契約 4 は「TargetX/Y なし + Duration なし」の
+//! 即終了（Java 同一）を指す。TargetX/Y なしでも `Duration` を明示した場合は
+//! Duration まで継続する（契約 5）。
+//!
 //! RED 想定（実測確認済み）: 現行実装は TargetX/TargetY を変数へ供給しないため、
 //! アニメ条件式の識別子解決が失敗し next() が Err を返す
 //! （move_tick → get_turning_animation → animation_is_effective のエラー伝播。
@@ -36,6 +40,7 @@ use std::sync::Arc;
 use shimeji::config::script::{EvalContext, Variable};
 use shimeji::config::{Animation, Pose, VarMap};
 use shimeji::mascot::action::{create, ActionKind};
+use shimeji::mascot::behavior::ActionError;
 use shimeji::mascot::env::{AreaSlot, AreaState, CursorState};
 use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
 use shimeji::render::imageset::{Frame, ImageSet};
@@ -557,4 +562,110 @@ fn move_without_target_attributes_keeps_existing_behavior() {
             tick
         );
     }
+}
+
+// =====================================================================
+// 契約 5: target 無し Move の終了条件（design §1.10 (z-8)）
+// =====================================================================
+
+/// `Duration` 明示の target 無し Move は継続する（Java の即終了からの意図的差異）。
+#[test]
+fn move_without_target_with_duration_has_next_true() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 8);
+    let mut m = Mascot::new(
+        "TestSet",
+        image_set_with(&[("walk.png", 128, 128)]),
+        (100, 500),
+    );
+    let mut action = create(
+        ActionKind::Move,
+        &attrs(&[("Duration", "3")]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("walk.png", (64, 64), (2, 0), 30)],
+        )],
+        1.0,
+    )
+    .unwrap();
+    action
+        .init(&mut m, &env, &mut rng)
+        .expect("init は成功する");
+    assert!(
+        action
+            .has_next(&mut m, &env, &mut rng)
+            .expect("has_next は成功する"),
+        "Duration 明示の target 無し Move は time 0 で継続する"
+    );
+}
+
+/// `Duration` 未指定の target 無し Move は Java と同一（即終了）を保つ。
+#[test]
+fn move_without_target_without_duration_completes_immediately() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 8);
+    let mut m = Mascot::new(
+        "TestSet",
+        image_set_with(&[("walk.png", 128, 128)]),
+        (100, 500),
+    );
+    let mut action = create(
+        ActionKind::Move,
+        &attrs(&[]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("walk.png", (64, 64), (2, 0), 30)],
+        )],
+        1.0,
+    )
+    .unwrap();
+    action
+        .init(&mut m, &env, &mut rng)
+        .expect("init は成功する");
+    assert!(
+        !action
+            .has_next(&mut m, &env, &mut rng)
+            .expect("has_next は成功する"),
+        "Duration 未指定は Java 同様の即終了（新規挙動ゼロ）"
+    );
+}
+
+/// 継続する target 無し Move は毎 tick 境界検査を行うため、床外では LostGround に
+/// なる（BorderedAction 共通の既存挙動・design §1.10 (z-8) red-team R4）。
+#[test]
+fn move_without_target_with_duration_outside_border_returns_lost_ground() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 8);
+    // 床 (bottom=1040) の外
+    let mut m = Mascot::new(
+        "TestSet",
+        image_set_with(&[("walk.png", 128, 128)]),
+        (100, 500),
+    );
+    let mut action = create(
+        ActionKind::Move,
+        &attrs(&[("Duration", "3"), ("BorderType", "Floor")]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("walk.png", (64, 64), (2, 0), 30)],
+        )],
+        1.0,
+    )
+    .unwrap();
+    action
+        .init(&mut m, &env, &mut rng)
+        .expect("init は成功する");
+    assert!(action
+        .has_next(&mut m, &env, &mut rng)
+        .expect("has_next は成功する"));
+    assert!(
+        matches!(
+            action.next(&mut m, &env, &mut rng),
+            Err(ActionError::LostGround)
+        ),
+        "床外で継続すると境界検査で LostGround になる"
+    );
 }

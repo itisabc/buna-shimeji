@@ -93,7 +93,10 @@ use std::time::Instant;
 use shimeji::app::environment::{Environment, OsSource};
 use shimeji::app::manager::{BehaviorMenu, Manager};
 use shimeji::config::script::Variable;
-use shimeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use shimeji::config::{
+    Animation, BehaviorDef, BehaviorEntry, BehaviorsConfig, Pose, SequenceChild, VarMap,
+};
+use shimeji::mascot::action::{create, ActionKind};
 use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
@@ -352,7 +355,10 @@ fn group_entry(condition: &str, name: &str, frequency: i32) -> BehaviorEntry {
 }
 
 fn table(entries: Vec<BehaviorEntry>) -> BehaviorTable {
-    BehaviorTable::new(&BehaviorsConfig { entries })
+    BehaviorTable::new(&BehaviorsConfig {
+        entries,
+        ..Default::default()
+    })
 }
 
 fn make_manager_with_rng(
@@ -1051,4 +1057,138 @@ fn manager_total_count_gates_threshold_condition_behavior_selection() {
             "生存数 2 >= 2 → Rare は候補外（totalCount 条件が増殖上限として機能）"
         );
     }
+}
+
+// =====================================================================
+// #33: Transform（Manager のループ後適用・Java Transform.java L44-54 相当）
+// =====================================================================
+
+/// `TransformMe` 行だけ本物の Transform action（duration 2）を作るファクトリ。
+/// 他は安定 action（遷移しない）。
+struct TransformFactory;
+
+impl BehaviorFactory for TransformFactory {
+    fn build_action(&mut self, child: &SequenceChild) -> Result<Box<dyn Action>, BehaviorError> {
+        match child {
+            SequenceChild::Ref { name, attrs } if name == "TransformMe" => {
+                let animations = vec![Animation {
+                    condition: None,
+                    poses: vec![Pose {
+                        image: "x.png".to_string(),
+                        anchor: (0, 0),
+                        velocity: (0, 0),
+                        duration: 2,
+                    }],
+                    is_turn: false,
+                }];
+                create(ActionKind::Transform, attrs, animations, 1.0)
+            }
+            SequenceChild::Ref { .. } => Ok(Box::new(ScriptedAction {
+                has_next_true_times: usize::MAX,
+                has_next_calls: 0,
+            })),
+            SequenceChild::Inline(_) => Err(BehaviorError::UnknownBehavior(
+                "(inline は本テストで未使用)".to_string(),
+            )),
+        }
+    }
+}
+
+/// `TransformMe` 行（Ref attrs に変身先 set / Behavior を持つ）。
+fn transform_row() -> BehaviorEntry {
+    let mut attrs = VarMap::new();
+    attrs.insert("TransformMascot".to_string(), Variable::parse("TargetSet"));
+    attrs.insert("TransformBehavior".to_string(), Variable::parse("Arrived"));
+    BehaviorEntry::Single(BehaviorDef {
+        name: "TransformMe".to_string(),
+        frequency: 100,
+        hidden: false,
+        toggleable: false,
+        action: SequenceChild::Ref {
+            name: "TransformMe".to_string(),
+            attrs,
+        },
+        next: None,
+    })
+}
+
+/// Java Transform.transform L44-54: 変身要求が Manager のループ後に適用され、
+/// 画像セットが変身先（TargetSet）へ差し替わり、変身先 set の Behavior（Arrived）が
+/// 付くこと。duration 2 なので 1 tick 目では変わらず、2 tick 目で変身する
+///（最終フレーム = duration - 1 = 1）。
+#[test]
+fn manager_applies_transform_switching_image_set_and_behavior() {
+    let (env, _) = single_monitor_env();
+    let mut rng = fixed_rng(vec![0.0; 16]);
+    let mut factory = TransformFactory;
+    let base = table(vec![transform_row()]);
+    let mut mascot = mascot_of_set("SourceSet", (500, 500));
+    let runner = base
+        .build_behavior_direct("TransformMe", &mut factory, &mascot)
+        .expect("TransformMe を構築できる");
+    mascot
+        .set_behavior(Some(runner), &env, &base, &mut factory, &mut *rng)
+        .unwrap();
+
+    let mut manager = Manager::new(env, base, Box::new(factory), rng);
+    manager.set_exit_on_last_removed(false);
+    manager.set_image_set_resolver(resolver_for(&["SourceSet", "TargetSet"]));
+    manager.set_behavior_table("TargetSet", table(vec![row("Arrived", 100)]));
+    manager.add(mascot);
+
+    manager.tick(Instant::now()); // time 0
+    let snap = snapshot(&mut manager);
+    assert_eq!(snap.len(), 1);
+    assert_eq!(snap[0].image_set, "SourceSet");
+    assert_eq!(snap[0].behavior.as_deref(), Some("TransformMe"));
+
+    manager.tick(Instant::now()); // time 1 == duration - 1 → 変身要求 → ループ後適用
+    let snap = snapshot(&mut manager);
+    assert_eq!(snap.len(), 1, "変身しても個体数は変わらない");
+    assert_eq!(
+        snap[0].image_set, "TargetSet",
+        "画像セットが TransformMascot へ差し替わる"
+    );
+    assert_eq!(
+        snap[0].behavior.as_deref(),
+        Some("Arrived"),
+        "変身先 set の TransformBehavior が構築される"
+    );
+}
+
+/// TransformMascot 未解決（resolver に無い set）は自分の set のまま変身先 Behavior を
+/// 構築する（Java L45: configuration(TransformMascot) == null → mascot.getImageSet()）。
+#[test]
+fn manager_transform_keeps_own_set_when_target_set_unresolved() {
+    let (env, _) = single_monitor_env();
+    let mut rng = fixed_rng(vec![0.0; 16]);
+    let mut factory = TransformFactory;
+    let base = table(vec![transform_row(), row("Arrived", 100)]);
+    let mut mascot = mascot_of_set("SourceSet", (500, 500));
+    let runner = base
+        .build_behavior_direct("TransformMe", &mut factory, &mascot)
+        .expect("TransformMe を構築できる");
+    mascot
+        .set_behavior(Some(runner), &env, &base, &mut factory, &mut *rng)
+        .unwrap();
+
+    let mut manager = Manager::new(env, base, Box::new(factory), rng);
+    manager.set_exit_on_last_removed(false);
+    // TargetSet を resolver に登録しない（変身先未解決）→ 自分の set（SourceSet）を使う
+    manager.set_image_set_resolver(resolver_for(&["SourceSet"]));
+    manager.add(mascot);
+
+    manager.tick(Instant::now()); // time 0
+    manager.tick(Instant::now()); // time 1 == duration - 1 → 変身要求 → ループ後適用
+    let snap = snapshot(&mut manager);
+    assert_eq!(snap.len(), 1);
+    assert_eq!(
+        snap[0].image_set, "SourceSet",
+        "未解決の TransformMascot では自分の set のまま"
+    );
+    assert_eq!(
+        snap[0].behavior.as_deref(),
+        Some("Arrived"),
+        "自分の set の table から TransformBehavior を構築する"
+    );
 }

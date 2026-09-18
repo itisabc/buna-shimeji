@@ -601,7 +601,21 @@ fn grouped(conditions: Vec<Variable>, name: &str, frequency: i32) -> BehaviorEnt
 }
 
 fn table(entries: Vec<BehaviorEntry>) -> BehaviorTable {
-    BehaviorTable::new(&BehaviorsConfig { entries })
+    BehaviorTable::new(&BehaviorsConfig {
+        entries,
+        ..Default::default()
+    })
+}
+
+/// 定数付きの行動表（Java `Configuration.constants` 相当）。
+fn table_with_constants(entries: Vec<BehaviorEntry>, constants: &[(&str, &str)]) -> BehaviorTable {
+    BehaviorTable::new(&BehaviorsConfig {
+        entries,
+        constants: constants
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect(),
+    })
 }
 
 fn next_list(add: bool, refs: &[(&str, i32)]) -> NextBehaviorList {
@@ -925,6 +939,48 @@ fn build_next_behavior_skips_erroring_and_false_conditions() {
         .build_next_behavior(None, &mut m, &env, &mut factory, &mut rng)
         .unwrap();
     assert_eq!(runner.name, "Good");
+}
+
+#[test]
+fn build_next_behavior_resolves_constants_in_conditions() {
+    let env = MockEnv::new();
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let mut m = mascot_at((500, 500));
+    m.set_total_count(7);
+
+    // 定数 `maxCount` を条件から参照する（デレマス Anzu の資産と同型）。
+    // MockEvalCtx の mascot.totalCount は 7。
+    let entries = || {
+        vec![
+            grouped(vec![var("#{mascot.totalCount < maxCount}")], "Rare", 100),
+            single("Common", 1),
+        ]
+    };
+
+    // maxCount=10 > 7 → Rare が候補（定数が解決される）
+    let t = table_with_constants(entries(), &[("maxCount", "10")]);
+    let mut rng = FakeRng::new(&[0.5]);
+    let runner = t
+        .build_next_behavior(None, &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Rare");
+
+    // maxCount=3 < 7 → 条件 false → Common
+    let t_false = table_with_constants(entries(), &[("maxCount", "3")]);
+    let mut rng = FakeRng::new(&[0.0]);
+    let runner = t_false
+        .build_next_behavior(None, &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Common");
+
+    // 対照: 定数なしでは unknown identifier で候補スキップ → Common
+    let t_missing = table(entries());
+    let mut rng = FakeRng::new(&[0.0]);
+    let runner = t_missing
+        .build_next_behavior(None, &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    assert_eq!(runner.name, "Common");
 }
 
 #[test]

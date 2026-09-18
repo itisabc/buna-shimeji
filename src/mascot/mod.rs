@@ -88,6 +88,21 @@ pub struct AffordanceArrival {
     pub flip_look: bool,
 }
 
+/// Transform 到達時に要求された変身（Java `Transform.transform` L44-54 の
+/// `setImageSet` + `setBehavior` 相当）。action は Manager / resolver に触れない
+/// （`&dyn EnvironmentView` + 自 mascot の `&mut` のみ）ため要求を積み、Manager が
+/// 個体ループ後に画像セットを差し替えて相手 set の Behavior を構築する
+/// （ScanMove の [`AffordanceArrival`] と同型の意図的差異）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransformRequest {
+    /// 変身先の画像セット名（Java `TransformMascot` 属性）。空文字列は
+    /// 「自分の set のまま」を意味する（Java `configuration(...) == null` 相当）。
+    pub image_set: String,
+    /// 変身先で設定する Behavior 名（Java `TransformBehaviour` 定数。実 XML は
+    /// US 綴り `TransformBehavior`）。
+    pub behavior: String,
+}
+
 /// マスコットから見たデスクトップ環境の抽象（Java `MascotEnvironment` / `Environment`
 /// 相当）。#8 の Environment が実装する。
 ///
@@ -369,6 +384,10 @@ pub struct Mascot {
     /// action は自 Behavior を構築できない（table / factory を持たない）ため要求を積む
     /// （Java `ScanMove.tick` L122-137 の setBehavior 呼び出し相当・意図的差異）。
     affordance_arrival: Option<AffordanceArrival>,
+    /// Transform 到達時に要求された変身（#33・Manager がループ後に適用）。
+    /// action は resolver / 他 set の table に触れないため要求を積む
+    /// （Java `Transform.transform` L44-54 相当・意図的差異）。
+    transform_request: Option<TransformRequest>,
 }
 
 impl Mascot {
@@ -401,6 +420,7 @@ impl Mascot {
             remove_pending: false,
             pinned_window: None,
             affordance_arrival: None,
+            transform_request: None,
         }
     }
 
@@ -700,6 +720,18 @@ impl Mascot {
     /// 溜まった到達時要求を取り出す（Manager がループ後に適用・#32）。
     pub fn take_affordance_arrival(&mut self) -> Option<AffordanceArrival> {
         self.affordance_arrival.take()
+    }
+
+    /// Transform 到達時の変身を要求する（#33）。action は resolver / 変身先 set の
+    /// BehaviorTable を持たないため要求を積み、Manager がループ後に適用する。
+    /// 1 tick に 1 回しか到達しないため後勝ちで実質 1 件。
+    pub(crate) fn request_transform(&mut self, request: TransformRequest) {
+        self.transform_request = Some(request);
+    }
+
+    /// 溜まった変身要求を取り出す（Manager がループ後に適用・#33）。
+    pub fn take_transform_request(&mut self) -> Option<TransformRequest> {
+        self.transform_request.take()
     }
 
     /// スクリプト用カスタム変数マップ（Java getVariables L1339-1344）。
