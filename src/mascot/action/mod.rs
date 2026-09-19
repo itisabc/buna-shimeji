@@ -11,7 +11,7 @@
 //!   Draggable=true / Affordance=""
 //! - BorderedAction 系（Animate/Stay/Move/ThrowIE/WalkWithIE/Breed）と FallWithIE
 //!   は bordered.rs、ComplexAction 系は complex.rs
-//! - stub 11 種: has_next=false で 1 tick も動かず即完了 + 警告ログ（§1.8(a)）
+//! - 全 Action クラス実装済み（#35 で stub 11 種を本体実装・stub 機構は撤去）
 //! - 未知 Embedded FQN は fail-fast（Java ActionBuilder L194-206 踏襲）
 //!
 //! 構築 API は 2 経路（§1.8(j)）:
@@ -30,9 +30,9 @@
 //!   フォールバックする（tests/action_test.rs 契約）
 
 use super::behavior::{Action, ActionError, BehaviorError};
-use super::{env, EnvironmentView, Mascot, MascotContext, Rng};
+use super::{env, AffordanceArrival, EnvironmentView, Mascot, MascotContext, Rng};
 use crate::config::script::{EvalError, EvalValue, Variable};
-use crate::config::{ActionDef, ActionsConfig, Animation, BorderType, SequenceChild, VarMap};
+use crate::config::{ActionDef, ActionsConfig, Animation, BorderType, VarMap};
 use crate::render::imageset::{java_round, scale_pose};
 
 pub mod bordered;
@@ -40,8 +40,9 @@ pub mod complex;
 pub mod factory;
 
 use bordered::{
-    AnimateAction, BreedAction, FallWithIEAction, MoveAction, ScanMoveAction, StayAction,
-    ThrowIEAction, TransformAction, WalkWithIEAction,
+    AnimateAction, BreedAction, BreedMoveAction, ComplexMoveAction, FallWithIEAction,
+    InteractAction, MoveAction, MoveWithTurnAction, ScanInteractAction, ScanMoveAction,
+    SelfDestructAction, StayAction, ThrowIEAction, TransformAction, TurnAction, WalkWithIEAction,
 };
 use complex::Complex;
 
@@ -72,7 +73,7 @@ pub enum ActionKind {
     /// Animate / Stay / Move / Jump を継承し override 0 個の空サブクラスのため
     /// variant を持たず [`fqn_to_kind`] で基底種別へ写す。
     ScanMove,
-    // stub 11（資産外・has_next=false 即完了+警告）
+    // 旧 stub 11（#35 で全種を本体実装済み）
     ScanJump,
     ScanInteract,
     ComplexMove,
@@ -141,63 +142,8 @@ pub fn fqn_to_kind(fqn: &str) -> Option<ActionKind> {
     })
 }
 
-impl ActionKind {
-    /// stub 実装（`has_next=false` で 1 tick も動かず即完了 + 警告ログ）の種別か
-    /// （design §1.8(a)・資産外 11 種）。ユーザー資産が参照した場合に起動時へ
-    /// 警告する用途（#5）。実装スコープの変更時はここを更新する。
-    pub fn is_stub(self) -> bool {
-        matches!(
-            self,
-            ActionKind::ScanJump
-                | ActionKind::ScanInteract
-                | ActionKind::ComplexMove
-                | ActionKind::ComplexJump
-                | ActionKind::BreedMove
-                | ActionKind::BreedJump
-                | ActionKind::Interact
-                | ActionKind::SelfDestruct
-                | ActionKind::Mute
-                | ActionKind::MoveWithTurn
-                | ActionKind::Turn
-        )
-    }
-}
-
-/// `actions` 中の Action 定義のうち stub 実装の種別を参照するものを列挙する（#5）。
-/// `ActionDef::Embedded` の `Class` を [`fqn_to_kind`] で解決し、
-/// [`ActionKind::is_stub`] なら `(action 名, kind)` を返す。Sequence/Select の
-/// Inline 子も再帰的に走査する（Ref は定義側の名前として既に拾われる）。
-/// 並びは [`ActionsConfig::actions`]（BTreeMap）= 名前順。
-pub fn stub_action_references(actions: &ActionsConfig) -> Vec<(String, ActionKind)> {
-    let mut found = Vec::new();
-    for (name, def) in &actions.actions {
-        collect_stub_references(name, def, &mut found);
-    }
-    found
-}
-
-fn collect_stub_references(name: &str, def: &ActionDef, out: &mut Vec<(String, ActionKind)>) {
-    match def {
-        ActionDef::Embedded { class, .. } => {
-            if let Some(kind) = fqn_to_kind(class) {
-                if kind.is_stub() {
-                    out.push((name.to_string(), kind));
-                }
-            }
-        }
-        ActionDef::Sequence { children, .. } | ActionDef::Select { children, .. } => {
-            for child in children {
-                if let SequenceChild::Inline(inner) = child {
-                    collect_stub_references(name, inner, out);
-                }
-            }
-        }
-        ActionDef::Stay { .. } | ActionDef::Move { .. } | ActionDef::Animate { .. } => {}
-    }
-}
-
 // =====================================================================
-// 共通ロジック（ActionBase.java L26-253 相当）
+// ActionBase 共通ロジック（ActionBase.java L26-253 相当）
 // =====================================================================
 
 /// 共通状態（Java `ActionBase` のフィールド相当）。
@@ -549,72 +495,6 @@ impl Base {
 }
 
 // =====================================================================
-// stub 17 種（資産外・design §1.8(a)）
-// =====================================================================
-
-/// stub: has_next=false で 1 tick も動かず即完了 + 警告ログ。
-/// Java 版も資産 XML 未参照のクラスはロードされず実行パスに乗らないため
-/// （§1.8(a)）、実行系としての挙動は一致する。
-pub(crate) struct StubAction {
-    kind: ActionKind,
-    base: Base,
-}
-
-impl Action for StubAction {
-    fn init(
-        &mut self,
-        mascot: &mut Mascot,
-        _env: &dyn EnvironmentView,
-        _rng: &mut dyn Rng,
-    ) -> Result<(), ActionError> {
-        self.base.init(mascot);
-        log::warn!(
-            "action kind `{:?}` is not implemented in this version; completing immediately",
-            self.kind
-        );
-        Ok(())
-    }
-
-    fn has_next(
-        &mut self,
-        mascot: &mut Mascot,
-        env: &dyn EnvironmentView,
-        _rng: &mut dyn Rng,
-    ) -> Result<bool, ActionError> {
-        // 即完了（1 tick も動かない）
-        let _ = self.base.base_has_next(mascot, env)?;
-        Ok(false)
-    }
-
-    fn next(
-        &mut self,
-        mascot: &mut Mascot,
-        env: &dyn EnvironmentView,
-        _rng: &mut dyn Rng,
-    ) -> Result<(), ActionError> {
-        self.base.next_pre(mascot, env)
-    }
-
-    fn is_draggable(
-        &mut self,
-        mascot: &mut Mascot,
-        env: &dyn EnvironmentView,
-        _rng: &mut dyn Rng,
-    ) -> Result<bool, ActionError> {
-        self.base.draggable(mascot, env)
-    }
-}
-
-impl StubAction {
-    pub(crate) fn new(kind: ActionKind, attrs: VarMap) -> StubAction {
-        StubAction {
-            kind,
-            base: Base::new(attrs, Vec::new()),
-        }
-    }
-}
-
-// =====================================================================
 // Jump（Java Jump.java L20-110 相当）
 // =====================================================================
 
@@ -703,6 +583,566 @@ impl Action for JumpAction {
         if distance <= velocity {
             mascot.set_anchor((target_x, target_y));
         }
+        Ok(())
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.base.draggable(mascot, env)
+    }
+}
+
+// =====================================================================
+// アフォーダンス探索の共通ヘルパ（Java Manager.getMascotWithAffordance 相当）
+// =====================================================================
+
+/// その affordance を放送している最初の個体の index を探す
+/// （スナップショットの線形走査 = Java の live 走査順）。ScanMove / ScanJump /
+/// ComplexMove / ComplexJump 共用。空 affordance は対象なし。
+pub(crate) fn find_affordance_target(env: &dyn EnvironmentView, affordance: &str) -> Option<usize> {
+    if affordance.is_empty() {
+        return None;
+    }
+    env.affordance_scan()
+        .into_iter()
+        .find(|entry| entry.affordances.iter().any(|a| a == affordance))
+        .map(|entry| entry.index)
+}
+
+/// 指定 index の個体がその affordance を今も保持していれば現在 anchor を返す
+/// （Java `target.get()` の null 判定 + `getAffordances().contains()` +
+/// `getAnchor()` の合成）。保持していなければ None。
+pub(crate) fn affordance_target_anchor(
+    env: &dyn EnvironmentView,
+    index: Option<usize>,
+    affordance: &str,
+) -> Option<(i32, i32)> {
+    let index = index?;
+    env.affordance_scan()
+        .into_iter()
+        .find(|entry| entry.index == index && entry.affordances.iter().any(|a| a == affordance))
+        .map(|entry| entry.anchor)
+}
+
+// =====================================================================
+// BreedJump（Java BreedJump.java L17-44 相当・Jump 派生）
+// =====================================================================
+
+/// Java `BreedJump`（Jump + Delegate）: Jump の放物線移動に加えて
+/// `BornInterval` ごとに増殖する。
+pub(crate) struct BreedJumpAction {
+    jump: JumpAction,
+    delegate: bordered::BreedDelegate,
+}
+
+impl BreedJumpAction {
+    pub(crate) fn new(attrs: VarMap, animations: Vec<Animation>) -> BreedJumpAction {
+        BreedJumpAction {
+            jump: JumpAction::new(attrs, animations),
+            delegate: bordered::BreedDelegate::new(),
+        }
+    }
+}
+
+impl Action for BreedJumpAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        // Java L27-33: super.init（Jump）→ initScaling + validateBornCount +
+        // validateBornInterval
+        self.jump.init(mascot, env, rng)?;
+        self.delegate.init_scaling(mascot);
+        self.delegate
+            .validate_born_count(&mut self.jump.base, mascot, env)?;
+        self.delegate
+            .validate_born_interval(&mut self.jump.base, mascot, env)?;
+        Ok(())
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java BreedJump は hasNext をオーバーライドしない（Jump のもの）
+        self.jump.has_next(mascot, env, rng)
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        // Java L36-37: super.tick()（Jump.tick）
+        self.jump.next(mascot, env, rng)?;
+
+        // Java L39-42: interval frame 且つ enabled → 生む
+        if self
+            .delegate
+            .is_interval_frame(&mut self.jump.base, mascot, env)?
+            && self.delegate.is_enabled(&mut self.jump.base, mascot, env)?
+        {
+            self.delegate.breed(&mut self.jump.base, mascot, env)?;
+        }
+        Ok(())
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.jump.is_draggable(mascot, env, rng)
+    }
+}
+
+// =====================================================================
+// ScanJump（Java ScanJump.java L21-153 相当・ActionBase 派生）
+// =====================================================================
+
+/// Java `ScanJump` の既定 `VelocityParam`（L35）。
+const DEFAULT_VELOCITY: f64 = 20.0;
+
+/// アフォーダンス保持者へ放物線ジャンプし、到達したら自分と相手の Behavior を
+/// 差し替える（Java `ScanJump` 逐語）。相手は ScanMove と同じ index 同定。
+pub(crate) struct ScanJumpAction {
+    base: Base,
+    scaling: f64,
+    /// 探索する affordance（Java `getAffordance()`・`Affordance` 属性）。
+    affordance: String,
+    /// 探索相手の index（Java `WeakReference<Mascot> target` 相当）。
+    target_index: Option<usize>,
+}
+
+impl ScanJumpAction {
+    pub(crate) fn new(attrs: VarMap, animations: Vec<Animation>) -> ScanJumpAction {
+        ScanJumpAction {
+            base: Base::new(attrs, animations),
+            scaling: 1.0,
+            affordance: String::new(),
+            target_index: None,
+        }
+    }
+
+    /// Java `getBehaviour()`（L138-140）。
+    fn behavior(&mut self) -> String {
+        self.base
+            .text_attr(bordered::PARAM_BEHAVIOR)
+            .unwrap_or_default()
+    }
+
+    /// Java `getTargetBehaviour()`（L142-144）。
+    fn target_behavior(&mut self) -> String {
+        self.base
+            .text_attr(bordered::PARAM_TARGET_BEHAVIOR)
+            .unwrap_or_default()
+    }
+
+    /// 放物線の距離式（Java L100-103 / L152-155 逐語）。
+    fn parabolic_distance(anchor: (i32, i32), target: (i32, i32)) -> (f64, f64) {
+        let distance_x = f64::from(target.0 - anchor.0);
+        let distance_y = f64::from(target.1 - anchor.1) - distance_x.abs() / 2.0;
+        (distance_x, distance_y)
+    }
+}
+
+impl Action for ScanJumpAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.base.init(mascot);
+        // Java L53: scaling
+        self.scaling = mascot.scale();
+        // Java L56: cannot broadcast while scanning for an affordance
+        mascot.clear_affordances();
+        // Java L58-63: 相手探索 + TargetX/TargetY 注入（不在時は Java が null を
+        // put するが、その場合 hasNext が false になり tick に到達しないため
+        // Rust は注入しない。ScanMove と同じ意図的差異）
+        self.affordance = self.base.text_attr("Affordance").unwrap_or_default();
+        self.target_index = find_affordance_target(env, &self.affordance);
+        if let Some(anchor) = affordance_target_anchor(env, self.target_index, &self.affordance) {
+            self.base.vars.inject("TargetX", f64::from(anchor.0));
+            self.base.vars.inject("TargetY", f64::from(anchor.1));
+        }
+        Ok(())
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java L67-78: super.hasNext() && 相手が affordance を保持
+        if !self.base.base_has_next(mascot, env)? {
+            return Ok(false);
+        }
+        Ok(affordance_target_anchor(env, self.target_index, &self.affordance).is_some())
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.base.next_pre(mascot, env)?;
+
+        // Java L83: cannot broadcast while scanning for an affordance
+        mascot.clear_affordances();
+
+        // Java L85-88: 相手不在 → 移動なしで終了
+        let Some(target) = affordance_target_anchor(env, self.target_index, &self.affordance)
+        else {
+            return Ok(());
+        };
+
+        // Java L93-94: TargetX/TargetY 注入
+        self.base.vars.inject("TargetX", f64::from(target.0));
+        self.base.vars.inject("TargetY", f64::from(target.1));
+
+        // Java L96-98: 向き更新
+        if mascot.anchor().0 != target.0 {
+            mascot.set_look_right(mascot.anchor().0 < target.0);
+        }
+
+        let (distance_x, distance_y) = Self::parabolic_distance(mascot.anchor(), target);
+        let distance = (distance_x * distance_x + distance_y * distance_y).sqrt();
+        // Java L105: velocity = VelocityParam * scaling
+        let velocity = self
+            .base
+            .f64_attr(mascot, env, "VelocityParam", DEFAULT_VELOCITY)?
+            * self.scaling;
+
+        if distance != 0.0 {
+            let velocity_x = velocity * distance_x / distance;
+            let velocity_y = velocity * distance_y / distance;
+            // Java L111-112: VelocityX/Y 注入
+            self.base.vars.inject("VelocityX", velocity_x);
+            self.base.vars.inject("VelocityY", velocity_y);
+            // Java L114: translate
+            let (ax, ay) = mascot.anchor();
+            mascot.set_anchor((ax + java_round(velocity_x), ay + java_round(velocity_y)));
+            // Java L115: アニメ適用（distance != 0 の内側）
+            self.base.apply_effective_animation(mascot, env)?;
+        }
+
+        // Java L118-135: 到達 → snap + 自分/相手の Behavior 差し替え要求
+        if distance <= velocity {
+            mascot.set_anchor(target);
+            let behavior = self.behavior();
+            let target_behavior = self.target_behavior();
+            let flip_look = self
+                .base
+                .bool_attr(mascot, env, bordered::PARAM_TARGET_LOOK, false)?;
+            mascot.request_affordance_arrival(AffordanceArrival {
+                behavior,
+                target_index: self.target_index,
+                target_behavior: Some(target_behavior),
+                flip_look,
+            });
+        }
+        Ok(())
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.base.draggable(mascot, env)
+    }
+}
+
+// =====================================================================
+// ComplexJump（Java ComplexJump.java L21-226 相当・ActionBase 派生）
+// =====================================================================
+
+/// Java `ComplexJump` / `ComplexMove` の `Characteristics` に列挙する機能名
+/// （実 XML の値）。Java は `getSchema().getString("Breed")` / `("Scan")`
+/// （ローカライズ辞書経由）と比較するが、実資産の値は英語 `Breed` / `Scan` のため
+/// 直接比較する。
+pub(crate) const CHARACTERISTIC_BREED: &str = "Breed";
+pub(crate) const CHARACTERISTIC_SCAN: &str = "Scan";
+
+/// Jump + Scan + Breed の複合（`Characteristics` 属性で機能有効化）。
+/// 非 Scan 時は `TargetX`/`TargetY`（既定 0）へ跳ぶだけで Behavior は差し替えない
+/// （Java L173-190: 差し替えは scanEnabled 時のみ）。
+pub(crate) struct ComplexJumpAction {
+    base: Base,
+    delegate: bordered::BreedDelegate,
+    scaling: f64,
+    affordance: String,
+    target_index: Option<usize>,
+    breed_enabled: bool,
+    scan_enabled: bool,
+}
+
+impl ComplexJumpAction {
+    pub(crate) fn new(attrs: VarMap, animations: Vec<Animation>) -> ComplexJumpAction {
+        ComplexJumpAction {
+            base: Base::new(attrs, animations),
+            delegate: bordered::BreedDelegate::new(),
+            scaling: 1.0,
+            affordance: String::new(),
+            target_index: None,
+            breed_enabled: false,
+            scan_enabled: false,
+        }
+    }
+
+    fn behavior(&mut self) -> String {
+        self.base
+            .text_attr(bordered::PARAM_BEHAVIOR)
+            .unwrap_or_default()
+    }
+
+    fn target_behavior(&mut self) -> String {
+        self.base
+            .text_attr(bordered::PARAM_TARGET_BEHAVIOR)
+            .unwrap_or_default()
+    }
+
+    /// Java L70-78 逐語: `Characteristics` をカンマ区切りで読み、Breed / Scan を立てる。
+    fn parse_characteristics(
+        &mut self,
+        mascot: &Mascot,
+        env: &dyn EnvironmentView,
+    ) -> Result<(), ActionError> {
+        self.breed_enabled = false;
+        self.scan_enabled = false;
+        let characteristics = self.base.text_attr("Characteristics").unwrap_or_default();
+        if characteristics.is_empty() {
+            return Ok(());
+        }
+        for characteristic in characteristics.split(',') {
+            if characteristic == CHARACTERISTIC_BREED {
+                self.breed_enabled = true;
+            } else if characteristic == CHARACTERISTIC_SCAN {
+                self.scan_enabled = true;
+            }
+        }
+        if self.breed_enabled {
+            self.delegate.init_scaling(mascot);
+            self.delegate
+                .validate_born_count(&mut self.base, mascot, env)?;
+            self.delegate
+                .validate_born_interval(&mut self.base, mascot, env)?;
+        }
+        Ok(())
+    }
+}
+
+impl Action for ComplexJumpAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.base.init(mascot);
+        // Java L68: scaling
+        self.scaling = mascot.scale();
+        self.parse_characteristics(mascot, env)?;
+        if self.scan_enabled {
+            // Java L85-95: cannot broadcast while scanning for an affordance
+            mascot.clear_affordances();
+            self.affordance = self.base.text_attr("Affordance").unwrap_or_default();
+            self.target_index = find_affordance_target(env, &self.affordance);
+            if let Some(anchor) = affordance_target_anchor(env, self.target_index, &self.affordance)
+            {
+                self.base.vars.inject("TargetX", f64::from(anchor.0));
+                self.base.vars.inject("TargetY", f64::from(anchor.1));
+            }
+        }
+        Ok(())
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java L98-122: super.hasNext() の後、scan 中は相手保持、
+        // それ以外は distance != 0
+        if !self.base.base_has_next(mascot, env)? {
+            return Ok(false);
+        }
+        if self.scan_enabled {
+            return Ok(
+                affordance_target_anchor(env, self.target_index, &self.affordance).is_some(),
+            );
+        }
+        let target_x = self.base.num_attr(mascot, env, "TargetX", 0)?;
+        let target_y = self.base.num_attr(mascot, env, "TargetY", 0)?;
+        let (distance_x, distance_y) =
+            ScanJumpAction::parabolic_distance(mascot.anchor(), (target_x, target_y));
+        Ok((distance_x * distance_x + distance_y * distance_y).sqrt() != 0.0)
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.base.next_pre(mascot, env)?;
+
+        let target = if self.scan_enabled {
+            // Java L130-132: cannot broadcast while scanning for an affordance
+            mascot.clear_affordances();
+            // Java L134-136: 相手不在 → 移動なし
+            let Some(anchor) = affordance_target_anchor(env, self.target_index, &self.affordance)
+            else {
+                return Ok(());
+            };
+            // Java L141-142: TargetX/Y 注入
+            self.base.vars.inject("TargetX", f64::from(anchor.0));
+            self.base.vars.inject("TargetY", f64::from(anchor.1));
+            anchor
+        } else {
+            // Java L144-145: TargetX/TargetY 属性（既定 0）
+            let target_x = self.base.num_attr(mascot, env, "TargetX", 0)?;
+            let target_y = self.base.num_attr(mascot, env, "TargetY", 0)?;
+            (target_x, target_y)
+        };
+
+        // Java L148-150: 向き更新
+        if mascot.anchor().0 != target.0 {
+            mascot.set_look_right(mascot.anchor().0 < target.0);
+        }
+
+        let (distance_x, distance_y) = ScanJumpAction::parabolic_distance(mascot.anchor(), target);
+        let distance = (distance_x * distance_x + distance_y * distance_y).sqrt();
+        // Java L157: velocity
+        let velocity = self
+            .base
+            .f64_attr(mascot, env, "VelocityParam", DEFAULT_VELOCITY)?
+            * self.scaling;
+
+        if distance != 0.0 {
+            let velocity_x = velocity * distance_x / distance;
+            let velocity_y = velocity * distance_y / distance;
+            self.base.vars.inject("VelocityX", velocity_x);
+            self.base.vars.inject("VelocityY", velocity_y);
+            let (ax, ay) = mascot.anchor();
+            mascot.set_anchor((ax + java_round(velocity_x), ay + java_round(velocity_y)));
+            self.base.apply_effective_animation(mascot, env)?;
+        }
+
+        // Java L170-191: 到達 → snap（scan 時のみ Behavior 差し替え要求）
+        if distance <= velocity {
+            mascot.set_anchor(target);
+            if self.scan_enabled {
+                let behavior = self.behavior();
+                let target_behavior = self.target_behavior();
+                let flip_look =
+                    self.base
+                        .bool_attr(mascot, env, bordered::PARAM_TARGET_LOOK, false)?;
+                mascot.request_affordance_arrival(AffordanceArrival {
+                    behavior,
+                    target_index: self.target_index,
+                    target_behavior: Some(target_behavior),
+                    flip_look,
+                });
+            }
+        }
+
+        // Java L193-196: interval frame 且つ enabled → 生む
+        if self.breed_enabled
+            && self
+                .delegate
+                .is_interval_frame(&mut self.base, mascot, env)?
+            && self.delegate.is_enabled(&mut self.base, mascot, env)?
+        {
+            self.delegate.breed(&mut self.base, mascot, env)?;
+        }
+        Ok(())
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.base.draggable(mascot, env)
+    }
+}
+
+// =====================================================================
+// Mute（Java Mute.java L18-57 相当・InstantAction）
+// =====================================================================
+
+/// Java `Mute`: `Sound` 属性の効果音を止める。属性なしは全停止。
+/// 効果音の実体は Phase 2 のため [`EnvironmentView::stop_sound`] は現状 no-op
+/// （属性評価と停止要求の発行のみ行う）。
+pub(crate) struct MuteAction {
+    base: Base,
+}
+
+impl MuteAction {
+    pub(crate) fn new(attrs: VarMap) -> MuteAction {
+        MuteAction {
+            base: Base::new(attrs, Vec::new()),
+        }
+    }
+
+    /// Java `apply()` L29-52 逐語。
+    fn apply(&mut self, env: &dyn EnvironmentView) -> Result<(), ActionError> {
+        let sound = self.base.text_attr("Sound");
+        env.stop_sound(sound.as_deref());
+        Ok(())
+    }
+}
+
+impl Action for MuteAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.base.init(mascot);
+        // Java InstantAction.init L26-32: base hasNext の間 apply() する
+        if self.base.base_has_next(mascot, env)? {
+            self.apply(env)?;
+        }
+        Ok(())
+    }
+
+    fn has_next(
+        &mut self,
+        _: &mut Mascot,
+        _: &dyn EnvironmentView,
+        _: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java InstantAction.hasNext は final false（L37-39）
+        Ok(false)
+    }
+
+    fn next(
+        &mut self,
+        _: &mut Mascot,
+        _: &dyn EnvironmentView,
+        _: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        // Java InstantAction.tick = no-op（L42-43）
         Ok(())
     }
 
@@ -1321,18 +1761,18 @@ pub fn create(
         ActionKind::ScanMove => Box::new(ScanMoveAction::new(attrs.clone(), scaled)),
         // Transform（Java Transform.java・Animate 派生・#33）
         ActionKind::Transform => Box::new(TransformAction::new(attrs.clone(), scaled)),
-        // stub 11 種
-        ActionKind::ScanJump
-        | ActionKind::ScanInteract
-        | ActionKind::ComplexMove
-        | ActionKind::ComplexJump
-        | ActionKind::BreedMove
-        | ActionKind::BreedJump
-        | ActionKind::Interact
-        | ActionKind::SelfDestruct
-        | ActionKind::Mute
-        | ActionKind::MoveWithTurn
-        | ActionKind::Turn => Box::new(StubAction::new(kind, attrs.clone())),
+        // #35 で本体実装した 11 種
+        ActionKind::ScanJump => Box::new(ScanJumpAction::new(attrs.clone(), scaled)),
+        ActionKind::ScanInteract => Box::new(ScanInteractAction::new(attrs.clone(), scaled)),
+        ActionKind::ComplexMove => Box::new(ComplexMoveAction::new(attrs.clone(), scaled)),
+        ActionKind::ComplexJump => Box::new(ComplexJumpAction::new(attrs.clone(), scaled)),
+        ActionKind::BreedMove => Box::new(BreedMoveAction::new(attrs.clone(), scaled)),
+        ActionKind::BreedJump => Box::new(BreedJumpAction::new(attrs.clone(), scaled)),
+        ActionKind::Interact => Box::new(InteractAction::new(attrs.clone(), scaled)),
+        ActionKind::SelfDestruct => Box::new(SelfDestructAction::new(attrs.clone(), scaled)),
+        ActionKind::Mute => Box::new(MuteAction::new(attrs.clone())),
+        ActionKind::MoveWithTurn => Box::new(MoveWithTurnAction::new(attrs.clone(), scaled)),
+        ActionKind::Turn => Box::new(TurnAction::new(attrs.clone(), scaled)),
         // ComplexAction 系は子アクションが必要なため直接構築不可
         ActionKind::Sequence | ActionKind::Select => {
             return Err(BehaviorError::UnknownBehavior(

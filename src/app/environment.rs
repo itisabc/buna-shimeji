@@ -254,6 +254,11 @@ pub struct Environment {
     /// #32: ScanMove 用の放送スナップショット。Manager が個体 tick の後に
     /// [`Environment::set_affordance_scan`] で差し替える（`&self` 更新・RefCell）。
     affordance_scan: RefCell<Vec<AffordanceScanEntry>>,
+    /// #35: Interact 用の anchor カウント（anchor → 同時に居る個体数）。
+    /// Manager が tick の個体ループ直前に [`Environment::set_overlap_anchors`]、
+    /// 各個体 tick の後に [`Environment::move_overlap_anchor`] で維持する
+    /// （Java `Manager.hasOverlappingMascotsAtPoint` の live 走査相当）。
+    overlap_counts: RefCell<HashMap<(i32, i32), u32>>,
     /// 式評価の `Math.random()` へ供給する乱数（[`EnvironmentView::random_unit`]）。
     /// 行動選択用の Manager 注入 rng とは別ストリーム（2026-09-19 の意図的差異・
     /// `EnvironmentView::random_unit` の doc 参照）。既定は OS シードの
@@ -307,6 +312,7 @@ impl Environment {
             pinned: RefCell::new(None),
             holder_scope: Cell::new(None),
             affordance_scan: RefCell::new(Vec::new()),
+            overlap_counts: RefCell::new(HashMap::new()),
             rng: RefCell::new(Box::new(JavaRandom::from_os())),
             null_ctx: NullEnvCtx,
             breeding: true,
@@ -638,6 +644,34 @@ impl Environment {
         *self.affordance_scan.borrow_mut() = entries;
     }
 
+    /// Interact 用の anchor カウントを全個体の anchor で再構築する（#35）。
+    /// Manager が tick の個体ループ直前に呼ぶ。
+    pub fn set_overlap_anchors(&self, anchors: impl IntoIterator<Item = (i32, i32)>) {
+        let mut counts = self.overlap_counts.borrow_mut();
+        counts.clear();
+        for anchor in anchors {
+            *counts.entry(anchor).or_insert(0) += 1;
+        }
+    }
+
+    /// 1 個体の anchor 移動を anchor カウントへ反映する（#35）。
+    /// Manager が各個体 tick の直後に呼ぶ。これにより Interact の重なり判定は
+    /// Java の live 走査（tick 済みの個体は新 anchor・未 tick は旧 anchor）と同じ
+    /// 観測になる。
+    pub fn move_overlap_anchor(&self, from: (i32, i32), to: (i32, i32)) {
+        if from == to {
+            return;
+        }
+        let mut counts = self.overlap_counts.borrow_mut();
+        if let Some(value) = counts.get_mut(&from) {
+            *value -= 1;
+            if *value == 0 {
+                counts.remove(&from);
+            }
+        }
+        *counts.entry(to).or_insert(0) += 1;
+    }
+
     /// 点 `(x, y)` を含む最前面のトップレベル窓 `(id, rect)` を返す
     /// （[`OsSource::window_at_point`] への passthrough・#30 item 4）。
     /// whitelist / blacklist 非適用の生の窓取得（R12）。Manager の
@@ -882,6 +916,17 @@ impl EnvironmentView for Environment {
     /// 呼び出しもスキャン中の個体の 1 tick あたり数回）。
     fn affordance_scan(&self) -> Vec<AffordanceScanEntry> {
         self.affordance_scan.borrow().clone()
+    }
+
+    /// Interact 用の重なり判定（Manager が `set_overlap_anchors` /
+    /// `move_overlap_anchor` で維持する anchor カウント・#35）。
+    fn overlapping_mascots_at(&self, anchor: (i32, i32)) -> bool {
+        self.overlap_counts
+            .borrow()
+            .get(&anchor)
+            .copied()
+            .unwrap_or(0)
+            > 1
     }
 
     /// 式評価の `Math.random()` へ注入済み rng を供給する（2026-09-19）。

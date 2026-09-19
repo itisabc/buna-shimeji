@@ -83,7 +83,9 @@ pub struct AffordanceArrival {
     /// 相手の index（[`AffordanceScanEntry::index`]）。相手不在は None。
     pub target_index: Option<usize>,
     /// 相手に設定する Behavior 名（Java `TargetBehaviour` 属性）。
-    pub target_behavior: String,
+    /// `Some(name)` = 差し替える（空文字列は Java 同様「構築を試みて失敗ログ」）、
+    /// `None` = 相手の Behavior に触れない（ScanInteract の空 TargetBehaviour）。
+    pub target_behavior: Option<String>,
     /// 相手の向きを自分と逆にするか（Java `TargetLook` 属性）。
     pub flip_look: bool,
 }
@@ -260,6 +262,20 @@ pub trait EnvironmentView {
     fn affordance_scan(&self) -> Vec<AffordanceScanEntry> {
         Vec::new()
     }
+
+    /// 指定 anchor に 2 体以上のマスコットが居るか（Java
+    /// `Manager.hasOverlappingMascotsAtPoint` L581-601 相当）。`Interact` が
+    /// 継続判定に使う。既定 false = 重なりなし（テストダブルは未実装で安全）。
+    fn overlapping_mascots_at(&self, _anchor: (i32, i32)) -> bool {
+        false
+    }
+
+    /// 効果音の停止（Java `Mute.apply` L28-52 相当）。
+    /// `Some(name)` = その効果音ファイルの再生中クリップを停止、`None` =
+    /// 効果音が有効なら全停止。効果音の実体は Phase 2 のため、現行の
+    /// [`Environment`](crate::app::environment::Environment) 実装は no-op
+    /// （Mute は属性評価のみ行い、音は鳴らない）。
+    fn stop_sound(&self, _sound: Option<&str>) {}
 
     /// 式評価の `Math.random()` へ供給する [0,1) 一様乱数
     /// （[`EvalContext::random_unit`](crate::config::script::EvalContext::random_unit) の

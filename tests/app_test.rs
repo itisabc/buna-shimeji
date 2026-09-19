@@ -1357,3 +1357,231 @@ fn scan_move_arrival_swaps_both_behaviors_through_manager() {
         "TargetLook=true で両者の向きが同じとき相手を反転する"
     );
 }
+
+// =====================================================================
+// #35: Interact の重なり追跡と ScanInteract の空 TargetBehaviour
+// =====================================================================
+
+/// Interact / ScanInteract を含む actions 定義。
+fn interact_fixture_actions() -> ActionsConfig {
+    let mut map = BTreeMap::new();
+    map.insert(
+        "Idle".to_string(),
+        ActionDef::Animate {
+            border: None,
+            attrs: attrs(&[("Affordance", "talk")]),
+            animations: vec![anim(
+                None,
+                false,
+                vec![pose("idle.png", (64, 64), (0, 0), 100)],
+            )],
+        },
+    );
+    map.insert(
+        "Interact".to_string(),
+        ActionDef::Embedded {
+            class: "com.group_finity.mascot.action.Interact".to_string(),
+            border: None,
+            attrs: attrs(&[("Behavior", "Hug")]),
+            animations: vec![anim(
+                None,
+                false,
+                vec![pose("hug.png", (64, 64), (0, 0), 2)],
+            )],
+        },
+    );
+    map.insert(
+        "ScanInteract".to_string(),
+        ActionDef::Embedded {
+            class: "com.group_finity.mascot.action.ScanInteract".to_string(),
+            border: None,
+            attrs: attrs(&[
+                ("Affordance", "talk"),
+                ("Behavior", "Hug"),
+                ("TargetLook", "true"),
+            ]),
+            animations: vec![anim(
+                None,
+                false,
+                vec![pose("hug.png", (64, 64), (0, 0), 2)],
+            )],
+        },
+    );
+    map.insert(
+        "Hug".to_string(),
+        ActionDef::Animate {
+            border: None,
+            attrs: VarMap::new(),
+            animations: vec![anim(
+                None,
+                false,
+                vec![pose("hug.png", (64, 64), (0, 0), 30)],
+            )],
+        },
+    );
+    map.insert(
+        "Fall".to_string(),
+        ActionDef::Animate {
+            border: None,
+            attrs: VarMap::new(),
+            animations: vec![anim(
+                None,
+                false,
+                vec![pose("fall.png", (64, 64), (0, 0), 30)],
+            )],
+        },
+    );
+    ActionsConfig { actions: map }
+}
+
+/// interact_fixture_actions の BehaviorTable（頻度 0 = 明示指定のみ）。
+fn interact_fixture_table() -> BehaviorTable {
+    let def = |name: &str| BehaviorDef {
+        name: name.to_string(),
+        frequency: 0,
+        hidden: false,
+        toggleable: false,
+        action: SequenceChild::Ref {
+            name: name.to_string(),
+            attrs: VarMap::new(),
+        },
+        next: None,
+    };
+    BehaviorTable::new(&BehaviorsConfig {
+        entries: [
+            "ChaseMouse",
+            "Fall",
+            "Dragged",
+            "Thrown",
+            "Idle",
+            "Interact",
+            "ScanInteract",
+            "Hug",
+        ]
+        .iter()
+        .map(|name| BehaviorEntry::Single(def(name)))
+        .collect(),
+        ..Default::default()
+    })
+}
+
+/// Interact は Manager が維持する anchor カウント（同 anchor 2 体以上）で継続し、
+/// 最終フレームで自分の Behavior を差し替える（Java Interact.java L30-46）。
+/// 相手は Behavior を変えない。
+#[test]
+fn manager_interact_switches_own_behavior_when_overlapping() {
+    let (env, _state) = single_monitor_env();
+    let mut manager = Manager::new(
+        env,
+        interact_fixture_table(),
+        Box::new(ConfigFactory {
+            actions: interact_fixture_actions(),
+        }),
+        Box::new(BoxedRng {
+            values: vec![0.5; 128],
+            consumed: 0,
+        }),
+    );
+    manager.set_exit_on_last_removed(false);
+    manager.set_image_set_resolver(single_set_resolver("TestSet", empty_image_set("TestSet")));
+
+    // 同 anchor に 2 体を先に定着させる（Java では Interact へ遷移する時点で
+    // 実行個体は既に manager リストに居るため、重なりカウントが成立する）
+    spawn_into(&mut manager, "TestSet", (1000, 1040), false, "Idle");
+    spawn_into(&mut manager, "TestSet", (1000, 1040), false, "Hug");
+    manager.tick(Instant::now()); // spawn 反映 + 重なりカウント成立
+    manager.tick(Instant::now());
+
+    // 既存個体（同 anchor）の重なりを観測して Interact へ遷移させる
+    manager.set_behavior_at(1, "Interact");
+    let mut after_set: Vec<Option<String>> = Vec::new();
+    manager.apply_all(|m| after_set.push(m.behavior_name().map(str::to_string)));
+    assert_eq!(
+        after_set[1].as_deref(),
+        Some("Interact"),
+        "重なり中は Interact の init が継続する"
+    );
+
+    manager.tick(Instant::now()); // time 0: 継続
+    let mut after_first: Vec<Option<String>> = Vec::new();
+    manager.apply_all(|m| after_first.push(m.behavior_name().map(str::to_string)));
+    assert_eq!(
+        after_first[1].as_deref(),
+        Some("Interact"),
+        "重なり中は継続する"
+    );
+
+    manager.tick(Instant::now()); // time 1 == duration-1 → 差し替え
+    let mut final_state: Vec<(Option<String>, (i32, i32))> = Vec::new();
+    manager.apply_all(|m| final_state.push((m.behavior_name().map(str::to_string), m.anchor())));
+    assert_eq!(
+        final_state[1].0.as_deref(),
+        Some("Hug"),
+        "最終フレームで自分の Behavior が差し替わる"
+    );
+    assert_eq!(
+        final_state[0].0.as_deref(),
+        Some("Idle"),
+        "相手は変化しない"
+    );
+}
+
+/// ScanInteract は `TargetBehaviour` が空のとき相手の Behavior に触れないが、
+/// `TargetLook` の向き反転は適用する（Java ScanInteract.java L102-107）。
+#[test]
+fn manager_scan_interact_flips_target_without_setting_target_behavior() {
+    let (env, _state) = single_monitor_env();
+    let mut manager = Manager::new(
+        env,
+        interact_fixture_table(),
+        Box::new(ConfigFactory {
+            actions: interact_fixture_actions(),
+        }),
+        Box::new(BoxedRng {
+            values: vec![0.5; 128],
+            consumed: 0,
+        }),
+    );
+    manager.set_exit_on_last_removed(false);
+    manager.set_image_set_resolver(single_set_resolver("TestSet", empty_image_set("TestSet")));
+
+    // 放送側（affordance talk）を先に 1 tick 動かして放送させる
+    spawn_into(&mut manager, "TestSet", (996, 1040), false, "Idle");
+    manager.tick(Instant::now());
+
+    spawn_into(&mut manager, "TestSet", (1000, 1040), false, "ScanInteract");
+    manager.tick(Instant::now()); // time 0: 継続
+    manager.tick(Instant::now()); // time 1 == duration-1 → 差し替え + 向き反転
+
+    let mut final_state: Vec<(Option<String>, bool)> = Vec::new();
+    manager
+        .apply_all(|m| final_state.push((m.behavior_name().map(str::to_string), m.look_right())));
+    assert_eq!(
+        final_state[1].0.as_deref(),
+        Some("Hug"),
+        "自分の Behavior は差し替わる"
+    );
+    assert_eq!(
+        final_state[0].0.as_deref(),
+        Some("Idle"),
+        "TargetBehaviour 空なので相手の Behavior は変わらない"
+    );
+    assert!(final_state[0].1, "TargetLook=true で相手の向きは反転する");
+}
+
+/// Environment の anchor カウント API（Interact 用・#35）: 再構築 → 差分移動 →
+/// 同 anchor 2 体以上で true。
+#[test]
+fn environment_overlap_anchors_track_counts_and_moves() {
+    let (env, _state) = single_monitor_env();
+    env.set_overlap_anchors([(100, 200), (100, 200), (300, 400)]);
+    assert!(env.overlapping_mascots_at((100, 200)));
+    assert!(!env.overlapping_mascots_at((300, 400)));
+    assert!(!env.overlapping_mascots_at((0, 0)));
+
+    env.move_overlap_anchor((300, 400), (100, 200));
+    assert!(!env.overlapping_mascots_at((300, 400)));
+    env.move_overlap_anchor((100, 200), (500, 600));
+    assert!(env.overlapping_mascots_at((100, 200)));
+    assert!(!env.overlapping_mascots_at((500, 600)));
+}

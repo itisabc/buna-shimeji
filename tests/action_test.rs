@@ -107,6 +107,10 @@ struct SynthEnv {
     spawns: RefCell<Vec<SpawnRec>>,
     /// #32: ScanMove 用スナップショット（テストから差し替える）。
     scan: RefCell<Vec<AffordanceScanEntry>>,
+    /// #35: Interact 用の重なりアンカー（テストから差し替える）。
+    overlapping: RefCell<Vec<(i32, i32)>>,
+    /// #35: Mute が発行した stop_sound 要求の記録。
+    stopped_sounds: RefCell<Vec<Option<String>>>,
     ctx: ProbeCtx,
 }
 
@@ -131,6 +135,8 @@ impl SynthEnv {
             moved_to: RefCell::new(Vec::new()),
             spawns: RefCell::new(Vec::new()),
             scan: RefCell::new(Vec::new()),
+            overlapping: RefCell::new(Vec::new()),
+            stopped_sounds: RefCell::new(Vec::new()),
             ctx: ProbeCtx,
         }
     }
@@ -145,6 +151,11 @@ impl SynthEnv {
                 affordances: affordances.iter().map(|a| a.to_string()).collect(),
             })
             .collect();
+    }
+
+    /// #35: Interact が重なりと見なすアンカーを設定する。
+    fn set_overlapping(&self, anchors: &[(i32, i32)]) {
+        *self.overlapping.borrow_mut() = anchors.to_vec();
     }
 }
 
@@ -252,6 +263,18 @@ impl EnvironmentView for SynthEnv {
     /// #32: ScanMove が参照するスナップショット。
     fn affordance_scan(&self) -> Vec<AffordanceScanEntry> {
         self.scan.borrow().clone()
+    }
+
+    /// #35: Interact 用の重なり判定（テスト設定値の含有判定）。
+    fn overlapping_mascots_at(&self, anchor: (i32, i32)) -> bool {
+        self.overlapping.borrow().contains(&anchor)
+    }
+
+    /// #35: Mute の停止要求を記録する。
+    fn stop_sound(&self, sound: Option<&str>) {
+        self.stopped_sounds
+            .borrow_mut()
+            .push(sound.map(str::to_string));
     }
 
     fn queue_spawn(
@@ -646,35 +669,6 @@ fn refresh_hotspots_cleared_on_animation_condition_error() {
     assert!(m.remove_pending(), "Eval エラーは dispose 経路に伝播する");
 }
 
-/// stub 11 種: has_next=false で即完了 + 警告ログ（design §1.8(a)）。
-#[test]
-fn stub_kinds_complete_immediately() {
-    let stub_kinds: [ActionKind; 11] = [
-        ActionKind::ScanJump,
-        ActionKind::ScanInteract,
-        ActionKind::ComplexMove,
-        ActionKind::ComplexJump,
-        ActionKind::BreedMove,
-        ActionKind::BreedJump,
-        ActionKind::Interact,
-        ActionKind::SelfDestruct,
-        ActionKind::Mute,
-        ActionKind::MoveWithTurn,
-        ActionKind::Turn,
-    ];
-    for kind in stub_kinds {
-        let mut action = create(kind, &attrs(&[]), vec![], 1.0).unwrap();
-        let mut m = mascot_at((1000, 500));
-        let env = SynthEnv::new();
-        let mut rng = FakeRng::repeated(0.5, 8);
-        action.init(&mut m, &env, &mut rng).unwrap();
-        assert!(
-            !action.has_next(&mut m, &env, &mut rng).unwrap(),
-            "stub は 1 tick も続けてはいけない"
-        );
-    }
-}
-
 // =====================================================================
 // #33: Transform（Java Transform.java L19-62・Animate 派生）
 // =====================================================================
@@ -1000,7 +994,8 @@ fn scan_move_approaches_affordance_and_requests_arrival() {
     assert_eq!(arrival.behavior, "Arrived", "Behaviour 属性（US 綴り）");
     assert_eq!(arrival.target_index, Some(1), "探索で見つけた相手 index");
     assert_eq!(
-        arrival.target_behavior, "Sit",
+        arrival.target_behavior.as_deref(),
+        Some("Sit"),
         "TargetBehaviour 属性は US 綴り"
     );
     assert!(arrival.flip_look, "TargetLook 属性");
@@ -2896,5 +2891,496 @@ fn breed_born_position_scales_with_mascot_set_scale() {
         spawns[0].anchor,
         (968, 564),
         "BornX/Y を round(*2.0)（env.scaling=7.0 非依存）"
+    );
+}
+
+// =====================================================================
+// #35: 旧 stub 11 種の本体実装（Java 正本 .tmp/java-ref/action/）
+// =====================================================================
+
+/// Turn（Java Turn.java L16-50）: `LookRight` と現在の向きが食い違うと
+/// hasNext で turning が立ち、tick で向きを反転して LookRight 側を向く。
+/// アニメ duration で完了する（Java L31）。
+#[test]
+fn turn_flips_look_right_and_completes_at_animation_duration() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((1000, 500));
+    let table = x_then_y_table();
+    let mut factory = FnFactory::constant(make_idle_fallback);
+    assert!(!m.look_right());
+
+    let action = create(
+        ActionKind::Turn,
+        &attrs(&[("LookRight", "true")]),
+        vec![anim(None, false, vec![pose("turn.png", (0, 0), (0, 0), 3)])],
+        1.0,
+    );
+    m.set_behavior(
+        Some(BehaviorRunner::new("X", action.unwrap())),
+        &env,
+        &table,
+        &mut factory,
+        &mut rng,
+    )
+    .unwrap();
+
+    for _ in 0..3 {
+        m.tick(&env, &table, &mut factory, &mut rng); // time 0 / 1 / 2
+        assert_eq!(m.behavior_name(), Some("X"), "duration 未満は Turn のまま");
+    }
+    assert!(m.look_right(), "tick で LookRight=true へ反転する");
+
+    m.tick(&env, &table, &mut factory, &mut rng); // time 3 == duration
+    assert_eq!(
+        m.behavior_name(),
+        Some("Y"),
+        "アニメ duration 到達で完了し次行動へ遷移する"
+    );
+}
+
+/// Turn の `LookRight` 未指定は現在の向きの反転が既定（Java L48）。
+#[test]
+fn turn_defaults_to_flipping_current_direction() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 8);
+    let mut m = mascot_at((1000, 500));
+    assert!(!m.look_right());
+    let mut action = create(
+        ActionKind::Turn,
+        &attrs(&[]),
+        vec![anim(None, false, vec![pose("turn.png", (0, 0), (0, 0), 2)])],
+        1.0,
+    )
+    .unwrap();
+    action.init(&mut m, &env, &mut rng).unwrap();
+    assert!(
+        action.has_next(&mut m, &env, &mut rng).unwrap(),
+        "既定 = 反転なので turning が立ち継続する"
+    );
+    action.next(&mut m, &env, &mut rng).unwrap();
+    assert!(m.look_right(), "既定で現在の向きを反転する");
+}
+
+/// Interact（Java Interact.java L19-51）: 自分の anchor に他個体が重なっている間だけ
+/// 継続し、最終フレームで自分を `Behaviour` 属性へ差し替える要求を出す。
+#[test]
+fn interact_requires_overlap_and_requests_behavior_on_last_frame() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    env.set_overlapping(&[(1000, 500)]);
+    let mut m = mascot_at((1000, 500));
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    let action = create(
+        ActionKind::Interact,
+        &attrs(&[("Behavior", "Hug")]),
+        vec![anim(None, false, vec![pose("hug.png", (0, 0), (0, 0), 2)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+
+    m.tick(&env, &table, &mut factory, &mut rng); // time 0
+    assert!(
+        m.take_affordance_arrival().is_none(),
+        "最終フレーム前は差し替え要求を出さない"
+    );
+    m.tick(&env, &table, &mut factory, &mut rng); // time 1 == duration-1
+    let arrival = m
+        .take_affordance_arrival()
+        .expect("最終フレームで自分の Behavior 差し替えを要求する");
+    assert_eq!(arrival.behavior, "Hug");
+    assert_eq!(arrival.target_index, None, "相手には触れない");
+    assert_eq!(arrival.target_behavior, None);
+
+    // 重なりが無ければ継続しない（Java L31）
+    let env2 = SynthEnv::new();
+    let mut m2 = mascot_at((1000, 500));
+    let mut action2 = create(
+        ActionKind::Interact,
+        &attrs(&[("Behavior", "Hug")]),
+        vec![anim(None, false, vec![pose("hug.png", (0, 0), (0, 0), 2)])],
+        1.0,
+    )
+    .unwrap();
+    action2.init(&mut m2, &env2, &mut rng).unwrap();
+    assert!(!action2.has_next(&mut m2, &env2, &mut rng).unwrap());
+}
+
+/// SelfDestruct（Java SelfDestruct.java L16-32）: 最終フレームで自分を消す。
+#[test]
+fn self_destruct_disposes_at_last_frame() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 8);
+    let mut m = mascot_at((1000, 500));
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    let action = create(
+        ActionKind::SelfDestruct,
+        &attrs(&[]),
+        vec![anim(None, false, vec![pose("boom.png", (0, 0), (0, 0), 2)])],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+
+    m.tick(&env, &table, &mut factory, &mut rng); // time 0
+    assert!(!m.remove_pending(), "最終フレーム前は消えない");
+    m.tick(&env, &table, &mut factory, &mut rng); // time 1 == duration-1
+    assert!(m.remove_pending(), "最終フレームで dispose する");
+}
+
+/// ScanJump（Java ScanJump.java L21-153）: アフォーダンス保持者へ放物線ジャンプし、
+/// 到達（distance <= velocity）で相手 anchor にスナップして自分と相手の Behavior を
+/// 差し替える要求を出す。
+#[test]
+fn scan_jump_approaches_affordance_and_requests_arrival() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    env.set_scan(vec![(1, (996, 1040), &["cushion"])]);
+    let mut m = mascot_at((1000, 1040));
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    let action = create(
+        ActionKind::ScanJump,
+        &attrs(&[
+            ("Affordance", "cushion"),
+            ("Behavior", "Arrived"),
+            ("TargetBehavior", "Sit"),
+            ("TargetLook", "true"),
+            ("VelocityParam", "20"),
+        ]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("jump.png", (64, 64), (0, 0), 30)],
+        )],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    m.tick(&env, &table, &mut factory, &mut rng);
+
+    assert_eq!(
+        m.anchor(),
+        (996, 1040),
+        "distance <= velocity で相手 anchor へ"
+    );
+    let arrival = m
+        .take_affordance_arrival()
+        .expect("到達で Behavior 差し替えを要求する");
+    assert_eq!(arrival.behavior, "Arrived");
+    assert_eq!(arrival.target_index, Some(1));
+    assert_eq!(arrival.target_behavior.as_deref(), Some("Sit"));
+    assert!(arrival.flip_look);
+}
+
+/// ScanJump は相手不在で hasNext=false（移動しない）。init で相手が見つからなくても
+/// 継続しない（Java L72-74）。
+#[test]
+fn scan_jump_without_target_completes_immediately() {
+    let env = SynthEnv::new(); // スキャン相手なし
+    let mut rng = FakeRng::repeated(0.5, 8);
+    let mut m = mascot_at((1000, 1040));
+    let mut action = create(
+        ActionKind::ScanJump,
+        &attrs(&[("Affordance", "cushion"), ("VelocityParam", "20")]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("jump.png", (64, 64), (0, 0), 30)],
+        )],
+        1.0,
+    )
+    .unwrap();
+    action.init(&mut m, &env, &mut rng).unwrap();
+    assert!(!action.has_next(&mut m, &env, &mut rng).unwrap());
+    assert_eq!(m.anchor(), (1000, 1040), "移動しない");
+}
+
+/// ComplexJump（Java ComplexJump.java L21-226）非 Scan: `TargetX`/`TargetY`（既定 0）へ
+/// 放物線ジャンプする。差し替え要求は出さない（Java L173-190 は scan 時のみ）。
+#[test]
+fn complex_jump_follows_target_coordinates_without_arrival() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((100, 500));
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    // anchor(100,500) → target(300,500): distanceX=200 / distanceY=-100 / distance≈223.6
+    // velocity=10 → vx=8.94→9 / vy=-4.47→-4
+    let action = create(
+        ActionKind::ComplexJump,
+        &attrs(&[
+            ("TargetX", "300"),
+            ("TargetY", "500"),
+            ("VelocityParam", "10"),
+        ]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("jump.png", (64, 64), (0, 0), 30)],
+        )],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    m.tick(&env, &table, &mut factory, &mut rng);
+
+    assert_eq!(m.anchor(), (109, 496), "放物線の 1 tick 分だけ移動する");
+    assert!(
+        m.take_affordance_arrival().is_none(),
+        "非 Scan は Behavior を差し替えない"
+    );
+}
+
+/// ComplexJump + `Characteristics="Scan"`: アフォーダンス保持者を追跡し、到達で
+/// 自分と相手の Behavior 差し替えを要求する（Java L85-95 / L173-190）。
+#[test]
+fn complex_jump_scan_characteristic_tracks_affordance() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    env.set_scan(vec![(1, (996, 1040), &["talk"])]);
+    let mut m = mascot_at((1000, 1040));
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    let action = create(
+        ActionKind::ComplexJump,
+        &attrs(&[
+            ("Characteristics", "Scan"),
+            ("Affordance", "talk"),
+            ("Behavior", "Arrived"),
+            ("TargetBehavior", "Sit"),
+            ("VelocityParam", "20"),
+        ]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("jump.png", (64, 64), (0, 0), 30)],
+        )],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    m.tick(&env, &table, &mut factory, &mut rng);
+
+    assert_eq!(m.anchor(), (996, 1040));
+    let arrival = m.take_affordance_arrival().expect("Scan は到達で要求する");
+    assert_eq!(arrival.behavior, "Arrived");
+    assert_eq!(arrival.target_index, Some(1));
+    assert_eq!(arrival.target_behavior.as_deref(), Some("Sit"));
+}
+
+/// ComplexMove（Java ComplexMove.java L21-265）非 Scan: `TargetX`/`TargetY` へ移動し、
+/// 到達で自分（`Behaviour`）と相手（`TargetBehaviour`）の差し替えを要求する。
+/// 相手不在（非 Scan）は target_index = None。
+#[test]
+fn complex_move_follows_target_and_requests_both_behaviors() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((1000, 500));
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    let action = create(
+        ActionKind::ComplexMove,
+        &attrs(&[
+            ("TargetX", "998"),
+            ("TargetY", "500"),
+            ("Behavior", "Arrived"),
+            ("TargetBehavior", "Sit"),
+        ]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("walk.png", (64, 64), (-2, 0), 30)],
+        )],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    m.tick(&env, &table, &mut factory, &mut rng);
+
+    assert_eq!(
+        m.anchor(),
+        (998, 500),
+        "overshoot クランプで target に一致する"
+    );
+    let arrival = m.take_affordance_arrival().expect("到達で要求する");
+    assert_eq!(arrival.behavior, "Arrived");
+    assert_eq!(arrival.target_behavior.as_deref(), Some("Sit"));
+    assert_eq!(arrival.target_index, None, "非 Scan は相手が居ない");
+}
+
+/// ScanInteract（Java ScanInteract.java L21-160）: その場から動かず、毎 tick 相手を
+/// 追跡して最終フレームで自分を差し替える。`TargetBehaviour` が空なら相手の Behavior
+/// には触れず `None` を渡す（Java L102 の空ガード。TargetLook は別途適用）。
+#[test]
+fn scan_interact_tracks_target_and_requests_without_target_behavior() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    env.set_scan(vec![(1, (996, 1040), &["talk"])]);
+    let mut m = mascot_at((1000, 1040));
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    let action = create(
+        ActionKind::ScanInteract,
+        &attrs(&[
+            ("Affordance", "talk"),
+            ("Behavior", "Hug"),
+            ("TargetLook", "true"),
+        ]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("sit.png", (64, 64), (0, 0), 2)],
+        )],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+
+    m.tick(&env, &table, &mut factory, &mut rng); // time 0
+    assert!(m.take_affordance_arrival().is_none());
+    assert_eq!(m.anchor(), (1000, 1040), "その場から動かない");
+    m.tick(&env, &table, &mut factory, &mut rng); // time 1 == duration-1
+    let arrival = m.take_affordance_arrival().expect("最終フレームで要求する");
+    assert_eq!(arrival.behavior, "Hug");
+    assert_eq!(arrival.target_index, Some(1));
+    assert_eq!(
+        arrival.target_behavior, None,
+        "TargetBehaviour 空は相手の Behavior に触れない"
+    );
+    assert!(
+        arrival.flip_look,
+        "TargetLook は相手 Behavior 無しでも適用される"
+    );
+}
+
+/// MoveWithTurn（Java MoveWithTurn.java L18-57）: turning 中は常に最後のアニメを使う。
+/// lookRight=false・TargetX=1002 → 方向転換で turning。最後のアニメ velocity (5,0) が
+/// lookRight=true で反転し anchor は 1000-5=995 になる（先頭アニメなら 998）。
+#[test]
+fn move_with_turn_uses_last_animation_while_turning() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((1000, 500));
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    let action = create(
+        ActionKind::MoveWithTurn,
+        &attrs(&[("TargetX", "1002")]),
+        vec![
+            anim(None, false, vec![pose("walk.png", (64, 64), (2, 0), 3)]),
+            anim(None, true, vec![pose("turn.png", (64, 64), (5, 0), 30)]),
+        ],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    m.tick(&env, &table, &mut factory, &mut rng);
+
+    assert!(m.look_right());
+    assert_eq!(
+        m.anchor(),
+        (995, 500),
+        "turning 中は最後のアニメ（velocity 5・lookRight 反転）を使う"
+    );
+}
+
+/// BreedMove（Java BreedMove.java L17-44）: Move しながら `BornInterval` ごとに増殖する。
+#[test]
+fn breed_move_breeds_on_interval() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((1000, 500));
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    let action = create(
+        ActionKind::BreedMove,
+        &attrs(&[("TargetX", "1010"), ("BornX", "4"), ("BornInterval", "2")]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("walk.png", (64, 64), (1, 0), 30)],
+        )],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+
+    m.tick(&env, &table, &mut factory, &mut rng); // time 0: 0 % 2 == 0 → breed
+    assert_eq!(env.spawns.borrow().len(), 1, "interval frame で 1 体生む");
+    assert_eq!(
+        env.spawns.borrow()[0].anchor,
+        (995, 500),
+        "BornX を向きで反転"
+    );
+    m.tick(&env, &table, &mut factory, &mut rng); // time 1: 1 % 2 != 0 → 生まない
+    assert_eq!(env.spawns.borrow().len(), 1);
+    m.tick(&env, &table, &mut factory, &mut rng); // time 2: 生む
+    assert_eq!(env.spawns.borrow().len(), 2);
+}
+
+/// BreedJump（Java BreedJump.java L17-44）: Jump しながら `BornInterval` ごとに増殖する。
+#[test]
+fn breed_jump_breeds_on_interval() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let mut m = mascot_at((100, 500));
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+
+    let action = create(
+        ActionKind::BreedJump,
+        &attrs(&[
+            ("TargetX", "100000"),
+            ("TargetY", "500"),
+            ("VelocityParam", "1"),
+            ("BornInterval", "1"),
+        ]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("jump.png", (64, 64), (0, 0), 30)],
+        )],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+
+    m.tick(&env, &table, &mut factory, &mut rng);
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(env.spawns.borrow().len(), 2, "interval 1 は毎 tick 生む");
+}
+
+/// Mute（Java Mute.java L18-57）: `Sound` 属性があればその音を、無ければ全停止を
+/// 要求する（InstantAction = 即完了）。効果音の実体は Phase 2 のため要求の記録のみ。
+#[test]
+fn mute_requests_named_sound_or_stop_all() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 4);
+    let mut m = mascot_at((0, 0));
+
+    let mut named = create(
+        ActionKind::Mute,
+        &attrs(&[("Sound", "shime.wav")]),
+        vec![],
+        1.0,
+    )
+    .unwrap();
+    named.init(&mut m, &env, &mut rng).unwrap();
+    assert!(!named.has_next(&mut m, &env, &mut rng).unwrap());
+    assert_eq!(
+        *env.stopped_sounds.borrow(),
+        [Some("shime.wav".to_string())],
+        "Sound 属性の停止要求"
+    );
+
+    let mut all = create(ActionKind::Mute, &attrs(&[]), vec![], 1.0).unwrap();
+    all.init(&mut m, &env, &mut rng).unwrap();
+    assert_eq!(
+        env.stopped_sounds.borrow().last(),
+        Some(&None),
+        "Sound 無しは全停止要求"
     );
 }

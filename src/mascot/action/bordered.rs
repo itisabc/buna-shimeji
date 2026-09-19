@@ -24,6 +24,7 @@ use super::super::{
     AffordanceArrival, EnvironmentView, Mascot, MascotContext, Rng, TransformRequest,
 };
 use super::{Base, FallAction};
+use crate::config::script::EvalError;
 use crate::mascot::behavior::Action;
 use crate::render::imageset::java_round;
 
@@ -404,6 +405,17 @@ impl MoveAction {
         mascot: &mut Mascot,
         env: &dyn EnvironmentView,
     ) -> Result<(), ActionError> {
+        self.move_tick_with(mascot, env, TurnAnimMode::Automatic)
+    }
+
+    /// [`move_tick`](Self::move_tick) の転回アニメ選択方式つき版
+    /// （MoveWithTurn が [`TurnAnimMode::WithTurnLast`] で使う）。
+    pub(crate) fn move_tick_with(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        turn_mode: TurnAnimMode,
+    ) -> Result<(), ActionError> {
         let target_x = self
             .bordered
             .base
@@ -418,9 +430,13 @@ impl MoveAction {
             &mut self.has_turning,
             mascot,
             env,
-            (target_x, target_y),
-            // Java L69/L76: 既定値の軸は目標にしない（無条件クランプしない）
-            (target_x != DEFAULT_TARGET_X, target_y != DEFAULT_TARGET_Y),
+            MoveTarget {
+                position: (target_x, target_y),
+                // Java L69/L76: 既定値の軸は目標にしない（無条件クランプしない）
+                aim_x: target_x != DEFAULT_TARGET_X,
+                aim_y: target_y != DEFAULT_TARGET_Y,
+            },
+            turn_mode,
         )
     }
 }
@@ -457,23 +473,81 @@ pub(crate) fn get_turning_animation(
     Ok(None)
 }
 
+/// 転回アニメの選択方式（Java Move / MoveWithTurn の `getAnimation` /
+/// `hasTurningAnimation` 差）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnAnimMode {
+    /// `turning == animation.isTurn()` の最初の有効アニメを選ぶ
+    /// （Java Move.java L107-126 / ScanMove.java L141-158）。
+    Automatic,
+    /// turning 中は常に最後のアニメ、それ以外は `0..len-1` の最初の有効アニメ
+    /// （Java MoveWithTurn.java L29-52 逐語。`isTurn` は見ない）。
+    WithTurnLast,
+}
+
+/// 転回アニメの index 選択（[`TurnAnimMode`] 分岐）。
+fn select_turn_animation(
+    mode: TurnAnimMode,
+    bordered: &mut Bordered,
+    turning: bool,
+    mascot: &Mascot,
+    env: &dyn EnvironmentView,
+) -> Result<Option<usize>, ActionError> {
+    match mode {
+        TurnAnimMode::Automatic => get_turning_animation(bordered, turning, mascot, env),
+        TurnAnimMode::WithTurnLast => {
+            if turning {
+                // Java MoveWithTurn L32-33: force to last animation if turning
+                return Ok(bordered.base.animations.len().checked_sub(1));
+            }
+            // Java MoveWithTurn L35-50: 0..size-1 の最初の有効アニメ（isTurn 不問）
+            let last = bordered.base.animations.len().saturating_sub(1);
+            for index in 0..last {
+                let snapshot = mascot.eval_snapshot();
+                let ctx = MascotContext {
+                    snapshot: &snapshot,
+                    env,
+                };
+                if animation_is_effective(
+                    &bordered.base.animations[index],
+                    &mut bordered.base.vars,
+                    &ctx,
+                )? {
+                    return Ok(Some(index));
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Move 系の目標（座標 + 軸ごとの有効フラグ）。Java Move は属性が既定値
+/// (`Integer.MAX_VALUE`) の軸を無視するため軸ごとのフラグを持つ。ScanMove は
+/// 常に両軸を目標にする（Java にガードが無い）ため `aim_x = aim_y = true`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MoveTarget {
+    pub position: (i32, i32),
+    /// x を目標にするか。
+    pub aim_x: bool,
+    /// y を目標にするか。
+    pub aim_y: bool,
+}
+
 /// Java Move.tick L57-104 / ScanMove.tick L76-120 の共通本体:
 /// border move → 境界チェック → 目標座標の変数注入 → 方向転換判定 → turning アニメ
 /// 選択（完了で解除）→ pose 適用 → overshoot クランプ。
 ///
-/// - `target`: 目標座標（Move は `TargetX`/`TargetY` 属性の評価値・ScanMove は相手
-///   マスコットの anchor）
-/// - `aimed`: (x を目標にするか, y を目標にするか)。Java Move は属性が既定値
-///   (`Integer.MAX_VALUE`) の軸を無視するため `(tx != DEFAULT, ty != DEFAULT)`、
-///   ScanMove は常に両軸を目標にする（Java にガードが無い）ため `(true, true)`
+/// - `target`: 目標座標 + 軸ごとの有効フラグ（[`MoveTarget`]）
+/// - `turn_mode`: 転回アニメの選択方式（Move / ScanMove = Automatic、
+///   MoveWithTurn = WithTurnLast）
 pub(crate) fn move_tick_to(
     bordered: &mut Bordered,
     turning: &mut bool,
     has_turning: &mut Option<bool>,
     mascot: &mut Mascot,
     env: &dyn EnvironmentView,
-    target: (i32, i32),
-    aimed: (bool, bool),
+    target: MoveTarget,
+    turn_mode: TurnAnimMode,
 ) -> Result<(), ActionError> {
     bordered.border_tick(mascot, env); // super.tick()（Move L58 / ScanMove L74）
     bordered.check_on_border(mascot, env)?; // Move L60-62 / ScanMove L79-81
@@ -481,31 +555,42 @@ pub(crate) fn move_tick_to(
     // Move L64-65（変数化は ComplexMove 相当の意図的差異）/ ScanMove L88-92:
     // 目標座標を変数へ注入し、アニメ条件から参照可能にする（turning アニメの
     // 条件評価より前に注入する）。
-    bordered.base.vars.inject("TargetX", f64::from(target.0));
-    bordered.base.vars.inject("TargetY", f64::from(target.1));
+    bordered
+        .base
+        .vars
+        .inject("TargetX", f64::from(target.position.0));
+    bordered
+        .base
+        .vars
+        .inject("TargetY", f64::from(target.position.1));
 
     let mut down = false;
 
     // Java L69-75 / L94-99: 方向転換アニメ有効化 + 向き更新
-    if aimed.0 && mascot.anchor().0 != target.0 {
+    if target.aim_x && mascot.anchor().0 != target.position.0 {
         let look_right = mascot.look_right();
-        *turning = has_turning_animation(has_turning, bordered)
-            && (*turning || (mascot.anchor().0 < target.0) != look_right);
-        mascot.set_look_right(mascot.anchor().0 < target.0);
+        let direction_changed = *turning || (mascot.anchor().0 < target.position.0) != look_right;
+        *turning = match turn_mode {
+            // Java Move L128-133: hasTurningAnimation = いずれかのアニメが isTurn
+            TurnAnimMode::Automatic => has_turning_animation(has_turning, bordered),
+            // Java MoveWithTurn L54-57: hasTurningAnimation は常に true
+            TurnAnimMode::WithTurnLast => true,
+        } && direction_changed;
+        mascot.set_look_right(mascot.anchor().0 < target.position.0);
     }
-    if aimed.1 {
-        down = mascot.anchor().1 < target.1; // Java L77 / L99
+    if target.aim_y {
+        down = mascot.anchor().1 < target.position.1; // Java L77 / L99
     }
 
     // Java L81-85 / L102-106: turning アニメ完了チェック（時間 >= duration で解除）
-    let mut anim_index = get_turning_animation(bordered, *turning, mascot, env)?;
+    let mut anim_index = select_turn_animation(turn_mode, bordered, *turning, mascot, env)?;
     if *turning {
         let dur = anim_index
             .map(|i| animation_duration(&bordered.base.animations[i]))
             .unwrap_or(0);
         if bordered.base.get_time(mascot) >= dur {
             *turning = false;
-            anim_index = get_turning_animation(bordered, *turning, mascot, env)?;
+            anim_index = select_turn_animation(turn_mode, bordered, *turning, mascot, env)?;
         }
     }
 
@@ -518,17 +603,17 @@ pub(crate) fn move_tick_to(
     }
 
     // Java L90-103 / L110-117: overshoot クランプ
-    if aimed.0 {
+    if target.aim_x {
         let (ax, ay) = mascot.anchor();
         let look_right = mascot.look_right();
-        if (look_right && ax >= target.0) || (!look_right && ax <= target.0) {
-            mascot.set_anchor((target.0, ay));
+        if (look_right && ax >= target.position.0) || (!look_right && ax <= target.position.0) {
+            mascot.set_anchor((target.position.0, ay));
         }
     }
-    if aimed.1 {
+    if target.aim_y {
         let (ax, ay) = mascot.anchor();
-        if (down && ay >= target.1) || (!down && ay <= target.1) {
-            mascot.set_anchor((ax, target.1));
+        if (down && ay >= target.position.1) || (!down && ay <= target.position.1) {
+            mascot.set_anchor((ax, target.position.1));
         }
     }
     Ok(())
@@ -640,12 +725,13 @@ pub(crate) fn gated_active_ie(env: &dyn EnvironmentView, anchor: (i32, i32)) -> 
 // ScanMove（Java ScanMove.java L21-182 相当・アフォーダンス探索移動）
 // =====================================================================
 
-/// Java `ScanMove` の `Behaviour` / `TargetBehaviour` / `TargetLook` 属性の既定値
-/// （Java L24-31。属性名は Java 定数では UK 綴りだが実 XML は US 綴りを使うため、
-/// 実資産（デレマスしめじ v1.9）に合わせて US 綴りを読む）。
-const PARAM_BEHAVIOR: &str = "Behavior";
-const PARAM_TARGET_BEHAVIOR: &str = "TargetBehavior";
-const PARAM_TARGET_LOOK: &str = "TargetLook";
+/// Java の `Behaviour` / `TargetBehaviour` / `TargetLook` 属性の既定値
+/// （ScanMove L24-31 / ScanJump L24-31 / ComplexMove L29-36 / ScanInteract L24-31。
+/// 属性名は Java 定数では UK 綴りだが実 XML は US 綴りを使うため、実資産
+/// （デレマスしめじ v1.9）に合わせて US 綴りを読む）。
+pub(crate) const PARAM_BEHAVIOR: &str = "Behavior";
+pub(crate) const PARAM_TARGET_BEHAVIOR: &str = "TargetBehavior";
+pub(crate) const PARAM_TARGET_LOOK: &str = "TargetLook";
 
 /// 放送中（`Affordance` 属性を持つ）個体を探して近づき、到達したら自分と相手の
 /// Behavior を差し替える（Java `ScanMove` 逐語）。
@@ -697,13 +783,7 @@ impl ScanMoveAction {
     /// 相手が消えた / affordance を失った場合は None（Java L69 の contains 判定と
     /// L83-86 の null 判定を 1 回のスナップショット参照で兼ねる）。
     fn target_anchor(&self, env: &dyn EnvironmentView) -> Option<(i32, i32)> {
-        let index = self.target_index?;
-        env.affordance_scan()
-            .into_iter()
-            .find(|entry| {
-                entry.index == index && entry.affordances.iter().any(|a| a == &self.affordance)
-            })
-            .map(|entry| entry.anchor)
+        super::affordance_target_anchor(env, self.target_index, &self.affordance)
     }
 
     /// Java ScanMove.tick L72-138 逐語。
@@ -728,10 +808,14 @@ impl ScanMoveAction {
             &mut self.has_turning,
             mascot,
             env,
-            target,
-            // Java ScanMove は Move と違い「既定値の軸を無視する」ガードを持たない
-            // （target は常に実座標）ため両軸を目標にする
-            (true, true),
+            MoveTarget {
+                position: target,
+                // Java ScanMove は Move と違い「既定値の軸を無視する」ガードを
+                // 持たない（target は常に実座標）ため両軸を目標にする
+                aim_x: true,
+                aim_y: true,
+            },
+            TurnAnimMode::Automatic,
         )?;
 
         // Java L119-137: 到達判定（両軸一致 && turning 中でない）→ Behavior 差し替え
@@ -748,7 +832,7 @@ impl ScanMoveAction {
         mascot.request_affordance_arrival(AffordanceArrival {
             behavior,
             target_index: self.target_index,
-            target_behavior,
+            target_behavior: Some(target_behavior),
             flip_look,
         });
         Ok(())
@@ -780,14 +864,7 @@ impl Action for ScanMoveAction {
             .base
             .text_attr("Affordance")
             .unwrap_or_default();
-        self.target_index = if self.affordance.is_empty() {
-            None
-        } else {
-            env.affordance_scan()
-                .into_iter()
-                .find(|entry| entry.affordances.iter().any(|a| a == &self.affordance))
-                .map(|entry| entry.index)
-        };
+        self.target_index = super::find_affordance_target(env, &self.affordance);
         if let Some(anchor) = self.target_anchor(env) {
             self.bordered
                 .base
@@ -1170,36 +1247,35 @@ const BREED_DEFAULT_BORN_TRANSIENT: bool = false;
 const BREED_DEFAULT_BORN_INTERVAL: i32 = 1;
 const BREED_DEFAULT_BORN_COUNT: i32 = 1;
 
-pub(crate) struct BreedAction {
-    pub bordered: Bordered,
-    /// Java Delegate.scaling（Delegate L49）。
+/// Java `Breed.Delegate`（Breed.java L26-142）の共用実装。
+/// Java は Breed / BreedMove / BreedJump / ComplexMove / ComplexJump が
+/// それぞれ同名の内部クラス Delegate を持つが中身は同一のため 1 型に集約する。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BreedDelegate {
+    /// Java Delegate.scaling（L49）。
     scaling: f64,
 }
 
-impl BreedAction {
-    pub(crate) fn new(
-        attrs: crate::config::VarMap,
-        animations: Vec<super::Animation>,
-    ) -> BreedAction {
-        BreedAction {
-            bordered: Bordered::new(attrs, animations),
-            scaling: 1.0,
-        }
+impl BreedDelegate {
+    pub(crate) fn new() -> BreedDelegate {
+        BreedDelegate { scaling: 1.0 }
+    }
+
+    /// Java Delegate.initScaling L55-57 逐語。
+    pub(crate) fn init_scaling(&mut self, mascot: &Mascot) {
+        self.scaling = mascot.scale();
     }
 
     /// Java Delegate.isEnabled L59-63 逐語: BornTransient が true → transients 設定、
     /// それ以外は breeding 設定。
-    fn is_enabled(
-        &mut self,
+    pub(crate) fn is_enabled(
+        &self,
+        base: &mut Base,
         mascot: &Mascot,
         env: &dyn EnvironmentView,
     ) -> Result<bool, ActionError> {
-        let born_transient = self.bordered.base.bool_attr(
-            mascot,
-            env,
-            "BornTransient",
-            BREED_DEFAULT_BORN_TRANSIENT,
-        )?;
+        let born_transient =
+            base.bool_attr(mascot, env, "BornTransient", BREED_DEFAULT_BORN_TRANSIENT)?;
         Ok(if born_transient {
             env.transients_enabled()
         } else {
@@ -1207,51 +1283,68 @@ impl BreedAction {
         })
     }
 
-    /// Java Delegate.isPenultimateFrame L69-71 逐語。
-    fn is_penultimate_frame(
-        &mut self,
+    /// Java Delegate.isIntervalFrame L65-67 逐語: `time % BornInterval == 0`。
+    pub(crate) fn is_interval_frame(
+        &self,
+        base: &mut Base,
         mascot: &Mascot,
         env: &dyn EnvironmentView,
     ) -> Result<bool, ActionError> {
-        Ok(self.bordered.base.get_time(mascot)
-            == self.bordered.base.tolerant_anim_duration(mascot, env)? - 1)
+        let interval = base.num_attr(mascot, env, "BornInterval", BREED_DEFAULT_BORN_INTERVAL)?;
+        Ok(base.get_time(mascot) % interval == 0)
+    }
+
+    /// Java Delegate.validateBornCount L103-107 逐語（VariableException 相当）。
+    pub(crate) fn validate_born_count(
+        &self,
+        base: &mut Base,
+        mascot: &Mascot,
+        env: &dyn EnvironmentView,
+    ) -> Result<(), ActionError> {
+        let born_count = base.num_attr(mascot, env, "BornCount", BREED_DEFAULT_BORN_COUNT)?;
+        if born_count < 1 {
+            return Err(ActionError::Eval(EvalError {
+                expr: "BornCount".to_string(),
+                message: "BornCount must be positive".to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    /// Java Delegate.validateBornInterval L109-113 逐語（Breed 以外が init で呼ぶ）。
+    pub(crate) fn validate_born_interval(
+        &self,
+        base: &mut Base,
+        mascot: &Mascot,
+        env: &dyn EnvironmentView,
+    ) -> Result<(), ActionError> {
+        let interval = base.num_attr(mascot, env, "BornInterval", BREED_DEFAULT_BORN_INTERVAL)?;
+        if interval < 1 {
+            return Err(ActionError::Eval(EvalError {
+                expr: "BornInterval".to_string(),
+                message: "BornInterval must be positive".to_string(),
+            }));
+        }
+        Ok(())
     }
 
     /// Java Delegate.breed L73-101 逐語。
-    fn breed(&mut self, mascot: &mut Mascot, env: &dyn EnvironmentView) -> Result<(), ActionError> {
-        let born_x = self
-            .bordered
-            .base
-            .num_attr(mascot, env, "BornX", BREED_DEFAULT_BORN_X)?;
-        let born_y = self
-            .bordered
-            .base
-            .num_attr(mascot, env, "BornY", BREED_DEFAULT_BORN_Y)?;
-        let born_mascot = self
-            .bordered
-            .base
+    pub(crate) fn breed(
+        &self,
+        base: &mut Base,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+    ) -> Result<(), ActionError> {
+        let born_x = base.num_attr(mascot, env, "BornX", BREED_DEFAULT_BORN_X)?;
+        let born_y = base.num_attr(mascot, env, "BornY", BREED_DEFAULT_BORN_Y)?;
+        let born_mascot = base
             .text_attr("BornMascot")
             .unwrap_or_else(|| BREED_DEFAULT_BORN_MASCOT.to_string());
-        let born_behavior = self
-            .bordered
-            .base
+        let born_behavior = base
             // Java 論理キー BornBehaviour は schema により生 XML 名 BornBehavior へ変換される
             .text_attr("BornBehavior")
             .unwrap_or_else(|| BREED_DEFAULT_BORN_BEHAVIOR.to_string());
-        let born_interval = self.bordered.base.num_attr(
-            mascot,
-            env,
-            "BornInterval",
-            BREED_DEFAULT_BORN_INTERVAL,
-        )?;
-        let born_count =
-            self.bordered
-                .base
-                .num_attr(mascot, env, "BornCount", BREED_DEFAULT_BORN_COUNT)?;
-
-        // Java Delegate.validateBornInterval L109-113 は本版では呼ばれない（dead）。
-        // BornInterval は資産使用 0 件のため値の保持のみ。
-        let _ = born_interval;
+        let born_count = base.num_attr(mascot, env, "BornCount", BREED_DEFAULT_BORN_COUNT)?;
 
         // Java L74: childType = getConfiguration(getBornMascot()) != null ? 親 imageSet。
         // BornMascot のロード済み判定は本層で不可能のため「非空ならその名・
@@ -1282,6 +1375,33 @@ impl BreedAction {
     }
 }
 
+pub(crate) struct BreedAction {
+    pub bordered: Bordered,
+    delegate: BreedDelegate,
+}
+
+impl BreedAction {
+    pub(crate) fn new(
+        attrs: crate::config::VarMap,
+        animations: Vec<super::Animation>,
+    ) -> BreedAction {
+        BreedAction {
+            bordered: Bordered::new(attrs, animations),
+            delegate: BreedDelegate::new(),
+        }
+    }
+
+    /// Java Delegate.isPenultimateFrame L69-71 逐語。
+    fn is_penultimate_frame(
+        &mut self,
+        mascot: &Mascot,
+        env: &dyn EnvironmentView,
+    ) -> Result<bool, ActionError> {
+        Ok(self.bordered.base.get_time(mascot)
+            == self.bordered.base.tolerant_anim_duration(mascot, env)? - 1)
+    }
+}
+
 impl Action for BreedAction {
     fn init(
         &mut self,
@@ -1291,20 +1411,9 @@ impl Action for BreedAction {
     ) -> Result<(), ActionError> {
         self.bordered.init_common(mascot, env)?;
         // Java L154-155: initScaling + validateBornCount
-        self.scaling = mascot.scale();
-        let born_count =
-            self.bordered
-                .base
-                .num_attr(mascot, env, "BornCount", BREED_DEFAULT_BORN_COUNT)?;
-        if born_count < 1 {
-            // Java Delegate L103-107: VariableException 相当
-            return Err(ActionError::Eval(
-                super::super::super::config::script::EvalError {
-                    expr: "BornCount".to_string(),
-                    message: "BornCount must be positive".to_string(),
-                },
-            ));
-        }
+        self.delegate.init_scaling(mascot);
+        self.delegate
+            .validate_born_count(&mut self.bordered.base, mascot, env)?;
         Ok(())
     }
 
@@ -1331,8 +1440,917 @@ impl Action for BreedAction {
         animate_tick(&mut self.bordered, mascot, env)?;
 
         // Java L162-165: penultimate frame 且つ enabled → 生む
-        if self.is_penultimate_frame(mascot, env)? && self.is_enabled(mascot, env)? {
-            self.breed(mascot, env)?;
+        if self.is_penultimate_frame(mascot, env)?
+            && self
+                .delegate
+                .is_enabled(&mut self.bordered.base, mascot, env)?
+        {
+            self.delegate.breed(&mut self.bordered.base, mascot, env)?;
+        }
+        Ok(())
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.bordered.base.draggable(mascot, env)
+    }
+}
+
+// =====================================================================
+// BreedMove（Java BreedMove.java L17-44 相当・Move 派生）
+// =====================================================================
+
+/// Java `BreedMove`（Move + Delegate）: Move の移動に加えて `BornInterval` ごとに
+/// 増殖する。turning 中は増殖しない（Java L39）。
+pub(crate) struct BreedMoveAction {
+    pub move_action: MoveAction,
+    delegate: BreedDelegate,
+}
+
+impl BreedMoveAction {
+    pub(crate) fn new(
+        attrs: crate::config::VarMap,
+        animations: Vec<super::Animation>,
+    ) -> BreedMoveAction {
+        BreedMoveAction {
+            move_action: MoveAction::new(attrs, animations),
+            delegate: BreedDelegate::new(),
+        }
+    }
+}
+
+impl Action for BreedMoveAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        // Java L28-32: super.init（Move）→ initScaling + validateBornCount +
+        // validateBornInterval
+        self.move_action.init(mascot, env, rng)?;
+        self.delegate.init_scaling(mascot);
+        self.delegate
+            .validate_born_count(&mut self.move_action.bordered.base, mascot, env)?;
+        self.delegate
+            .validate_born_interval(&mut self.move_action.bordered.base, mascot, env)?;
+        Ok(())
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java BreedMove は hasNext をオーバーライドしない（Move のもの）
+        self.move_action.has_next(mascot, env, rng)
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.move_action.bordered.base.next_pre(mascot, env)?;
+        // Java L37: super.tick()（Move.tick）
+        self.move_action.move_tick(mascot, env)?;
+
+        // Java L39-42: interval frame 且つ turning 中でない 且つ enabled → 生む
+        if self
+            .delegate
+            .is_interval_frame(&mut self.move_action.bordered.base, mascot, env)?
+            && !self.move_action.turning
+            && self
+                .delegate
+                .is_enabled(&mut self.move_action.bordered.base, mascot, env)?
+        {
+            self.delegate
+                .breed(&mut self.move_action.bordered.base, mascot, env)?;
+        }
+        Ok(())
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.move_action.bordered.base.draggable(mascot, env)
+    }
+}
+
+// =====================================================================
+// Turn（Java Turn.java L16-50 相当・BorderedAction 派生）
+// =====================================================================
+
+/// Java `Turn`: 向きが `LookRight` 属性と食い違った瞬間に向き直るアニメを再生する。
+/// `LookRight` の評価は hasNext と tick の両方で行われる（Java L30 / L36）。
+pub(crate) struct TurnAction {
+    pub bordered: Bordered,
+    /// Java `turning`（L21）: LookRight と現在の向きが食い違って以降のラッチ。
+    turning: bool,
+}
+
+impl TurnAction {
+    pub(crate) fn new(
+        attrs: crate::config::VarMap,
+        animations: Vec<super::Animation>,
+    ) -> TurnAction {
+        TurnAction {
+            bordered: Bordered::new(attrs, animations),
+            turning: false,
+        }
+    }
+
+    /// Java `isLookRight()` L47-49 逐語: `LookRight` 属性（既定 = 現在の向きの反転）。
+    fn is_look_right(
+        &mut self,
+        mascot: &Mascot,
+        env: &dyn EnvironmentView,
+    ) -> Result<bool, ActionError> {
+        let default = !mascot.look_right();
+        self.bordered
+            .base
+            .bool_attr(mascot, env, "LookRight", default)
+    }
+}
+
+impl Action for TurnAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.turning = false;
+        self.bordered.init_common(mascot, env)
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java L28-32: turning = turning || isLookRight() != mascot.isLookRight();
+        // super.hasNext() && turning && getTime() < getAnimation().getDuration()
+        let look_right = self.is_look_right(mascot, env)?;
+        self.turning = self.turning || look_right != mascot.look_right();
+        Ok(self.bordered.base.base_has_next(mascot, env)?
+            && self.turning
+            && self.bordered.base.get_time(mascot)
+                < self.bordered.base.tolerant_anim_duration(mascot, env)?)
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.bordered.base.next_pre(mascot, env)?;
+        // Java L36: setLookRight(isLookRight())
+        let look_right = self.is_look_right(mascot, env)?;
+        mascot.set_look_right(look_right);
+        // Java L38: super.tick()（border move）
+        self.bordered.border_tick(mascot, env);
+        // Java L40-42: 境界外 → LostGround
+        self.bordered.check_on_border(mascot, env)?;
+        // Java L44: getAnimation().apply(getMascot(), getTime())（基底 ActionBase の
+        // getAnimation = 最初の有効アニメ）
+        self.bordered.base.apply_effective_animation(mascot, env)
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.bordered.base.draggable(mascot, env)
+    }
+}
+
+// =====================================================================
+// MoveWithTurn（Java MoveWithTurn.java L18-57 相当・Move 派生・Deprecated）
+// =====================================================================
+
+/// Java `MoveWithTurn`（`@Deprecated since 1.0.21`・Move に turning が統合された
+/// 旧クラス）: 転回中は常に最後のアニメ、それ以外は `0..len-1` の最初の有効アニメを
+/// 使う。アニメ 2 本以上が前提（Java L24-27 の IllegalArgumentException。
+/// Rust は warn して続行する・意図的差異）。
+pub(crate) struct MoveWithTurnAction {
+    pub move_action: MoveAction,
+}
+
+impl MoveWithTurnAction {
+    pub(crate) fn new(
+        attrs: crate::config::VarMap,
+        animations: Vec<super::Animation>,
+    ) -> MoveWithTurnAction {
+        if animations.len() < 2 {
+            log::warn!(
+                "MoveWithTurn requires at least 2 animations; turning will not animate (got {})",
+                animations.len()
+            );
+        }
+        MoveWithTurnAction {
+            move_action: MoveAction::new(attrs, animations),
+        }
+    }
+}
+
+impl Action for MoveWithTurnAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        // Java は init をオーバーライドしない（Move のもの）
+        self.move_action.init(mascot, env, rng)
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java は hasNext をオーバーライドしない（Move のもの）
+        self.move_action.has_next(mascot, env, rng)
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.move_action.bordered.base.next_pre(mascot, env)?;
+        // Java Move.tick を WithTurnLast の getAnimation / hasTurningAnimation で実行
+        self.move_action
+            .move_tick_with(mascot, env, TurnAnimMode::WithTurnLast)
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.move_action.bordered.base.draggable(mascot, env)
+    }
+}
+
+// =====================================================================
+// Interact（Java Interact.java L19-51 相当・Animate 派生）
+// =====================================================================
+
+/// Java `Interact`: 自分の anchor に他個体が重なっている間だけアニメを続け、
+/// 最終フレームで自分を `Behaviour` 属性の行動へ差し替える（相手は変えない）。
+pub(crate) struct InteractAction {
+    animate: AnimateAction,
+}
+
+impl InteractAction {
+    pub(crate) fn new(
+        attrs: crate::config::VarMap,
+        animations: Vec<super::Animation>,
+    ) -> InteractAction {
+        InteractAction {
+            animate: AnimateAction::new(attrs, animations),
+        }
+    }
+
+    /// Java `getBehaviour()` L49-51（既定 ""）。
+    fn behavior(&mut self) -> String {
+        self.animate
+            .bordered
+            .base
+            .text_attr(PARAM_BEHAVIOR)
+            .unwrap_or_default()
+    }
+}
+
+impl Action for InteractAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.animate.init(mascot, env, rng)
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java L30-32: super.hasNext() && manager.hasOverlappingMascotsAtPoint(anchor)
+        Ok(self.animate.has_next(mascot, env, rng)? && env.overlapping_mascots_at(mascot.anchor()))
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        // Java L35-36: super.tick()（Animate.tick）
+        self.animate.next(mascot, env, rng)?;
+
+        // Java L38-46: 最終フレームで Behavior 差し替え（空名は何もしない）
+        let time = self.animate.bordered.base.get_time(mascot);
+        let duration = self
+            .animate
+            .bordered
+            .base
+            .tolerant_anim_duration(mascot, env)?;
+        if (time == duration - 1 || duration == 1) && !self.behavior().trim().is_empty() {
+            let behavior = self.behavior();
+            mascot.request_affordance_arrival(AffordanceArrival {
+                behavior,
+                target_index: None,
+                target_behavior: None,
+                flip_look: false,
+            });
+        }
+        Ok(())
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.animate.is_draggable(mascot, env, rng)
+    }
+}
+
+// =====================================================================
+// SelfDestruct（Java SelfDestruct.java L16-32 相当・Animate 派生）
+// =====================================================================
+
+/// Java `SelfDestruct`: アニメ最終フレームで自分を消す。
+pub(crate) struct SelfDestructAction {
+    animate: AnimateAction,
+}
+
+impl SelfDestructAction {
+    pub(crate) fn new(
+        attrs: crate::config::VarMap,
+        animations: Vec<super::Animation>,
+    ) -> SelfDestructAction {
+        SelfDestructAction {
+            animate: AnimateAction::new(attrs, animations),
+        }
+    }
+}
+
+impl Action for SelfDestructAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.animate.init(mascot, env, rng)
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.animate.has_next(mascot, env, rng)
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        // Java L25: super.tick()（Animate.tick）
+        self.animate.next(mascot, env, rng)?;
+
+        // Java L27-30: 最終フレームで dispose
+        let time = self.animate.bordered.base.get_time(mascot);
+        let duration = self
+            .animate
+            .bordered
+            .base
+            .tolerant_anim_duration(mascot, env)?;
+        if time == duration - 1 || duration == 1 {
+            mascot.dispose();
+        }
+        Ok(())
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.animate.is_draggable(mascot, env, rng)
+    }
+}
+
+// =====================================================================
+// ScanInteract（Java ScanInteract.java L21-160 相当・BorderedAction 派生）
+// =====================================================================
+
+/// Java `ScanInteract`: その場に留まり、アフォーダンス保持者を毎 tick 追跡して
+/// `TargetX`/`TargetY` を注入、転回アニメを挟みつつ最終フレームで自分（`Behaviour`）
+/// と相手（`TargetBehaviour`・空なら触れない）の Behavior を差し替える。
+pub(crate) struct ScanInteractAction {
+    pub bordered: Bordered,
+    has_turning: Option<bool>,
+    turning: bool,
+    affordance: String,
+    target_index: Option<usize>,
+}
+
+impl ScanInteractAction {
+    pub(crate) fn new(
+        attrs: crate::config::VarMap,
+        animations: Vec<super::Animation>,
+    ) -> ScanInteractAction {
+        ScanInteractAction {
+            bordered: Bordered::new(attrs, animations),
+            has_turning: None,
+            turning: false,
+            affordance: String::new(),
+            target_index: None,
+        }
+    }
+
+    fn behavior(&mut self) -> String {
+        self.bordered
+            .base
+            .text_attr(PARAM_BEHAVIOR)
+            .unwrap_or_default()
+    }
+
+    fn target_behavior(&mut self) -> String {
+        self.bordered
+            .base
+            .text_attr(PARAM_TARGET_BEHAVIOR)
+            .unwrap_or_default()
+    }
+
+    /// Java ScanInteract の turning-aware `getAnimation`（L118-136）で選ばれた
+    /// アニメの duration。候補が無ければ基底の tolerant 値にフォールバックする。
+    fn selected_anim_duration(
+        &mut self,
+        mascot: &Mascot,
+        env: &dyn EnvironmentView,
+    ) -> Result<i32, ActionError> {
+        match select_turn_animation(
+            TurnAnimMode::Automatic,
+            &mut self.bordered,
+            self.turning,
+            mascot,
+            env,
+        )? {
+            Some(index) => Ok(animation_duration(&self.bordered.base.animations[index])),
+            None => self.bordered.base.tolerant_anim_duration(mascot, env),
+        }
+    }
+}
+
+impl Action for ScanInteractAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.has_turning = None;
+        self.turning = false;
+        self.bordered.init_common(mascot, env)?;
+        // Java L47-51: cannot broadcast while scanning + TargetX/TargetY を null に。
+        // Rust は変数を消せないため注入しない（不在時の hasNext/tick は相手を
+        // 保持している間しか動かない・ScanMove と同じ意図的差異）。
+        mascot.clear_affordances();
+        self.affordance = self
+            .bordered
+            .base
+            .text_attr("Affordance")
+            .unwrap_or_default();
+        self.target_index = None;
+        Ok(())
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java L54-57: super.hasNext() && (turning || getTime() < animDuration)
+        if !self.bordered.base.base_has_next(mascot, env)? {
+            return Ok(false);
+        }
+        Ok(self.turning
+            || self.bordered.base.get_time(mascot) < self.selected_anim_duration(mascot, env)?)
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.bordered.base.next_pre(mascot, env)?;
+        // Java L61-64: super.tick()（border move）+ clear affordances
+        self.bordered.border_tick(mascot, env);
+        mascot.clear_affordances();
+        // Java L66-68: 境界外 → LostGround
+        self.bordered.check_on_border(mascot, env)?;
+
+        // Java L70-77: 相手の再探索 + TargetX/TargetY 注入（保持中のみ）
+        if super::affordance_target_anchor(env, self.target_index, &self.affordance).is_none() {
+            self.target_index = super::find_affordance_target(env, &self.affordance);
+        }
+        let Some(target) =
+            super::affordance_target_anchor(env, self.target_index, &self.affordance)
+        else {
+            return Ok(());
+        };
+        self.bordered
+            .base
+            .vars
+            .inject("TargetX", f64::from(target.0));
+        self.bordered
+            .base
+            .vars
+            .inject("TargetY", f64::from(target.1));
+
+        // Java L80-84: 向き更新 + 転回アニメ有効化
+        if mascot.anchor().0 != target.0 {
+            let look_right = mascot.look_right();
+            self.turning = has_turning_animation(&mut self.has_turning, &self.bordered)
+                && (self.turning || (mascot.anchor().0 < target.0) != look_right);
+            mascot.set_look_right(mascot.anchor().0 < target.0);
+        }
+
+        // Java L86-92: 転回アニメ完了 → setTime 巻き戻し + 解除
+        let mut anim_index = select_turn_animation(
+            TurnAnimMode::Automatic,
+            &mut self.bordered,
+            self.turning,
+            mascot,
+            env,
+        )?;
+        if self.turning {
+            let duration = anim_index
+                .map(|i| animation_duration(&self.bordered.base.animations[i]))
+                .unwrap_or(0);
+            if self.bordered.base.get_time(mascot) >= duration {
+                let rewound = self.bordered.base.get_time(mascot) - duration;
+                self.bordered.base.set_time(mascot, rewound);
+                self.turning = false;
+                anim_index = select_turn_animation(
+                    TurnAnimMode::Automatic,
+                    &mut self.bordered,
+                    self.turning,
+                    mascot,
+                    env,
+                )?;
+            }
+        }
+
+        // Java L94: animation.apply(mascot, getTime())
+        if let Some(index) = anim_index {
+            let rel = self.bordered.base.get_time(mascot);
+            if let Some(pose) = animation_pose_at(&self.bordered.base.animations[index], rel) {
+                apply_pose(pose, mascot);
+            }
+        }
+
+        // Java L95-114: 最終フレームで Behavior 差し替え
+        let duration = self.selected_anim_duration(mascot, env)?;
+        let time = self.bordered.base.get_time(mascot);
+        let behavior = self.behavior();
+        if !self.turning && (time == duration - 1 || duration == 1) && !behavior.trim().is_empty() {
+            let target_behavior = self.target_behavior();
+            let target_behavior = (!target_behavior.trim().is_empty()).then_some(target_behavior);
+            let flip_look = self
+                .bordered
+                .base
+                .bool_attr(mascot, env, PARAM_TARGET_LOOK, false)?;
+            mascot.request_affordance_arrival(AffordanceArrival {
+                behavior,
+                target_index: self.target_index,
+                target_behavior,
+                flip_look,
+            });
+        }
+        Ok(())
+    }
+
+    fn is_draggable(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        self.bordered.base.draggable(mascot, env)
+    }
+}
+
+// =====================================================================
+// ComplexMove（Java ComplexMove.java L21-265 相当・BorderedAction 派生）
+// =====================================================================
+
+/// Java `ComplexMove`: Move + Scan + Breed の複合。`Characteristics` 属性に
+/// `Breed` / `Scan` を列挙すると機能有効化。非 Scan 時は `TargetX`/`TargetY`
+/// （既定 `Integer.MAX_VALUE`）へ移動し、到達で自分（`Behaviour`）と相手
+/// （`TargetBehaviour`）の Behavior を差し替える。
+pub(crate) struct ComplexMoveAction {
+    pub bordered: Bordered,
+    delegate: BreedDelegate,
+    has_turning: Option<bool>,
+    turning: bool,
+    affordance: String,
+    target_index: Option<usize>,
+    breed_enabled: bool,
+    scan_enabled: bool,
+}
+
+impl ComplexMoveAction {
+    pub(crate) fn new(
+        attrs: crate::config::VarMap,
+        animations: Vec<super::Animation>,
+    ) -> ComplexMoveAction {
+        ComplexMoveAction {
+            bordered: Bordered::new(attrs, animations),
+            delegate: BreedDelegate::new(),
+            has_turning: None,
+            turning: false,
+            affordance: String::new(),
+            target_index: None,
+            breed_enabled: false,
+            scan_enabled: false,
+        }
+    }
+
+    fn behavior(&mut self) -> String {
+        self.bordered
+            .base
+            .text_attr(PARAM_BEHAVIOR)
+            .unwrap_or_default()
+    }
+
+    fn target_behavior(&mut self) -> String {
+        self.bordered
+            .base
+            .text_attr(PARAM_TARGET_BEHAVIOR)
+            .unwrap_or_default()
+    }
+
+    /// Java L62-79 逐語: `Characteristics` をカンマ区切りで読み Breed / Scan を立てる。
+    fn parse_characteristics(
+        &mut self,
+        mascot: &Mascot,
+        env: &dyn EnvironmentView,
+    ) -> Result<(), ActionError> {
+        self.breed_enabled = false;
+        self.scan_enabled = false;
+        let characteristics = self
+            .bordered
+            .base
+            .text_attr("Characteristics")
+            .unwrap_or_default();
+        if !characteristics.is_empty() {
+            for characteristic in characteristics.split(',') {
+                if characteristic == super::CHARACTERISTIC_BREED {
+                    self.breed_enabled = true;
+                } else if characteristic == super::CHARACTERISTIC_SCAN {
+                    self.scan_enabled = true;
+                }
+            }
+        }
+        if self.breed_enabled {
+            self.delegate.init_scaling(mascot);
+            self.delegate
+                .validate_born_count(&mut self.bordered.base, mascot, env)?;
+            self.delegate
+                .validate_born_interval(&mut self.bordered.base, mascot, env)?;
+        }
+        Ok(())
+    }
+}
+
+impl Action for ComplexMoveAction {
+    fn init(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.has_turning = None;
+        self.turning = false;
+        self.bordered.init_common(mascot, env)?;
+        self.parse_characteristics(mascot, env)?;
+        if self.scan_enabled {
+            // Java L77-87: cannot broadcast while scanning + 相手探索 + TargetX/Y 注入
+            mascot.clear_affordances();
+            self.affordance = self
+                .bordered
+                .base
+                .text_attr("Affordance")
+                .unwrap_or_default();
+            self.target_index = super::find_affordance_target(env, &self.affordance);
+            if let Some(anchor) =
+                super::affordance_target_anchor(env, self.target_index, &self.affordance)
+            {
+                self.bordered
+                    .base
+                    .vars
+                    .inject("TargetX", f64::from(anchor.0));
+                self.bordered
+                    .base
+                    .vars
+                    .inject("TargetY", f64::from(anchor.1));
+            }
+        }
+        Ok(())
+    }
+
+    fn has_next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<bool, ActionError> {
+        // Java L91-118
+        if !self.bordered.base.base_has_next(mascot, env)? {
+            return Ok(false);
+        }
+        if self.turning {
+            return Ok(true);
+        }
+        if self.scan_enabled {
+            return Ok(
+                super::affordance_target_anchor(env, self.target_index, &self.affordance).is_some(),
+            );
+        }
+        let target_x = self
+            .bordered
+            .base
+            .num_attr(mascot, env, "TargetX", DEFAULT_TARGET_X)?;
+        let target_y = self
+            .bordered
+            .base
+            .num_attr(mascot, env, "TargetY", DEFAULT_TARGET_Y)?;
+        let anchor = mascot.anchor();
+        Ok((target_x != DEFAULT_TARGET_X && anchor.0 != target_x)
+            || (target_y != DEFAULT_TARGET_Y && anchor.1 != target_y))
+    }
+
+    fn next(
+        &mut self,
+        mascot: &mut Mascot,
+        env: &dyn EnvironmentView,
+        _rng: &mut dyn Rng,
+    ) -> Result<(), ActionError> {
+        self.bordered.base.next_pre(mascot, env)?;
+        // Java L122: super.tick()（border move）
+        self.bordered.border_tick(mascot, env);
+        // Java L124-127: cannot broadcast while scanning
+        if self.scan_enabled {
+            mascot.clear_affordances();
+        }
+        // Java L129-131: 境界外 → LostGround
+        self.bordered.check_on_border(mascot, env)?;
+
+        // Java L133-150: 目標決定（scan は相手 / 非 scan は属性）
+        let target = if self.scan_enabled {
+            let Some(anchor) =
+                super::affordance_target_anchor(env, self.target_index, &self.affordance)
+            else {
+                return Ok(());
+            };
+            self.bordered
+                .base
+                .vars
+                .inject("TargetX", f64::from(anchor.0));
+            self.bordered
+                .base
+                .vars
+                .inject("TargetY", f64::from(anchor.1));
+            anchor
+        } else {
+            let target_x = self
+                .bordered
+                .base
+                .num_attr(mascot, env, "TargetX", DEFAULT_TARGET_X)?;
+            let target_y = self
+                .bordered
+                .base
+                .num_attr(mascot, env, "TargetY", DEFAULT_TARGET_Y)?;
+            (target_x, target_y)
+        };
+
+        // Java L152-157: turning / lookRight / down
+        let down = mascot.anchor().1 < target.1;
+        if mascot.anchor().0 != target.0 {
+            let look_right = mascot.look_right();
+            self.turning = has_turning_animation(&mut self.has_turning, &self.bordered)
+                && (self.turning || (mascot.anchor().0 < target.0) != look_right);
+            mascot.set_look_right(mascot.anchor().0 < target.0);
+        }
+
+        // Java L159-164: 転回アニメ完了
+        let mut anim_index = select_turn_animation(
+            TurnAnimMode::Automatic,
+            &mut self.bordered,
+            self.turning,
+            mascot,
+            env,
+        )?;
+        if self.turning {
+            let duration = anim_index
+                .map(|i| animation_duration(&self.bordered.base.animations[i]))
+                .unwrap_or(0);
+            if self.bordered.base.get_time(mascot) >= duration {
+                self.turning = false;
+                anim_index = select_turn_animation(
+                    TurnAnimMode::Automatic,
+                    &mut self.bordered,
+                    self.turning,
+                    mascot,
+                    env,
+                )?;
+            }
+        }
+
+        // Java L167: animation.apply
+        if let Some(index) = anim_index {
+            let rel = self.bordered.base.get_time(mascot);
+            if let Some(pose) = animation_pose_at(&self.bordered.base.animations[index], rel) {
+                apply_pose(pose, mascot);
+            }
+        }
+
+        // Java L169-182: overshoot クランプ（scan 中は既定値でも常にクランプ）
+        if target.0 != DEFAULT_TARGET_X || self.scan_enabled {
+            let (ax, ay) = mascot.anchor();
+            let look_right = mascot.look_right();
+            if (look_right && ax >= target.0) || (!look_right && ax <= target.0) {
+                mascot.set_anchor((target.0, ay));
+            }
+        }
+        if target.1 != DEFAULT_TARGET_Y || self.scan_enabled {
+            let (ax, ay) = mascot.anchor();
+            if (down && ay >= target.1) || (!down && ay <= target.1) {
+                mascot.set_anchor((ax, target.1));
+            }
+        }
+
+        // Java L184-187: interval frame 且つ turning 中でない 且つ enabled → 生む
+        if self.breed_enabled
+            && self
+                .delegate
+                .is_interval_frame(&mut self.bordered.base, mascot, env)?
+            && !self.turning
+            && self
+                .delegate
+                .is_enabled(&mut self.bordered.base, mascot, env)?
+        {
+            self.delegate.breed(&mut self.bordered.base, mascot, env)?;
+        }
+
+        // Java L189-206: 到達（両軸一致 && turning 中でない）→ Behavior 差し替え要求
+        if !self.turning && mascot.anchor() == target {
+            let behavior = self.behavior();
+            let target_behavior = self.target_behavior();
+            let flip_look = self
+                .bordered
+                .base
+                .bool_attr(mascot, env, PARAM_TARGET_LOOK, false)?;
+            mascot.request_affordance_arrival(AffordanceArrival {
+                behavior,
+                // 非 scan 時は相手が居ない（Java targetMascot == null）
+                target_index: self.target_index.filter(|_| self.scan_enabled),
+                target_behavior: Some(target_behavior),
+                flip_look,
+            });
         }
         Ok(())
     }

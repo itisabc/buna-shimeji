@@ -38,10 +38,14 @@ impl Manager {
             .collect()
     }
 
-    /// ScanMove の到達時要求を Java `ScanMove.tick` L122-137 と同じ順序で適用する:
-    /// 1. 自分の Behavior（L125）— 失敗したら相手には触らない（Java の catch 位置と同じ）
-    /// 2. 相手の Behavior（L127）
-    /// 3. `TargetLook` かつ両者の向きが同じなら相手を反転（L128-130）
+    /// ScanMove / ScanJump / ComplexMove / ComplexJump / ScanInteract の到達時要求を
+    /// Java と同じ順序で適用する:
+    /// 1. 自分の Behavior（ScanMove L125 / ScanInteract L100）— 失敗したら相手には
+    ///    触らない（Java の catch 位置と同じ）
+    /// 2. 相手の Behavior（`target_behavior` が `Some` のときだけ。ScanInteract の
+    ///    空 TargetBehaviour ガード L102 相当）
+    /// 3. `TargetLook` かつ両者の向きが同じなら相手を反転（L128-130 / L105-107。
+    ///    相手 Behavior を設定しなかった場合も適用）
     ///
     /// index は要求時点のスナップショット値だが、tick 内での削除はループ前のみ・
     /// spawn は次 tick 反映のため、ループ直後の本適用まで index は安定する。
@@ -89,7 +93,9 @@ impl Manager {
             }
         }
 
-        // 2-3. 相手の Behavior + 向き反転（相手の set の table で構築・Java L127-130）
+        // 2. 相手の Behavior（相手の set の table で構築・Java ScanMove L127 /
+        //    ScanInteract L103）。`None` は相手に触れない（ScanInteract の
+        //    空 TargetBehaviour ガード L102 相当）。
         let Some(target_index) = arrival.target_index else {
             return;
         };
@@ -100,41 +106,46 @@ impl Manager {
         else {
             return;
         };
-        let target_table = table_for(&self.set_tables, &self.table, &target_set);
-        let built = target_table.build_behavior(
-            &arrival.target_behavior,
-            &mut self.mascots[target_index],
-            env,
-            self.factory.as_mut(),
-            self.rng.as_mut(),
-        );
-        match built {
-            Ok(runner) => {
-                if let Err(err) = self.mascots[target_index].set_behavior(
-                    Some(runner),
-                    env,
-                    target_table,
-                    self.factory.as_mut(),
-                    self.rng.as_mut(),
-                ) {
+        if let Some(target_behavior) = &arrival.target_behavior {
+            let target_table = table_for(&self.set_tables, &self.table, &target_set);
+            let built = target_table.build_behavior(
+                target_behavior,
+                &mut self.mascots[target_index],
+                env,
+                self.factory.as_mut(),
+                self.rng.as_mut(),
+            );
+            match built {
+                Ok(runner) => {
+                    if let Err(err) = self.mascots[target_index].set_behavior(
+                        Some(runner),
+                        env,
+                        target_table,
+                        self.factory.as_mut(),
+                        self.rng.as_mut(),
+                    ) {
+                        log::error!(
+                            r#"scan arrival: failed to set behavior "{}" for mascot #{target_index}: {err}"#,
+                            target_behavior
+                        );
+                        return;
+                    }
+                }
+                Err(err) => {
                     log::error!(
-                        r#"scan arrival: failed to set behavior "{}" for mascot #{target_index}: {err}"#,
-                        arrival.target_behavior
+                        r#"scan arrival: failed to build behavior "{}" for mascot #{target_index}: {err}"#,
+                        target_behavior
                     );
                     return;
                 }
-                // Java L128-130: 自分と相手の向きが同じときだけ相手を反転する
-                let mine = self.mascots[index].look_right();
-                if arrival.flip_look && self.mascots[target_index].look_right() == mine {
-                    self.mascots[target_index].set_look_right(!mine);
-                }
             }
-            Err(err) => {
-                log::error!(
-                    r#"scan arrival: failed to build behavior "{}" for mascot #{target_index}: {err}"#,
-                    arrival.target_behavior
-                );
-            }
+        }
+
+        // 3. Java L128-130 / ScanInteract L105-107: 自分と相手の向きが同じときだけ
+        //    相手を反転する（相手 Behavior を設定しなかった場合も適用される）。
+        let mine = self.mascots[index].look_right();
+        if arrival.flip_look && self.mascots[target_index].look_right() == mine {
+            self.mascots[target_index].set_look_right(!mine);
         }
     }
 

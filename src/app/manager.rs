@@ -278,6 +278,12 @@ impl Manager {
         });
         self.removed_indices.append(&mut removed);
 
+        // #35: drain の Behavior init（Interact 等）が既存個体との重なりを Java と
+        // 同様に観測できるよう、spawn 反映前の anchor カウントを配る
+        //（Java は manager の live リストを読むため既存個体は既に数えられている）。
+        self.environment
+            .set_overlap_anchors(self.mascots.iter().map(|mascot| mascot.anchor()));
+
         // ③ #32: 放送スナップショットを「index 確定後」の状態で配る
         //    （drain の behavior init と同 tick の個体 tick がこの内容を読む。
         //    以降は各個体 tick の後に更新する）。放送中の個体が居なければ空になり、
@@ -388,6 +394,10 @@ impl Manager {
         // 構築は「マスコット自身の set」の table を使う（#9b・(AF)・
         // Java buildNextBehavior は mascot 自身の Configuration で呼ばれるため）。
         if !no_mascots {
+            // #35: Interact 用の anchor カウントを spawn 反映後の全個体で再構築する
+            //（個体ループ中は差分更新）。
+            self.environment
+                .set_overlap_anchors(self.mascots.iter().map(|mascot| mascot.anchor()));
             let pin = self.environment.pinned_window();
             let env: &dyn EnvironmentView = &self.environment;
             // index ループにするのは、各個体 tick の後にスナップショットを更新するため
@@ -395,6 +405,9 @@ impl Manager {
             // ループ前の内容は ③ で配り済み（index 確定後の状態）。
             for index in 0..self.mascots.len() {
                 let mascot = &mut self.mascots[index];
+                // #35: Interact の重なり判定用に tick 前の anchor を控える
+                //（tick 後に差分更新する）。
+                let anchor_before = mascot.anchor();
                 // #30 item 2: pin 窓を activeIE として見せるのは保持者の tick 中のみ。
                 // 非保持者はグローバルな active window のまま（Advisor P0-1 隔離）。
                 let is_holder = pin.is_some_and(|pin| mascot.pinned_window() == Some(pin.id));
@@ -469,6 +482,10 @@ impl Manager {
                 // スキャン中の個体は自分自身を相手として拾わない（Java と同じ）。
                 self.environment
                     .set_affordance_scan(Self::scan_snapshot(&self.mascots));
+                // #35: Interact の anchor カウントを差分更新する（後続の個体は
+                // Java の live 走査と同じく「tick 済みの個体は新 anchor」を見る）。
+                self.environment
+                    .move_overlap_anchor(anchor_before, self.mascots[index].anchor());
             }
         }
 
