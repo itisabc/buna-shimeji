@@ -7,6 +7,7 @@
     Automates the manual steps documented in doc/releasing.md (§1 構成 / §3 パッケージ).
     リポジトリルートを $PSScriptRoot から解決するため、どのカレントディレクトリから
     実行しても動作する。書き込み・削除は -OutputDir（既定 target/package）配下のみ。
+    zip に加えて SHA256 を <zip>.sha256.txt（標準チェックサム形式）として出力する。
 
 .PARAMETER Version
     パッケージのバージョン文字列（例: 0.1.0）。省略時は Cargo.toml の version を使用。
@@ -160,10 +161,16 @@ Compress-Archive -Path $StageDir -DestinationPath $ZipPath -Force
 $zipInfo = Get-Item -LiteralPath $ZipPath
 $zipHash = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash
 
+# SHA256 をテキストファイルにも出力する（Release への添付・検証用）。
+# 形式は標準チェックサム形式: "<SHA256>  <zip ファイル名>"
+$HashPath = "$ZipPath.sha256.txt"
+"$zipHash  $($zipInfo.Name)" | Set-Content -LiteralPath $HashPath -Encoding ASCII
+
 Write-Host ""
 Write-Host "Package created successfully:"
 Write-Host "  Path   : $($zipInfo.FullName)"
 Write-Host "  Size   : $($zipInfo.Length) bytes"
 Write-Host "  SHA256 : $zipHash"
+Write-Host "  Hash   : $HashPath"
 
 exit 0
