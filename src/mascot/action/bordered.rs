@@ -797,8 +797,11 @@ impl ScanMoveAction {
         mascot.clear_affordances();
 
         let Some(target) = self.target_anchor(env) else {
-            // Java L83-86: targetMascot == null → super.tick()（border move）のみ
+            // Java L83-86: targetMascot == null → super.tick()（border move）のみ。
+            // ただし境界検査（L79-81）は相手の有無に関わらず先に走る（相手を失っても
+            // 床外なら LostGround で Fall に復帰する）。
             self.bordered.border_tick(mascot, env);
+            self.bordered.check_on_border(mascot, env)?;
             return Ok(());
         };
 
@@ -1284,14 +1287,34 @@ impl BreedDelegate {
     }
 
     /// Java Delegate.isIntervalFrame L65-67 逐語: `time % BornInterval == 0`。
+    /// 0 除算は評価エラーとして返す（Java は ArithmeticException が tick エラーに
+    /// なるが、単一イベントループの Rust では panic = アプリ全体の異常終了になる）。
     pub(crate) fn is_interval_frame(
         &self,
         base: &mut Base,
         mascot: &Mascot,
         env: &dyn EnvironmentView,
     ) -> Result<bool, ActionError> {
-        let interval = base.num_attr(mascot, env, "BornInterval", BREED_DEFAULT_BORN_INTERVAL)?;
+        let interval = self.born_interval(base, mascot, env)?;
         Ok(base.get_time(mascot) % interval == 0)
+    }
+
+    /// Java Delegate.getBornInterval L135-137 + 正値検証（Java Delegate.validateBornInterval
+    /// L109-113 と同じ判定を 1 箇所に集約し、0 除算の panic を防ぐ）。
+    fn born_interval(
+        &self,
+        base: &mut Base,
+        mascot: &Mascot,
+        env: &dyn EnvironmentView,
+    ) -> Result<i32, ActionError> {
+        let interval = base.num_attr(mascot, env, "BornInterval", BREED_DEFAULT_BORN_INTERVAL)?;
+        if interval < 1 {
+            return Err(ActionError::Eval(EvalError {
+                expr: "BornInterval".to_string(),
+                message: "BornInterval must be positive".to_string(),
+            }));
+        }
+        Ok(interval)
     }
 
     /// Java Delegate.validateBornCount L103-107 逐語（VariableException 相当）。
@@ -1318,14 +1341,7 @@ impl BreedDelegate {
         mascot: &Mascot,
         env: &dyn EnvironmentView,
     ) -> Result<(), ActionError> {
-        let interval = base.num_attr(mascot, env, "BornInterval", BREED_DEFAULT_BORN_INTERVAL)?;
-        if interval < 1 {
-            return Err(ActionError::Eval(EvalError {
-                expr: "BornInterval".to_string(),
-                message: "BornInterval must be positive".to_string(),
-            }));
-        }
-        Ok(())
+        self.born_interval(base, mascot, env).map(|_| ())
     }
 
     /// Java Delegate.breed L73-101 逐語。

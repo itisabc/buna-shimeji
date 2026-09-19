@@ -39,7 +39,7 @@ use shimeji::config::{
 };
 use shimeji::mascot::action::{build_action, create, fqn_to_kind, ActionKind};
 use shimeji::mascot::behavior::{
-    Action, BehaviorError, BehaviorFactory, BehaviorRunner, BehaviorTable,
+    Action, ActionError, BehaviorError, BehaviorFactory, BehaviorRunner, BehaviorTable,
 };
 use shimeji::mascot::env::{AreaSlot, AreaState, CursorState};
 use shimeji::mascot::{AffordanceScanEntry, EnvironmentView, ImageState, Mascot, Rect, Rng};
@@ -1037,6 +1037,57 @@ fn scan_move_without_target_completes_immediately() {
     );
     assert_eq!(m.anchor(), before, "相手不在では移動しない");
     assert!(m.take_affordance_arrival().is_none());
+}
+
+/// 相手を失った tick でも境界検査を行う（Java ScanMove L74-86: target null でも
+/// 先に L79-81 の LostGround 検査を通る）。相手喪失が turning 中に起きると
+/// hasNext は turning で true のまま（L64-65）なので tick に到達する。
+#[test]
+fn scan_move_lost_target_off_border_is_lost_ground() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    // 相手: index 1・x=1004（右）。lookRight=false なので向きが変わり turning に入る
+    env.set_scan(vec![(1, (1004, 1040), &["talk"])]);
+    let cfg = actions_config(vec![(
+        "Scan",
+        ActionDef::Embedded {
+            class: "com.group_finity.mascot.action.ScanMove".to_string(),
+            border: Some(BorderType::Floor),
+            attrs: attrs(&[
+                ("Affordance", "talk"),
+                ("Behavior", "Arrived"),
+                ("TargetBehavior", "Sit"),
+            ]),
+            animations: vec![
+                anim(None, false, vec![pose("walk.png", (64, 64), (2, 0), 30)]),
+                anim(None, true, vec![pose("turn.png", (64, 64), (0, 0), 3)]),
+            ],
+        },
+    )]);
+    let mut action = build_action(&cfg, "Scan", &VarMap::new(), 1.0).expect("構築できる");
+    let mut m = mascot_at((1000, 1040));
+    action.init(&mut m, &env, &mut rng).unwrap();
+
+    // tick1: 方向転換で turning=true（turn アニメは velocity 0）
+    action.next(&mut m, &env, &mut rng).unwrap();
+    assert_eq!(
+        m.anchor(),
+        (1000, 1040),
+        "turning 中は turn アニメで動かない"
+    );
+    assert!(
+        action.has_next(&mut m, &env, &mut rng).unwrap(),
+        "turning 中は相手を失っても hasNext=true（Java L64-65）→ tick に到達する"
+    );
+
+    // 相手が消え、床（work area 0..1920）の外へ出る
+    env.set_scan(vec![]);
+    m.set_anchor((2000, 1040));
+    let result = action.next(&mut m, &env, &mut rng);
+    assert!(
+        matches!(result, Err(ActionError::LostGround)),
+        "相手不在でも境界外なら LostGround（Java L79-81）: {result:?}"
+    );
 }
 
 // =====================================================================
@@ -3320,6 +3371,44 @@ fn breed_move_breeds_on_interval() {
     assert_eq!(env.spawns.borrow().len(), 1);
     m.tick(&env, &table, &mut factory, &mut rng); // time 2: 生む
     assert_eq!(env.spawns.borrow().len(), 2);
+}
+
+/// `BornInterval` が tick 時に 0 へ変化しても panic せず評価エラーになる
+/// （Java は `time % 0` の ArithmeticException を tick エラーとして処理。単一
+/// イベントループの Rust では panic = アプリ全体の異常終了になる）。
+#[test]
+fn breed_move_zero_interval_at_tick_time_is_eval_error() {
+    let env = SynthEnv::new();
+    let mut rng = FakeRng::repeated(0.5, 16);
+    let table = single_table("X", 1);
+    let mut factory = FnFactory::constant(make_idle_fallback);
+    let mut m = mascot_at((1000, 500));
+
+    // init（anchor.x=1000）は 2 → 検証を通る。tick（移動後 anchor.x=2001）は 0 を返す式。
+    // `#{}` はフレーム毎に再評価される（`${}` はアクション開始時キャッシュ）。
+    let action = create(
+        ActionKind::BreedMove,
+        &attrs(&[
+            ("TargetX", "1010"),
+            ("BornInterval", "#{mascot.anchor.x > 1500 ? 0 : 2}"),
+        ]),
+        vec![anim(
+            None,
+            false,
+            vec![pose("walk.png", (64, 64), (1, 0), 30)],
+        )],
+        1.0,
+    );
+    set_action(&mut m, &env, "X", action, &mut rng).unwrap();
+    // 式が 0 を返す状態へ移してから tick（BreedMove は move → interval 判定の順）
+    m.set_anchor((2000, 500));
+
+    m.tick(&env, &table, &mut factory, &mut rng);
+    assert_eq!(env.spawns.borrow().len(), 0, "0 除算では増殖しない");
+    assert!(
+        m.remove_pending(),
+        "評価エラーは個体単位の失敗（panic で全体を巻き込まない）"
+    );
 }
 
 /// BreedJump（Java BreedJump.java L17-44）: Jump しながら `BornInterval` ごとに増殖する。
