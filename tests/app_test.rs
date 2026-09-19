@@ -607,6 +607,30 @@ fn env_settings_defaults_and_setters() {
     assert_eq!(env.scaling(), 2.0);
 }
 
+/// 式評価用乱数（`EnvironmentView::random_unit`）は `set_rng` で固定できる
+/// （design §1.8(e) の rng 注入拡張・2026-09-19）。
+#[test]
+fn env_random_unit_uses_injected_rng() {
+    let (mut env, _) = single_monitor_env();
+
+    // 注入前も [0,1) を返す（OS シードの既定 rng）
+    let before = EnvironmentView::random_unit(&env);
+    assert!((0.0..1.0).contains(&before), "既定 random_unit = {before}");
+
+    env.set_rng(Box::new(FixedUnitRng(0.125)));
+    assert_eq!(EnvironmentView::random_unit(&env), 0.125);
+    assert_eq!(EnvironmentView::random_unit(&env), 0.125);
+}
+
+/// 常に同じ [0,1) 値を返す rng（random_unit の注入検証用）。
+struct FixedUnitRng(f64);
+
+impl Rng for FixedUnitRng {
+    fn unit(&mut self) -> f64 {
+        self.0
+    }
+}
+
 /// spawn キュー: FIFO・&self から push 可（単一スレッド前提・Mutex 増加禁止）+
 /// drain で FIFO 全取出し+クリア。
 #[test]

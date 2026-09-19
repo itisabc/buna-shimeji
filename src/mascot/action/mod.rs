@@ -32,7 +32,7 @@
 use super::behavior::{Action, ActionError, BehaviorError};
 use super::{env, EnvironmentView, Mascot, MascotContext, Rng};
 use crate::config::script::{EvalError, EvalValue, Variable};
-use crate::config::{ActionDef, ActionsConfig, Animation, BorderType, VarMap};
+use crate::config::{ActionDef, ActionsConfig, Animation, BorderType, SequenceChild, VarMap};
 use crate::render::imageset::{java_round, scale_pose};
 
 pub mod bordered;
@@ -139,6 +139,61 @@ pub fn fqn_to_kind(fqn: &str) -> Option<ActionKind> {
         "com.group_finity.mascot.action.Transform" => Transform,
         _ => return None,
     })
+}
+
+impl ActionKind {
+    /// stub 実装（`has_next=false` で 1 tick も動かず即完了 + 警告ログ）の種別か
+    /// （design §1.8(a)・資産外 11 種）。ユーザー資産が参照した場合に起動時へ
+    /// 警告する用途（#5）。実装スコープの変更時はここを更新する。
+    pub fn is_stub(self) -> bool {
+        matches!(
+            self,
+            ActionKind::ScanJump
+                | ActionKind::ScanInteract
+                | ActionKind::ComplexMove
+                | ActionKind::ComplexJump
+                | ActionKind::BreedMove
+                | ActionKind::BreedJump
+                | ActionKind::Interact
+                | ActionKind::SelfDestruct
+                | ActionKind::Mute
+                | ActionKind::MoveWithTurn
+                | ActionKind::Turn
+        )
+    }
+}
+
+/// `actions` 中の Action 定義のうち stub 実装の種別を参照するものを列挙する（#5）。
+/// `ActionDef::Embedded` の `Class` を [`fqn_to_kind`] で解決し、
+/// [`ActionKind::is_stub`] なら `(action 名, kind)` を返す。Sequence/Select の
+/// Inline 子も再帰的に走査する（Ref は定義側の名前として既に拾われる）。
+/// 並びは [`ActionsConfig::actions`]（BTreeMap）= 名前順。
+pub fn stub_action_references(actions: &ActionsConfig) -> Vec<(String, ActionKind)> {
+    let mut found = Vec::new();
+    for (name, def) in &actions.actions {
+        collect_stub_references(name, def, &mut found);
+    }
+    found
+}
+
+fn collect_stub_references(name: &str, def: &ActionDef, out: &mut Vec<(String, ActionKind)>) {
+    match def {
+        ActionDef::Embedded { class, .. } => {
+            if let Some(kind) = fqn_to_kind(class) {
+                if kind.is_stub() {
+                    out.push((name.to_string(), kind));
+                }
+            }
+        }
+        ActionDef::Sequence { children, .. } | ActionDef::Select { children, .. } => {
+            for child in children {
+                if let SequenceChild::Inline(inner) = child {
+                    collect_stub_references(name, inner, out);
+                }
+            }
+        }
+        ActionDef::Stay { .. } | ActionDef::Move { .. } | ActionDef::Animate { .. } => {}
+    }
 }
 
 // =====================================================================

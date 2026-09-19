@@ -270,6 +270,44 @@ fn math_random_composes_like_asset_durations() {
     }
 }
 
+/// 式評価の乱数は `EvalContext::random_unit` 経由で注入でき、値を固定できる
+/// （design §1.8(e) の rng 注入拡張・2026-09-19）。
+#[test]
+fn math_random_uses_context_random_unit() {
+    struct FixedCtx {
+        value: f64,
+    }
+    impl EvalContext for FixedCtx {
+        fn number(&self, _path: &str) -> Option<f64> {
+            None
+        }
+        fn boolean(&self, _path: &str) -> Option<bool> {
+            None
+        }
+        fn is_on(&self, _target: &str, _x: f64, _y: f64) -> bool {
+            false
+        }
+        fn random_unit(&self) -> f64 {
+            self.value
+        }
+    }
+
+    let ctx = FixedCtx { value: 0.25 };
+    let mut vars = Variables::new();
+    match vars.eval(&script_var("Math.random()", true), &ctx) {
+        Ok(EvalValue::Number(n)) => assert_eq!(n, 0.25),
+        Ok(other) => panic!("Math.random() は数値のはずが {}", describe_value(&other)),
+        Err(_) => panic!("Math.random() の評価が Err になった"),
+    }
+    // 合成式（資産の典型形）にも注入値が伝播する
+    let mut vars = Variables::new();
+    match vars.eval(&script_var("500+Math.random()*1000", true), &ctx) {
+        Ok(EvalValue::Number(n)) => assert_eq!(n, 750.0),
+        Ok(other) => panic!("合成式は数値のはずが {}", describe_value(&other)),
+        Err(_) => panic!("合成式の評価が Err になった"),
+    }
+}
+
 #[test]
 fn math_abs_and_min() {
     let ctx = MockCtx::new();

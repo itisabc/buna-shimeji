@@ -18,7 +18,7 @@
 //! - affordances は デレマスしめじ v1.9 資産が使用する（Java ActionBase の
 //!   `Affordance` 属性放送・ScanMove の探索対象）。broadcast は action 側で実装済み
 //! - ScanMove 到達時の自分自身の Behavior 差し替えは
-//!   [`Mascot::request_behavior`] に要求を積み、Manager がループ後に反映する
+//!   [`Mascot::request_affordance_arrival`] に要求を積み、Manager がループ後に反映する
 //!   （Java `ScanMove.tick` の `mascot.setBehavior(...)` 即時呼び出しとの
 //!   意図的差異・design §1.10 記録）
 //! - image_anchor() は flip 調整済み center を返す（flip 前値は #8 renderer glue が
@@ -260,6 +260,20 @@ pub trait EnvironmentView {
     fn affordance_scan(&self) -> Vec<AffordanceScanEntry> {
         Vec::new()
     }
+
+    /// 式評価の `Math.random()` へ供給する [0,1) 一様乱数
+    /// （[`EvalContext::random_unit`](crate::config::script::EvalContext::random_unit) の
+    /// 供給経路）。本番 [`Environment`](crate::app::environment::Environment) は
+    /// 注入済み [`Rng`] を返す。既定実装はテストダブル用に OS シードの
+    /// [`JavaRandom`](crate::mascot::rng::JavaRandom) を使う。
+    ///
+    /// 行動選択・Dragged/Regist が使う [`Rng`]（Manager 注入）とは別インスタンスで、
+    /// 式評価専用のストリームである（2026-09-19 の意図的差異。Java は
+    /// `Math.random()` が単一グローバルだが、Rust は `&mut dyn Rng` の受け渡し構造上
+    /// 分離している。テストでは注入で固定できる）。
+    fn random_unit(&self) -> f64 {
+        rng::JavaRandom::from_os().unit()
+    }
 }
 
 /// Java `Math.random()` 相当の [0,1) 一様乱数の抽象。
@@ -347,6 +361,12 @@ impl EvalContext for MascotContext<'_> {
             return resolve_env_is_on(self.env, self.snapshot.look_right, target, x, y);
         }
         self.env.eval_context().is_on(target, x, y)
+    }
+
+    /// 式評価の `Math.random()` は `EnvironmentView` の注入済み rng へ委譲する
+    /// （design §1.8(e) の rng 注入を式評価へ拡張・2026-09-19）。
+    fn random_unit(&self) -> f64 {
+        self.env.random_unit()
     }
 }
 

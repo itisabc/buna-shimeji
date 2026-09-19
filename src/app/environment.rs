@@ -50,7 +50,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::config::script::EvalContext;
 use crate::mascot::env::{AreaSlot, AreaState, CursorState};
-use crate::mascot::{AffordanceScanEntry, EnvironmentView, Rect};
+use crate::mascot::rng::JavaRandom;
+use crate::mascot::{AffordanceScanEntry, EnvironmentView, Rect, Rng};
 
 /// spawn キューの 1 件（Breed 出生要求・Java Breed.java L73-101 相当）。
 /// `behavior_name`:
@@ -253,6 +254,11 @@ pub struct Environment {
     /// #32: ScanMove 用の放送スナップショット。Manager が個体 tick の後に
     /// [`Environment::set_affordance_scan`] で差し替える（`&self` 更新・RefCell）。
     affordance_scan: RefCell<Vec<AffordanceScanEntry>>,
+    /// 式評価の `Math.random()` へ供給する乱数（[`EnvironmentView::random_unit`]）。
+    /// 行動選択用の Manager 注入 rng とは別ストリーム（2026-09-19 の意図的差異・
+    /// `EnvironmentView::random_unit` の doc 参照）。既定は OS シードの
+    /// [`JavaRandom`]。テストは [`Environment::set_rng`] で固定できる。
+    rng: RefCell<Box<dyn Rng>>,
     null_ctx: NullEnvCtx,
     /// Settings.java L32-37 / L45 既定値（settings.properties 無しのため既定適用）。
     breeding: bool,
@@ -301,6 +307,7 @@ impl Environment {
             pinned: RefCell::new(None),
             holder_scope: Cell::new(None),
             affordance_scan: RefCell::new(Vec::new()),
+            rng: RefCell::new(Box::new(JavaRandom::from_os())),
             null_ctx: NullEnvCtx,
             breeding: true,
             transients: true,
@@ -453,6 +460,12 @@ impl Environment {
 
     pub fn set_scaling(&mut self, scaling: f64) {
         self.scaling = scaling;
+    }
+
+    /// 式評価用乱数（[`EnvironmentView::random_unit`]）を差し替える。
+    /// 既定は OS シードの [`JavaRandom`]。テストで固定乱数を注入する経路。
+    pub fn set_rng(&mut self, rng: Box<dyn Rng>) {
+        *self.rng.borrow_mut() = rng;
     }
 
     /// Main.setMascotBehaviorEnabled L526-544 逐語のリスト変異（Allowed Behaviours
@@ -869,5 +882,12 @@ impl EnvironmentView for Environment {
     /// 呼び出しもスキャン中の個体の 1 tick あたり数回）。
     fn affordance_scan(&self) -> Vec<AffordanceScanEntry> {
         self.affordance_scan.borrow().clone()
+    }
+
+    /// 式評価の `Math.random()` へ注入済み rng を供給する（2026-09-19）。
+    /// [`Environment::set_rng`] で差し替え可能（`&self` 更新のため RefCell 借用は
+    /// unit() 呼び出しの間だけ）。
+    fn random_unit(&self) -> f64 {
+        self.rng.borrow_mut().unit()
     }
 }

@@ -21,6 +21,7 @@ use shimeji::config::{
     parse_actions, parse_behaviors, validate_required_behaviors, ActionDef, ActionsConfig,
     Animation, BehaviorDef, BehaviorEntry, BehaviorsConfig, BorderType, Pose, SequenceChild,
 };
+use shimeji::mascot::action::stub_action_references;
 
 // =====================================================================
 // 共通ヘルパ
@@ -1716,4 +1717,50 @@ fn synthetic_loop_and_is_turn_parse_sequence_select() {
         },
         _ => panic!(),
     }
+}
+
+// =====================================================================
+// #5: stub アクション参照の検出
+// =====================================================================
+
+#[test]
+fn synthetic_stub_action_references_are_reported() {
+    let xml = format!(
+        "{}\
+         <Action Name=\"Normal\" Type=\"Stay\"><Animation><Pose Image=\"/x.png\" ImageAnchor=\"0,0\" Velocity=\"0,0\" Duration=\"1\"/></Animation></Action>\n\
+         <Action Name=\"StubTurn\" Type=\"Embedded\" Class=\"com.group_finity.mascot.action.Turn\"><Animation><Pose Image=\"/x.png\" ImageAnchor=\"0,0\" Velocity=\"0,0\" Duration=\"1\"/></Animation></Action>\n\
+         <Action Name=\"StubScan\" Type=\"Embedded\" Class=\"com.group_finity.mascot.action.ScanJump\"><Animation><Pose Image=\"/x.png\" ImageAnchor=\"0,0\" Velocity=\"0,0\" Duration=\"1\"/></Animation></Action>\n\
+         </ActionList>\n</Mascot>\n",
+        ACTIONS_XML_HEAD
+    );
+    let path = temp_conf("stub_refs", &xml);
+    let result = parse_actions(&path);
+    let _ = std::fs::remove_file(&path);
+    let cfg = result.expect("stub class を含む actions.xml をパースできる");
+
+    let found = stub_action_references(&cfg);
+    // BTreeMap 順 = 名前順（Normal は stub でないため含まれない）
+    assert_eq!(
+        found
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["StubScan", "StubTurn"]
+    );
+    assert!(found.iter().all(|(_, kind)| kind.is_stub()));
+    assert!(
+        !found.iter().any(|(name, _)| name == "Normal"),
+        "非 stub は報告しない"
+    );
+}
+
+#[test]
+fn real_assets_have_no_stub_action_references() {
+    // 同梱 conf は stub 実装（資産外 11 種）を参照しない（design §1.8(a)）。
+    let cfg = real_actions();
+    assert!(
+        stub_action_references(&cfg).is_empty(),
+        "同梱資産が stub を参照: {:?}",
+        stub_action_references(&cfg)
+    );
 }

@@ -13,6 +13,9 @@
 //!   いずれも単発評価のため挙動への影響はない。
 //! - NaN→int 変換は JLS 5.1.3（[`to_java_int`]）。資産の括弧抜け式
 //!   `Math.random*100` 2 件は JS/Java 同様に NaN になり、Java 挙動では 0 扱いになる。
+//! - `Math.random()` は [`EvalContext::random_unit`] 経由で評価する。本番の
+//!   `MascotContext` は注入済み `Rng` を持つ `EnvironmentView` へ委譲するため、
+//!   式評価の乱数もテストで固定できる（design §1.8(e) の rng 注入拡張・2026-09-19）。
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
@@ -83,6 +86,16 @@ pub trait EvalContext {
     /// `xxx.isOn(mascot.anchor)` の境界接触判定
     /// （例: `is_on("mascot.environment.floor", anchor_x, anchor_y)`）。
     fn is_on(&self, target: &str, x: f64, y: f64) -> bool;
+
+    /// `Math.random()` 相当の [0,1) 一様乱数。
+    ///
+    /// 本番経路（[`MascotContext`](crate::mascot::MascotContext)）は注入済みの
+    /// [`Rng`](crate::mascot::Rng) を保持する `EnvironmentView` へ委譲して上書きする
+    /// （design §1.8(e) の rng 注入を式評価へ拡張）。既定実装はテストダブル等の
+    /// 非本番コンテキスト用フォールバックで、呼び出しごとに独立な値を返す。
+    fn random_unit(&self) -> f64 {
+        random_unit_fallback()
+    }
 }
 
 /// 式評価エラー。panic せず Result で伝播する。エラー後も Variables は再利用可能。
@@ -950,7 +963,7 @@ impl<'a> Interp<'a> {
     ) -> Result<EvalValue, EvalError> {
         if target == "Math" {
             return match (name, args.len()) {
-                ("random", 0) => Ok(EvalValue::Number(random_unit())),
+                ("random", 0) => Ok(EvalValue::Number(self.ctx.random_unit())),
                 ("abs", 1) => Ok(EvalValue::Number(
                     self.eval_num(&args[0], "argument of Math.abs")?.abs(),
                 )),
@@ -1006,11 +1019,14 @@ fn java_min(a: f64, b: f64) -> f64 {
     }
 }
 
-/// Java `Math.random()` 相当の [0,1) 一様乱数。
+/// [`EvalContext::random_unit`] の既定実装（非本番コンテキスト用フォールバック）。
 /// グローバル可変状態を避けるため、std の HashMap 用シード機構（RandomState）から
 /// 64bit 値を導出する。`RandomState::new()` は呼び出しごとに異なるシードを返す
 /// （OS エントロピー + スレッドローカルなカウンタ）ため、Mutex も不要。
-fn random_unit() -> f64 {
+///
+/// 本番の式評価は `MascotContext` が注入済み `Rng` を保持する `EnvironmentView` へ
+/// 委譲するため、この関数は実行パスに乗らない（テストダブルの既定値のみ）。
+fn random_unit_fallback() -> f64 {
     let hasher = RandomState::new().build_hasher();
     let bits = hasher.finish();
     // 上位 53bit を [0,1) の double へ（JS の Math.random と同じ分解能）

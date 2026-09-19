@@ -1,5 +1,10 @@
 //! Manager — マスコット集合・tick スケジュール（Java `Manager.java` 相当・タスク #8）。
 //!
+//! 責務分割（design-review #1）: BehaviorTable 解決と setBehavior 適用は
+//! [`behavior_resolver`]、メニュー分類は [`menu`]、pin 状態機械は [`pin`]、
+//! ScanMove / Transform の tick 後処理は [`post_tick`] に分離した。本ファイルは
+//! マスコット集合・tick スケジュール・spawn/dispose・Environment への passthrough を持つ。
+//!
 //! Java 正本（.tmp/java-ref/Manager.java）を仕様として逐語移植する:
 //! - tick 本体 L201-244: ①環境更新 → ②added 反映 → ③removed 反映 → ④全員 tick →
 //!   exitOnLastRemoved
@@ -51,26 +56,27 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::app::environment::{Environment, PinnedWindow};
+use crate::app::environment::Environment;
 use crate::app::reload::ReloadMaterial;
 use crate::mascot::behavior::{BehaviorError, BehaviorFactory, BehaviorTable};
-use crate::mascot::{
-    AffordanceArrival, AffordanceScanEntry, EnvironmentView, Mascot, Rng, TransformRequest,
-};
+use crate::mascot::{AffordanceArrival, EnvironmentView, Mascot, Rng, TransformRequest};
 use crate::render::imageset::ImageSet;
+
+mod behavior_resolver;
+mod menu;
+mod pin;
+mod post_tick;
+
+// table 選択は behavior_resolver、pin の補助関数は pin に分離（design-review #1）。
+// 本ファイル内の呼び出しを変えないための再導入。
+use behavior_resolver::table_for;
+use pin::{is_bottom_behavior, pin_safe_replacement};
+
+// 公開パス `app::manager::BehaviorMenu` を維持する（menu モジュールへ移動）。
+pub use menu::BehaviorMenu;
 
 /// image set resolver の型（Java `Main.getConfiguration(imageSet)` 相当の注入点）。
 type ImageSetResolver = dyn FnMut(&str) -> Option<Arc<ImageSet>>;
-
-/// マスコット右クリック メニューの行動分類（Java `Mascot` ポップアップ
-/// L523-553 相当・#9b）。双方とも table 挿入順。
-pub struct BehaviorMenu {
-    /// 有効 && 名前に "/" を含まない非 toggleable 行動（setBehavior メニュー項目）。
-    /// toggleable 且つ有効な行動も Java 同様 selectable に出る（L529-547 逐語）。
-    pub selectable: Vec<String>,
-    /// Allowed Behaviours トグル項目（名前, checked = enabled = 無効リスト非含有）。
-    pub toggleable: Vec<(String, bool)>,
-}
 
 /// マスコット集合の所有者（Java `Manager` 相当・スレッド/lock は排除）。
 pub struct Manager {
@@ -116,38 +122,6 @@ pub struct Manager {
     /// true のとき保持者が Fall / Thrown へ遷移したら unpin する。
     /// pin 成立時・unpin 時に false へリセットする。
     pin_has_clung: bool,
-}
-
-/// 「要求 set の table を選ぶ」共通ヘルパ（Java `getConfiguration(imageSet)` 相当）。
-/// field-disjoint borrow で呼ぶため静的ヘルパにする（`&self` を取らない）。
-fn table_for<'a>(
-    set_tables: &'a HashMap<String, BehaviorTable>,
-    base: &'a BehaviorTable,
-    image_set_name: &str,
-) -> &'a BehaviorTable {
-    set_tables.get(image_set_name).unwrap_or(base)
-}
-
-/// #30 item 4: 下端掴み 3 種（behaviors.xml L138-143）かどうか。
-/// 保持者の落下 clamp で「既に下端掴みなら再遷移しない」判定に使う。
-fn is_bottom_behavior(name: Option<&str>) -> bool {
-    matches!(
-        name,
-        Some("ClimbIEBottom") | Some("GrabIEBottomLeftWall") | Some("GrabIEBottomRightWall")
-    )
-}
-
-/// タスク #30-9(C): ピン保持中に飛び降り系行動（窓外へ落下し 30-8b で pin を
-/// 解除してしまう）を、同系統の「飛び降りない」行動へ差し替える写像。
-/// 対象外（縁伝い・下端掴み・安全行動自身など）は None を返す（冪等）。
-fn pin_safe_replacement(name: Option<&str>) -> Option<&'static str> {
-    match name {
-        Some("JumpFromLeftEdgeOfIE") => Some("SitOnTheLeftEdgeOfIE"),
-        Some("JumpFromRightEdgeOfIE") => Some("SitOnTheRightEdgeOfIE"),
-        Some("WalkLeftAlongIEAndJump") => Some("WalkLeftAlongIEAndSit"),
-        Some("WalkRightAlongIEAndJump") => Some("WalkRightAlongIEAndSit"),
-        _ => None,
-    }
 }
 
 impl Manager {
@@ -554,205 +528,6 @@ impl Manager {
         self.mascots.iter_mut().for_each(apply);
     }
 
-    /// ScanMove 用スナップショットを組む（#32）。index 順 = Java
-    /// `Manager.getMascotWithAffordance` の線形走査順（同順で最初の一致が選ばれる）。
-    ///
-    /// 放送中の個体（affordance 非空）が 1 体も居なければ空を返す（コスト削減・
-    /// red-team R1）。空は「全個体を再構築した場合」と内容が等価（全 entry が
-    /// affordance 空になり、スキャン側の照合はどのみち一致しない）ため、
-    /// 意味を変えずに clone / String alloc を丸ごと省ける。同梱 `conf/` のように
-    /// ScanMove を使わない資産では常にこの短絡経路を通る。
-    fn scan_snapshot(mascots: &[Mascot]) -> Vec<AffordanceScanEntry> {
-        if !mascots
-            .iter()
-            .any(|mascot| !mascot.affordances().is_empty())
-        {
-            return Vec::new();
-        }
-        mascots
-            .iter()
-            .enumerate()
-            .map(|(index, mascot)| AffordanceScanEntry {
-                index,
-                anchor: mascot.anchor(),
-                affordances: mascot.affordances().to_vec(),
-            })
-            .collect()
-    }
-
-    /// ScanMove の到達時要求を Java `ScanMove.tick` L122-137 と同じ順序で適用する:
-    /// 1. 自分の Behavior（L125）— 失敗したら相手には触らない（Java の catch 位置と同じ）
-    /// 2. 相手の Behavior（L127）
-    /// 3. `TargetLook` かつ両者の向きが同じなら相手を反転（L128-130）
-    ///
-    /// index は要求時点のスナップショット値だが、tick 内での削除はループ前のみ・
-    /// spawn は次 tick 反映のため、ループ直後の本適用まで index は安定する。
-    fn apply_affordance_arrival(&mut self, index: usize, arrival: AffordanceArrival) {
-        let env: &dyn EnvironmentView = &self.environment;
-
-        // 1. 自分の Behavior（自分の set の table で構築・Java L125）
-        let Some(set_name) = self
-            .mascots
-            .get(index)
-            .map(|mascot| mascot.image_set_name().to_string())
-        else {
-            return;
-        };
-        let table = table_for(&self.set_tables, &self.table, &set_name);
-        let built = table.build_behavior(
-            &arrival.behavior,
-            &mut self.mascots[index],
-            env,
-            self.factory.as_mut(),
-            self.rng.as_mut(),
-        );
-        match built {
-            Ok(runner) => {
-                if let Err(err) = self.mascots[index].set_behavior(
-                    Some(runner),
-                    env,
-                    table,
-                    self.factory.as_mut(),
-                    self.rng.as_mut(),
-                ) {
-                    log::error!(
-                        r#"scan arrival: failed to set behavior "{}" for mascot #{index}: {err}"#,
-                        arrival.behavior
-                    );
-                    return;
-                }
-            }
-            Err(err) => {
-                log::error!(
-                    r#"scan arrival: failed to build behavior "{}" for mascot #{index}: {err}"#,
-                    arrival.behavior
-                );
-                return;
-            }
-        }
-
-        // 2-3. 相手の Behavior + 向き反転（相手の set の table で構築・Java L127-130）
-        let Some(target_index) = arrival.target_index else {
-            return;
-        };
-        let Some(target_set) = self
-            .mascots
-            .get(target_index)
-            .map(|mascot| mascot.image_set_name().to_string())
-        else {
-            return;
-        };
-        let target_table = table_for(&self.set_tables, &self.table, &target_set);
-        let built = target_table.build_behavior(
-            &arrival.target_behavior,
-            &mut self.mascots[target_index],
-            env,
-            self.factory.as_mut(),
-            self.rng.as_mut(),
-        );
-        match built {
-            Ok(runner) => {
-                if let Err(err) = self.mascots[target_index].set_behavior(
-                    Some(runner),
-                    env,
-                    target_table,
-                    self.factory.as_mut(),
-                    self.rng.as_mut(),
-                ) {
-                    log::error!(
-                        r#"scan arrival: failed to set behavior "{}" for mascot #{target_index}: {err}"#,
-                        arrival.target_behavior
-                    );
-                    return;
-                }
-                // Java L128-130: 自分と相手の向きが同じときだけ相手を反転する
-                let mine = self.mascots[index].look_right();
-                if arrival.flip_look && self.mascots[target_index].look_right() == mine {
-                    self.mascots[target_index].set_look_right(!mine);
-                }
-            }
-            Err(err) => {
-                log::error!(
-                    r#"scan arrival: failed to build behavior "{}" for mascot #{target_index}: {err}"#,
-                    arrival.target_behavior
-                );
-            }
-        }
-    }
-
-    /// Transform の変身要求を適用する（Java `Transform.transform` L44-54 相当・#33）:
-    /// 1. 変身先 set を決める（Java L45: `configuration(TransformMascot) != null ?
-    ///    TransformMascot : mascot.getImageSet()`）。空 / 未解決は自分の set のまま。
-    /// 2. 解決できた場合のみ [`Mascot::rebind_image_set`] で画像セットを差し替える
-    ///    （Java の `setImageSet` は `buildBehavior` より先）。
-    /// 3. 差し替え後 set の table で `TransformBehavior` を構築して `setBehavior`
-    ///    （Java L49）。
-    ///
-    /// 構築失敗は log + 現状の Behavior 維持（マスコットは生存・Java L50-53 の
-    /// catch + showError 相当）。画像セットは Java 同様に差し替え済みのまま残す。
-    fn apply_transform(&mut self, index: usize, request: TransformRequest) {
-        let env: &dyn EnvironmentView = &self.environment;
-        let own_set = self.mascots[index].image_set_name().to_string();
-
-        // 1. 変身先 set の決定（空 / resolver 未解決は自分の set）
-        let resolved = if request.image_set.is_empty() || request.image_set == own_set {
-            None
-        } else {
-            self.resolver.as_mut().and_then(|r| r(&request.image_set))
-        };
-        let (target_name, target_image_set) = match resolved {
-            Some(arc) => (request.image_set.clone(), Some(arc)),
-            None if request.image_set.is_empty() || request.image_set == own_set => {
-                (own_set.clone(), None)
-            }
-            None => {
-                // Java: configuration(TransformMascot) == null → 自分の set を使う
-                log::warn!(
-                    "transform: could not resolve image set `{}` for mascot #{index}; keeping `{own_set}`",
-                    request.image_set
-                );
-                (own_set.clone(), None)
-            }
-        };
-
-        // 2. 画像セット差し替え（解決できた場合のみ）
-        if let Some(arc) = target_image_set {
-            self.mascots[index].rebind_image_set(target_name.clone(), arc);
-        }
-
-        // 3. 変身先 set の table で Behavior を構築して設定
-        let table = table_for(&self.set_tables, &self.table, &target_name);
-        let built = table.build_behavior(
-            &request.behavior,
-            &mut self.mascots[index],
-            env,
-            self.factory.as_mut(),
-            self.rng.as_mut(),
-        );
-        let runner = match built {
-            Ok(runner) => runner,
-            Err(err) => {
-                log::error!(
-                    r#"transform: failed to build behavior "{}" for mascot #{index}: {err}"#,
-                    request.behavior
-                );
-                return;
-            }
-        };
-        if let Err(err) = self.mascots[index].set_behavior(
-            Some(runner),
-            env,
-            table,
-            self.factory.as_mut(),
-            self.rng.as_mut(),
-        ) {
-            log::error!(
-                r#"transform: failed to set behavior "{}" for mascot #{index}: {err}"#,
-                request.behavior
-            );
-        }
-    }
-
     /// tick の retain で除去した mascot の「除去前 index」を昇順で返し、
     /// 蓄積を空にする（drain・#10b-2b・glue の view 同期用）。
     /// 呼ぶまで tick 間で蓄積され（毎 tick リセットでない）、呼んだら空になる。
@@ -828,116 +603,6 @@ impl Manager {
     pub fn dispose_all(&mut self) {
         for index in (0..self.mascots.len()).rev() {
             self.mascots[index].dispose();
-        }
-    }
-
-    /// Java `setBehaviorAll(String)` L291-310 逐語（全員へ setBehavior・
-    /// 構築 / 実行失敗 → log + dispose（L301-306 逐語・削除は次 tick））。
-    /// 各マスコットは「自身の set」の table で構築する（L298
-    /// getConfiguration(mascot.getImageSet()) 相当・#9b (AF)）。
-    pub fn set_behavior_all(&mut self, name: &str) {
-        if self.mascots.is_empty() {
-            return;
-        }
-        let env: &dyn EnvironmentView = &self.environment;
-        for mascot in &mut self.mascots {
-            // Java L296: Configuration configuration =
-            //   Main.getInstance().getConfiguration(mascot.getImageSet())
-            let set_name = mascot.image_set_name().to_string();
-            let table = table_for(&self.set_tables, &self.table, &set_name);
-            match table.build_behavior(name, mascot, env, self.factory.as_mut(), self.rng.as_mut())
-            {
-                Ok(runner) => {
-                    if let Err(err) = mascot.set_behavior(
-                        Some(runner),
-                        env,
-                        table,
-                        self.factory.as_mut(),
-                        self.rng.as_mut(),
-                    ) {
-                        log::error!(r#"failed to set behavior "{name}": {err}"#);
-                        mascot.dispose();
-                    }
-                }
-                Err(err) => {
-                    log::error!(r#"failed to build behavior "{name}": {err}"#);
-                    mascot.dispose();
-                }
-            }
-        }
-    }
-
-    /// Java 3 引数 overload `setBehaviorAll(Configuration, name, imageSet)`
-    /// L320-340 逐語: 該当 set のマスコットのみ「その set」の table で構築 +
-    /// setBehavior・他 set は無傷。構築 / 実行失敗（L329-334 逐語・該当 set の
-    /// マスコットの catch は if の外側のため同一）→ log + そのマスコットのみ
-    /// dispose（削除は次 tick）。
-    pub fn set_behavior_all_of_set(&mut self, image_set_name: &str, name: &str) {
-        if self.mascots.is_empty() {
-            return;
-        }
-        let env: &dyn EnvironmentView = &self.environment;
-        for mascot in &mut self.mascots {
-            // Java L327: if (mascot.getImageSet().equals(imageSet))
-            if mascot.image_set_name() != image_set_name {
-                continue;
-            }
-            let table = table_for(&self.set_tables, &self.table, image_set_name);
-            match table.build_behavior(name, mascot, env, self.factory.as_mut(), self.rng.as_mut())
-            {
-                Ok(runner) => {
-                    if let Err(err) = mascot.set_behavior(
-                        Some(runner),
-                        env,
-                        table,
-                        self.factory.as_mut(),
-                        self.rng.as_mut(),
-                    ) {
-                        log::error!(r#"failed to set behavior "{name}": {err}"#);
-                        mascot.dispose();
-                    }
-                }
-                Err(err) => {
-                    log::error!(r#"failed to build behavior "{name}": {err}"#);
-                    mascot.dispose();
-                }
-            }
-        }
-    }
-
-    /// 単一マスコット版 setBehavior（#9c・Java `Mascot` popup の SetBehaviour
-    /// L517-522 / L538 相当）: `index` のマスコットのみ「自分の set」の table で
-    /// 構築する（[`table_for`] = Java L522 `getConfiguration(imageSet)` 相当・
-    /// [`Manager::set_behavior_all`] のループ本体と同一構造）。
-    /// 構築 / 実行失敗 → log + そのマスコットのみ dispose（Java
-    /// `Manager.setBehaviorAll` L291-310 の catch 準拠・削除反映は次 tick）。
-    /// index 範囲外 → warn + no-op（メニュー構築時と MenuEvent 時点の集合ずれ
-    /// に対する防御）。
-    pub fn set_behavior_at(&mut self, index: usize, name: &str) {
-        let Some(mascot) = self.mascots.get_mut(index) else {
-            log::warn!("set_behavior_at: ignoring out-of-range index {index}");
-            return;
-        };
-        let env: &dyn EnvironmentView = &self.environment;
-        let set_name = mascot.image_set_name().to_string();
-        let table = table_for(&self.set_tables, &self.table, &set_name);
-        match table.build_behavior(name, mascot, env, self.factory.as_mut(), self.rng.as_mut()) {
-            Ok(runner) => {
-                if let Err(err) = mascot.set_behavior(
-                    Some(runner),
-                    env,
-                    table,
-                    self.factory.as_mut(),
-                    self.rng.as_mut(),
-                ) {
-                    log::error!(r#"failed to set behavior "{name}": {err}"#);
-                    mascot.dispose();
-                }
-            }
-            Err(err) => {
-                log::error!(r#"failed to build behavior "{name}": {err}"#);
-                mascot.dispose();
-            }
         }
     }
 
@@ -1034,194 +699,6 @@ impl Manager {
         let set_name = mascot.image_set_name().to_string();
         let table = table_for(&self.set_tables, &self.table, &set_name);
         mascot.mouse_released(env, table, self.factory.as_mut(), self.rng.as_mut())
-    }
-
-    /// #30 item 4: ドロップ点直下の窓 W を holder `index` 専用に最前面固定する。
-    /// トグル OFF・窓なし・固定失敗では何もしない。成功時は単一 holder 方針に従い
-    /// 既存ミラーを全クリアして当該 Mascot のみ `Some(W.id)` にする。
-    fn pin_dropped_window_at(&mut self, index: usize, point: (i32, i32)) {
-        if !self.pin_dropped_window_allowed {
-            return;
-        }
-        let Some((id, _rect)) = self.environment.window_at_point(point.0, point.1) else {
-            return;
-        };
-        if !self.environment.pin_window(id, index) {
-            return;
-        }
-        // #30-8b: pin 成立時に「しがみつき済み」をリセットする（新規 pin への持ち越し防止）。
-        self.pin_has_clung = false;
-        for mascot in &mut self.mascots {
-            mascot.set_pinned_window(None);
-        }
-        if let Some(mascot) = self.mascots.get_mut(index) {
-            mascot.set_pinned_window(Some(id));
-        }
-        // プロセス異常終了（panic）時に WS_EX_TOPMOST を best-effort で剥がすための
-        // 復元ターゲットを登録する。元から TOPMOST だった窓（was_topmost == true）は
-        // 我々が付けたのではないため対象外（None 登録 = 解除）。
-        let panic_target = self
-            .environment
-            .pinned_window()
-            .filter(|pin| !pin.was_topmost)
-            .map(|pin| pin.id);
-        crate::win::os_source::set_panic_unpin_window(panic_target);
-    }
-
-    /// #30 item 1/4: トレイ「Allowed Behaviours」の pin トグルを設定する。
-    /// OFF 時は即 unpin + 全ミラークリア（design item 4/5）。
-    pub fn set_pin_dropped_window_allowed(&mut self, allowed: bool) {
-        self.pin_dropped_window_allowed = allowed;
-        if !allowed {
-            self.unpin_pinned_window();
-        }
-    }
-
-    /// #30 item 5: pin を解除し、全マスコットのミラーをクリアする
-    /// （トグル OFF / Reload / RestoreWindows / DismissAll の解除フック・30-5 が使う）。
-    pub fn unpin_pinned_window(&mut self) {
-        self.environment.unpin_window();
-        for mascot in &mut self.mascots {
-            mascot.set_pinned_window(None);
-        }
-        // #30-8b: 解除時に「しがみつき済み」を持ち越さない。
-        self.pin_has_clung = false;
-        // panic 復元ターゲットも解除する（#30-5）。
-        crate::win::os_source::set_panic_unpin_window(None);
-    }
-
-    /// #30 item 6: 現在 pin を保持しているマスコットの index を返す
-    /// （pin が無ければ `None`）。
-    ///
-    /// pin の真実（[`Environment::pinned_window`]）と各 Mascot のミラー
-    /// （[`Mascot::pinned_window`]）を突き合わせ、ミラーが pin 窓 id と一致する
-    /// マスコットの**現在の** index を探索して返す。`PinState.holder` の保存値は
-    /// 使わない（削除で index がずれても追随できないため）。
-    /// `src/main.rs` がピン保持中に保持マスコット窓をピン対象窓より前面へ再アサート
-    /// する対象特定に使う。pin が無い間は `None` を返すため新規コストはゼロ。
-    pub fn pinned_holder(&self) -> Option<usize> {
-        let pin = self.environment.pinned_window()?;
-        self.mascots
-            .iter()
-            .position(|mascot| mascot.pinned_window() == Some(pin.id))
-    }
-
-    /// #30 item 5: pin の真実（`Environment.pinned`）とミラーを同期する。
-    /// - pin なし: ミラーを全クリア（env.tick の `window_frame` None による auto unpin）
-    /// - 保持マスコットが見つからない（削除済み）/ `dragging`（引きはがし）:
-    ///   unpin + 全ミラークリア
-    /// - 有効: 保持者以外の残存ミラーをクリア
-    ///
-    /// 保持者特定は index ではなくミラー（`pinned_window == pin.id`）で行うため、
-    /// 削除による index ずれでも gating に渡す `pin.holder` と整合する。
-    fn reconcile_pin(&mut self) {
-        let Some(pin) = self.environment.pinned_window() else {
-            for mascot in &mut self.mascots {
-                mascot.set_pinned_window(None);
-            }
-            return;
-        };
-        let holder = self
-            .mascots
-            .iter()
-            .position(|mascot| mascot.pinned_window() == Some(pin.id));
-        let invalid = holder.is_none_or(|index| self.mascots[index].is_dragging());
-        if invalid {
-            self.environment.unpin_window();
-            for mascot in &mut self.mascots {
-                mascot.set_pinned_window(None);
-            }
-            return;
-        }
-        let holder = holder.expect("holder is Some when not invalid");
-        for (index, mascot) in self.mascots.iter_mut().enumerate() {
-            if index != holder && mascot.pinned_window() == Some(pin.id) {
-                mascot.set_pinned_window(None);
-            }
-        }
-    }
-
-    /// #30-8a: 保持マスコットのアンカーを、pin 窓の前 tick からの矩形差分から
-    /// 新しい窓下辺へ厳密追従させる。適用したら true（呼び出し側が
-    /// [`Environment::clear_pinned_delta`] を呼ぶ）。
-    ///
-    /// 追従条件・規則（design §1.10(z) 追補 30-8a）:
-    /// - アンカーが前 tick の窓下辺上（`y == old_bottom` かつ
-    ///   `x ∈ [old_left, old_right]`）のときのみ。窓側面を登る局面（`y < bottom`）は
-    ///   対象外（登りを妨げない）。
-    /// - サイズ変化（`dleft != dright || dtop != dbottom`）は 80px しきい値の対象外で
-    ///   常に追従する。
-    /// - 純並進で 1 tick の最大変位が 80px 超なら追従しない（ユーザー承認 案Y・
-    ///   既存の防ジャンプガードへ委譲し LostGround → Fall させる）。
-    /// - `y` は新 bottom に、`x` は窓の水平移動に比例（前幅 0 の縮退ではゼロ除算しない）。
-    fn follow_pinned_window_bottom(mascot: &mut Mascot, pin: &PinnedWindow) -> bool {
-        let (x, y) = mascot.anchor();
-        let window = pin.rect;
-
-        // 前 tick の矩形（現在値 - delta）。
-        let old_left = window.left - pin.dleft;
-        let old_right = window.right - pin.dright;
-        let old_bottom = window.bottom - pin.dbottom;
-
-        // 前 tick の窓下辺上に無いアンカーは追従しない。
-        if y != old_bottom || x < old_left || x > old_right {
-            return false;
-        }
-
-        let pure_translation = pin.dleft == pin.dright && pin.dtop == pin.dbottom;
-        if pure_translation && (pin.dleft.abs() > 80 || pin.dtop.abs() > 80) {
-            return false; // 案Y: 速い純並進は追従せず既存ガードに委ねる
-        }
-
-        // 水平は窓幅の比例で厳密化（前幅 0 の縮退時はゼロ除算回避）。
-        let old_width = old_right - old_left;
-        let new_x = if old_width == 0 {
-            x + pin.dleft
-        } else {
-            (x - old_left) * window.width() / old_width + window.left
-        };
-        mascot.set_anchor((new_x, window.bottom));
-        true
-    }
-
-    /// #30 item 4: 保持マスコットの落下 clamp。tick 後、anchor が pin 窓 W の水平
-    /// 範囲内かつ下端以深（`anchor.y >= W.bottom`）なら `(anchor.x, W.bottom)` に補正し、
-    /// 水平位置に応じた下端掴み行為へ強制遷移する。Allowed 判定は意図的に bypass する
-    /// （明示ユーザー操作・design item 4）。既に下端掴み 3 種なら再遷移しない。
-    fn clamp_holder_to_pinned_window(
-        mascot: &mut Mascot,
-        pin: PinnedWindow,
-        table: &BehaviorTable,
-        env: &dyn EnvironmentView,
-        factory: &mut dyn BehaviorFactory,
-        rng: &mut dyn Rng,
-    ) {
-        let (x, y) = mascot.anchor();
-        let window = pin.rect;
-        if x < window.left || x > window.right || y < window.bottom {
-            return;
-        }
-        if is_bottom_behavior(mascot.behavior_name()) {
-            return;
-        }
-        mascot.set_anchor((x, window.bottom));
-        let midpoint = window.left + (window.right - window.left) / 2;
-        let name = if x < midpoint {
-            "GrabIEBottomLeftWall"
-        } else if x > midpoint {
-            "GrabIEBottomRightWall"
-        } else {
-            "ClimbIEBottom"
-        };
-        match table.build_behavior_direct(name, factory, mascot) {
-            Ok(runner) => {
-                log::info!("pin clamp: forcing behavior `{name}` (Allowed bypass)");
-                if let Err(err) = mascot.set_behavior(Some(runner), env, table, factory, rng) {
-                    log::error!("pin clamp: failed to set behavior `{name}`: {err}");
-                }
-            }
-            Err(err) => log::error!("pin clamp: failed to build behavior `{name}`: {err}"),
-        }
     }
 
     /// index のマスコットのカーソル位置を更新する（#10b-2c・
@@ -1435,51 +912,6 @@ impl Manager {
     /// の実装は [`Environment`]・tray RestoreWindows の供給経路・#9b）。
     pub fn restore_windows(&mut self) {
         self.environment.restore_windows();
-    }
-
-    /// マスコット右クリック メニューの行動分類（Java `Mascot` ポップアップ
-    /// L523-553 逐語相当・#9b）。要求 set（Java `getConfiguration(imageSet)` 相当・
-    /// 未知 set は base table で動作）の table を挿入順で走査する:
-    /// - hidden → 完全スキップ（L526）
-    /// - 名前に "/" を含む → 完全スキップ（L529 / L548 の contains("/") 否定）
-    /// - 有効な非 toggleable → selectable のみ（L529-547）
-    /// - toggleable → toggleable に (name, checked = enabled) 追加（L549-556）かつ
-    ///   有効なら selectable にも（L529 の behaviorEnabled && !contains("/")）
-    /// - frequency は参照しない（Java も参照しない）
-    ///
-    /// 無効判定は [`BehaviorTable::is_behavior_enabled`] の同一式（Java L583-588
-    /// 短絡: 非 toggleable は常に有効 = 「無効な非 toggleable」は到達不能）。
-    pub fn behavior_menu_items(&self, image_set_name: &str) -> BehaviorMenu {
-        let table = table_for(&self.set_tables, &self.table, image_set_name);
-        let env: &dyn EnvironmentView = &self.environment;
-        let mut menu = BehaviorMenu {
-            selectable: Vec::new(),
-            toggleable: Vec::new(),
-        };
-        for row in &table.rows {
-            // Java L526: if (!config.isBehaviorHidden(behaviorName))
-            if row.hidden || row.name.contains('/') {
-                continue;
-            }
-            // Java L528: boolean behaviorEnabled =
-            //   config.isBehaviorEnabled(behaviorName, this)
-            let enabled = BehaviorTable::is_behavior_enabled(row, image_set_name, env);
-            if !row.toggleable {
-                // Java L529-547: behaviorEnabled && !contains("/") → setBehaviorMenu
-                if enabled {
-                    menu.selectable.push(row.name.clone());
-                }
-            } else {
-                // Java L549-556: isBehaviorToggleable → allowedBehaviorsMenu に
-                // (displayName, behaviorEnabled) で追加
-                menu.toggleable.push((row.name.clone(), enabled));
-                // L529: toggleable && 有効 は selectable にも出る
-                if enabled {
-                    menu.selectable.push(row.name.clone());
-                }
-            }
-        }
-        menu
     }
 
     /// 全員消滅 tick 後に true。process::exit はしない（#10 がイベントループで消費）。

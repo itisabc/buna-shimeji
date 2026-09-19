@@ -20,6 +20,7 @@ use thiserror::Error;
 use crate::config::{
     parse_actions, parse_behaviors, validate_required_behaviors, ActionsConfig, ConfigError,
 };
+use crate::mascot::action::stub_action_references;
 use crate::mascot::behavior::BehaviorTable;
 use crate::render::imageset::{
     available_refs, check_references, enumerate_sets, DisabledAnimation, ImageSet, ImagesetError,
@@ -166,6 +167,15 @@ pub fn load_materials(
             .collect();
         let mut actions = actions;
         actions.strip_animations(&disabled);
+
+        // #5: stub 実装（資産外 11 種）を参照している Action を起動時に警告する。
+        // 警告ログ 1 回だけで毎回「何も起きない」状態になるため、どの Action が
+        // inert になるかを名指しで知らせる（design §1.8(a)・ユーザー資産対応）。
+        for (action, kind) in stub_action_references(&actions) {
+            log::warn!(
+                "action `{action}` uses `{kind:?}`, which is not implemented in this version; it completes immediately without moving (the behavior may appear inert)"
+            );
+        }
 
         materials.push(ReloadMaterial {
             name: set,
