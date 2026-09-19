@@ -125,7 +125,7 @@ Java 版と同じ挙動で動作します。
 | 画像セット | `img/<SetName>/` を置くだけで認識。PNG ヘッダから寸法を動的取得 | ✅ |
 | スケール | `conf/settings.toml` の set 単位 `scale`（Lanczos3 プリスケール） | ✅ |
 | 設定の永続化 | `conf/settings.toml`（初回自動生成、トグル状態を保存） | ✅ |
-| 多言語 UI | 埋め込み英語 + `conf/lang/en.toml` / `ja.toml`。`[general] language` | ✅ |
+| 多言語 UI | 埋め込み英語 + `conf/lang/en.toml` / `ja.toml`。`[general] language` で選択。Behavior 名（個別行動指定メニュー）も同じ辞書で解決 | ✅ |
 | 効果音 | Pose の `Sound` / `Volume` 属性（鳴らしたい Pose にだけ書く）。`img/<Set>/sound/` → `sound/<Set>/` → `sound/` の探索順で WAV を Win32 `PlaySound` で再生し、再生終了ごとに鳴り直す（`Sounds` トグルで有効/無効） | ✅ |
 | 画像セット作成ガイド | [`doc/imageset-guide.md`](imageset-guide.md) | ✅ |
 
