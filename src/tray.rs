@@ -134,7 +134,7 @@ pub enum AllowedKind {
     Transformation,
     /// 投げ（Java `Throwing`）。
     Throwing,
-    /// 効果音枠（Java `Sounds`・Phase 1 は永続化のみ）。
+    /// 効果音（Java `Sounds`・#36 で `Manager::set_sounds_enabled` へ実配線）。
     Sounds,
     /// 画面間移動（Java `Multiscreen`）。
     Multiscreen,
@@ -156,7 +156,7 @@ pub struct AllowedSettings {
     pub transformation: bool,
     /// Java L92 `Throwing`（投げ）。
     pub throwing: bool,
-    /// Java L93 `Sounds`（効果音枠・Phase 1 は settings 永続化のみ）。
+    /// Java L93 `Sounds`（効果音。#36 で `Environment::sounds_enabled` へ実配線）。
     pub sounds: bool,
     /// Java L94 `Multiscreen`（画面間移動）。
     pub multiscreen: bool,
@@ -371,7 +371,7 @@ fn allowed_value(allowed: &AllowedSettings, kind: AllowedKind) -> bool {
 }
 
 /// Allowed Behaviours サブメニューのラベル順（design §3-11・増殖 / 変身 / 投げ /
-/// 画面間移動 / 効果音枠 / Transients / ドロップ窓固定）と [`AllowedKind`] /
+/// 画面間移動 / 効果音 / Transients / ドロップ窓固定）と [`AllowedKind`] /
 /// 辞書キーの対応。
 const ALLOWED_MENU_ITEMS: [(AllowedKind, UiKey); 7] = [
     (AllowedKind::Breeding, UiKey::BreedingCloning),
@@ -658,8 +658,8 @@ fn apply_allowed(settings: &mut Settings, kind: AllowedKind, value: bool) {
 /// - FollowCursor: 全員 ChaseMouse / ReduceToOne: [`Manager::remain_one`] /
 ///   RestoreWindows: [`Manager::restore_windows`]
 /// - SetAllowed: settings 更新 → `conf_dir/settings.toml` への**即時保存**
-///   （Err → log で続行・panic しない）→ Environment passthrough。`Sounds` は
-///   Phase 1 no-op（design §3-12）のため settings 更新 + 保存のみ
+///   （Err → log で続行・panic しない）→ Environment passthrough（`Sounds` は #36 で
+///   `Manager::set_sounds_enabled` へ実配線）
 /// - TogglePauseAll / DismissAll: 全員操作・exit は次 tick の
 ///   [`Manager::should_exit`] 経由（apply 内では exit 操作しない）
 /// - Reload: [`load_materials`]（scales は [`Settings::scales`] 注入）→
@@ -695,8 +695,8 @@ pub fn apply_tray_command(
                 AllowedKind::Transformation => manager.set_transformation_allowed(value),
                 AllowedKind::Throwing => manager.set_throwing_allowed(value),
                 AllowedKind::Multiscreen => manager.set_multiscreen(value),
-                // 効果音は Phase 1 no-op（design §3-12・settings 永続化のみ）
-                AllowedKind::Sounds => {}
+                // 効果音（#36: settings 永続化 + Environment の再生バックエンドへ反映）
+                AllowedKind::Sounds => manager.set_sounds_enabled(value),
                 // ドロップ窓固定（機能 #30 item 1/5）: OFF 時は Manager が即 unpin する。
                 AllowedKind::PinDroppedWindow => manager.set_pin_dropped_window_allowed(value),
             }

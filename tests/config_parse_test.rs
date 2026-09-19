@@ -397,6 +397,64 @@ fn real_actions_actionreference_count_198() {
     assert_eq!(total, 198, "ActionReference 総数（ネスト含む）");
 }
 
+/// 同梱 conf/actions.xml は `Sound` 属性を 1 件も使わない（#36 の効果音配線で
+/// 既存挙動が変わらないことの固定）。
+#[test]
+fn real_actions_declare_no_sound() {
+    let cfg = real_actions();
+    assert!(
+        all_poses(&cfg).iter().all(|pose| pose.sound.is_none()),
+        "同梱 conf の Pose に Sound は無い"
+    );
+}
+
+/// Pose の任意属性 `Sound` / `Volume`（Java `AnimationBuilder` L221-237）。
+/// `Volume` 省略は 0（Java L227-230）。
+#[test]
+fn synthetic_pose_sound_and_volume_attributes() {
+    let xml = format!(
+        "{}\
+         <Action Name=\"A\" Type=\"Stay\"><Animation>\
+         <Pose Image=\"/x.png\" ImageAnchor=\"0,0\" Velocity=\"0,0\" Duration=\"1\" Sound=\"se.wav\" Volume=\"0.75\"/>\
+         <Pose Image=\"/x.png\" ImageAnchor=\"0,0\" Velocity=\"0,0\" Duration=\"1\"/>\
+         </Animation></Action>\n\
+         </ActionList>\n</Mascot>\n",
+        ACTIONS_XML_HEAD
+    );
+    let path = temp_conf("pose_sound", &xml);
+    let result = parse_actions(&path);
+    let _ = std::fs::remove_file(&path);
+    let cfg = result.expect("Sound/Volume 付き Pose をパースできる");
+    let mut anims = Vec::new();
+    collect_animations(find_action(&cfg, "A"), &mut anims);
+    let poses = &anims[0].poses;
+    assert_eq!(
+        poses[0].sound.as_deref(),
+        Some("se.wav"),
+        "Sound はファイル名のまま保持（パス解決は再生側・design §1.10 (z-12)）"
+    );
+    assert_eq!(poses[0].volume, 0.75, "Volume 属性");
+    assert_eq!(poses[1].sound, None, "Sound 省略は None");
+    assert_eq!(poses[1].volume, 0.0, "Volume 省略は 0（Java L227-230）");
+}
+
+/// `Volume` の数値化失敗は Err（Java は NumberFormatException → IOException → 読込失敗）。
+#[test]
+fn synthetic_pose_volume_not_a_number_is_error() {
+    let xml = format!(
+        "{}\
+         <Action Name=\"A\" Type=\"Stay\"><Animation>\
+         <Pose Image=\"/x.png\" ImageAnchor=\"0,0\" Velocity=\"0,0\" Duration=\"1\" Volume=\"loud\"/>\
+         </Animation></Action>\n\
+         </ActionList>\n</Mascot>\n",
+        ACTIONS_XML_HEAD
+    );
+    let path = temp_conf("pose_bad_volume", &xml);
+    let result = parse_actions(&path);
+    let _ = std::fs::remove_file(&path);
+    assert!(result.is_err(), "Volume が数値でなければ Err");
+}
+
 #[test]
 fn real_actions_file_has_two_action_lists() {
     // asset-report §3-1: actions.xml は <ActionList> を 2 回持つ

@@ -270,12 +270,28 @@ pub trait EnvironmentView {
         false
     }
 
+    /// 効果音の有効判定（Java `Sounds.isEnabled()` = `Settings.sounds`）。
+    /// 既定 false = 鳴らさない（テストダブルは未実装で安全）。本番
+    /// [`Environment`](crate::app::environment::Environment) は settings 値を返す。
+    fn sounds_enabled(&self) -> bool {
+        false
+    }
+
+    /// 保留音の再生（Java `Mascot.apply` L699-707: `Sounds.isEnabled() && sound != null`
+    /// かつ同じ音が再生中でないとき頭から再生）。`image_set` は音声ファイルのパス解決
+    /// （Java `Main.getSoundFilePath` L446-461: `img/<set>/sound/` → `sound/<set>/` →
+    /// `sound/`）に使う。
+    ///
+    /// 音声の実体（デコード・再生デバイス）は Phase 2 で
+    /// [`SoundPlayer`](crate::app::environment::SoundPlayer) 実装として接続する。
+    /// それまでの本番実装は既定の no-op バックエンドへ委譲し「要求が届く」ところまで
+    /// 配線する（design §1.10 (z-12)）。
+    fn play_sound(&self, _image_set: &str, _sound: &str, _volume: f32) {}
+
     /// 効果音の停止（Java `Mute.apply` L28-52 相当）。
-    /// `Some(name)` = その効果音ファイルの再生中クリップを停止、`None` =
-    /// 効果音が有効なら全停止。効果音の実体は Phase 2 のため、現行の
-    /// [`Environment`](crate::app::environment::Environment) 実装は no-op
-    /// （Mute は属性評価のみ行い、音は鳴らない）。
-    fn stop_sound(&self, _sound: Option<&str>) {}
+    /// `Some(name)` = その効果音ファイルの再生中クリップを停止（Sounds の有効/無効に
+    /// 関わらず停止する）、`None` = 効果音が有効なときだけ全停止。
+    fn stop_sound(&self, _image_set: &str, _sound: Option<&str>) {}
 
     /// 式評価の `Math.random()` へ供給する [0,1) 一様乱数
     /// （[`EvalContext::random_unit`](crate::config::script::EvalContext::random_unit) の
@@ -410,6 +426,9 @@ pub struct Mascot {
     prev_image: Option<ImageState>,
     cursor: Option<(i32, i32)>,
     sound: Option<String>,
+    /// 保留音の音量（XML `Volume`）。Java は Clip へ焼き込むため Mascot は持たないが、
+    /// Rust は音声実体が未接続で音名と対で運ぶ必要がある（design §1.10 (z-12)）。
+    sound_volume: f32,
     affordances: Vec<String>,
     hotspots: Vec<Hotspot>,
     remove_pending: bool,
@@ -451,6 +470,7 @@ impl Mascot {
             prev_image: None,
             cursor: None,
             sound: None,
+            sound_volume: 0.0,
             affordances: Vec::new(),
             hotspots: Vec::new(),
             remove_pending: false,
@@ -821,8 +841,17 @@ impl Mascot {
         self.sound.as_deref()
     }
 
-    pub fn set_sound(&mut self, sound: Option<String>) {
+    /// 保留音の音量（`set_sound` と対で更新・Java `Volume` 属性）。
+    pub fn sound_volume(&self) -> f32 {
+        self.sound_volume
+    }
+
+    /// Java `Pose.apply` L30 の `setSound` 相当。`None` は保留音なし（Java の null）。
+    /// 音量は Java では Clip へ焼き込まれるが、Rust は音声実体が未接続のため
+    /// 音名と対で保持し、再生要求（[`EnvironmentView::play_sound`]）で運ぶ。
+    pub fn set_sound(&mut self, sound: Option<String>, volume: f32) {
         self.sound = sound;
+        self.sound_volume = volume;
     }
 
     pub fn hotspots(&self) -> &[Hotspot] {

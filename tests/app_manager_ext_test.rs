@@ -1078,6 +1078,8 @@ impl BehaviorFactory for TransformFactory {
                         anchor: (0, 0),
                         velocity: (0, 0),
                         duration: 2,
+                        sound: None,
+                        volume: 0.0,
                     }],
                     is_turn: false,
                 }];

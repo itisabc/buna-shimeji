@@ -534,6 +534,8 @@ fn pose(image: &str, anchor: (i32, i32), velocity: (i32, i32), duration: i32) ->
         anchor,
         velocity,
         duration,
+        sound: None,
+        volume: 0.0,
     }
 }
 

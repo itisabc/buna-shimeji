@@ -24,8 +24,8 @@
 //!   design.md §2 Reload 方針（§1.10 (d) 9d・ユーザー承認）により**意図的差異**の
 //!   参照付け替え路線（存続 mascot の anchor 等は維持・ImageSet Arc と行動表のみ差し替え）
 //! - #9c 追加: request_spawn_random（Main.createMascot() 無引数版 L466-473 逐語）、
-//!   Allowed passthrough 5 種（Environment setter 委譲・Sounds は Phase 1 no-op の
-//!   ため作らない）、popup 単体操作（Mascot.java L517-562 相当:
+//!   Allowed passthrough 6 種（Environment setter 委譲。`sounds` は #36 で実配線）、
+//!   popup 単体操作（Mascot.java L517-562 相当:
 //!   set_behavior_at / toggle_pause_at / dismiss_at）
 //!
 //! 構造上の意図的差異（Java 一致検証時に差し引くこと）:
@@ -545,6 +545,26 @@ impl Manager {
         self.mascots.iter_mut().for_each(apply);
     }
 
+    /// 保留音を持つ個体の再生要求を環境（再生バックエンド）へ渡す
+    /// （Java `Mascot.apply` L699-707）。`apply_all` と同じく tick 後の apply 段で、
+    /// `needs_repaint` を消す前（`handle_draws` の前）に呼ぶ。
+    ///
+    /// Java の apply は「`isAnimating() || needsRepaint` でなければ return」してから
+    /// 音の判定に進むため、同じ条件をここでも課す。`Sounds.isEnabled()` の判定と
+    /// 「同じ音が再生中か」は [`EnvironmentView::play_sound`] / バックエンド側にある。
+    pub fn play_pending_sounds(&self) {
+        for mascot in &self.mascots {
+            if !mascot.is_animating() && !mascot.needs_repaint() {
+                continue;
+            }
+            let Some(sound) = mascot.sound() else {
+                continue;
+            };
+            self.environment
+                .play_sound(mascot.image_set_name(), sound, mascot.sound_volume());
+        }
+    }
+
     /// tick の retain で除去した mascot の「除去前 index」を昇順で返し、
     /// 蓄積を空にする（drain・#10b-2b・glue の view 同期用）。
     /// 呼ぶまで tick 間で蓄積され（毎 tick リセットでない）、呼んだら空になる。
@@ -889,10 +909,9 @@ impl Manager {
             .set_behavior_enabled(image_set, name, enabled);
     }
 
-    /// Allowed Settings passthrough 5 種（#9c・Settings.java L32-37 / L89-94 相当）。
-    /// [`Environment`] の同名 setter 群への委譲。`sounds` は Environment setter が
-    /// 存在しないため passthrough を作らない（Phase 1 no-op・design §3-12・
-    /// トレイ側は settings 永続化のみ）。
+    /// Allowed Settings passthrough 6 種（#9c・Settings.java L32-37 / L89-94 相当。
+    /// `sounds` は #36 で Environment setter ごと実装済み）。
+    /// [`Environment`] の同名 setter 群への委譲。
     pub fn set_breeding_allowed(&mut self, allowed: bool) {
         self.environment.set_breeding_allowed(allowed);
     }
@@ -915,6 +934,17 @@ impl Manager {
     /// [`Environment::set_multiscreen`] への委譲（#9c）。
     pub fn set_multiscreen(&mut self, multiscreen: bool) {
         self.environment.set_multiscreen(multiscreen);
+    }
+
+    /// [`Environment::set_sounds_enabled`] への委譲（#36・Settings.java L37 sounds）。
+    pub fn set_sounds_enabled(&mut self, enabled: bool) {
+        self.environment.set_sounds_enabled(enabled);
+    }
+
+    /// 効果音バックエンドの差し替え（#36・[`Environment::set_sound_player`] への委譲）。
+    /// 起動時に実体（[`crate::win::sound::WinSoundPlayer`]）を接続する。
+    pub fn set_sound_player(&mut self, player: Box<dyn crate::app::environment::SoundPlayer>) {
+        self.environment.set_sound_player(player);
     }
 
     /// 無効行動 map の全体置換 passthrough（#10b-2c・settings.toml 復元注入の

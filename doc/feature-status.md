@@ -97,7 +97,7 @@ Java 版と同じ挙動で動作します。
 | BreedJump | 増殖しながらジャンプ | ✅ |
 | Interact | 他個体と重なっている間だけ継続するインタラクト | ✅ |
 | SelfDestruct | 最終フレームで自己消滅 | ✅ |
-| Mute | 効果音の停止（効果音の実体は未実装のため現状は要求のみ） | ✅ |
+| Mute | 効果音の停止（`Sound` 属性の音 / 属性なしは全停止） | ✅ |
 | MoveWithTurn | 向きを変えながら移動（転回中は最後のアニメ） | ✅ |
 | Turn | 指定方向への向き変更 | ✅ |
 
@@ -126,6 +126,7 @@ Java 版と同じ挙動で動作します。
 | スケール | `conf/settings.toml` の set 単位 `scale`（Lanczos3 プリスケール） | ✅ |
 | 設定の永続化 | `conf/settings.toml`（初回自動生成、トグル状態を保存） | ✅ |
 | 多言語 UI | 埋め込み英語 + `conf/lang/en.toml` / `ja.toml`。`[general] language` | ✅ |
+| 効果音 | Pose の `Sound` / `Volume` 属性（鳴らしたい Pose にだけ書く）。`img/<Set>/sound/` → `sound/<Set>/` → `sound/` の探索順で WAV を Win32 `PlaySound` で再生し、再生終了ごとに鳴り直す（`Sounds` トグルで有効/無効） | ✅ |
 | 画像セット作成ガイド | [`doc/imageset-guide.md`](imageset-guide.md) | ✅ |
 
 ## 5. 対応環境・既知の制限
@@ -140,7 +141,6 @@ Java 版と同じ挙動で動作します。
 | 機能 | 状態 |
 |---|---|
 | LLM エージェント（Think / Chat アクション） | フック（`agent/` の trait 定義）のみ |
-| 効果音 | トグルの枠のみ（実体なし） |
 | Settings GUI | 未着手 |
 | 言語切替 UI | 未着手（en/ja 辞書は同梱済み） |
 | フル ImageSetChooser GUI | 未着手 |

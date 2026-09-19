@@ -1090,8 +1090,8 @@ impl Action for ComplexJumpAction {
 // =====================================================================
 
 /// Java `Mute`: `Sound` 属性の効果音を止める。属性なしは全停止。
-/// 効果音の実体は Phase 2 のため [`EnvironmentView::stop_sound`] は現状 no-op
-/// （属性評価と停止要求の発行のみ行う）。
+/// 停止要求は [`EnvironmentView::stop_sound`] 経由で再生バックエンドへ渡る
+/// （音声の実体は Phase 2 で接続・design §1.10 (z-12)）。
 pub(crate) struct MuteAction {
     base: Base,
 }
@@ -1103,10 +1103,11 @@ impl MuteAction {
         }
     }
 
-    /// Java `apply()` L29-52 逐語。
-    fn apply(&mut self, env: &dyn EnvironmentView) -> Result<(), ActionError> {
+    /// Java `apply()` L29-52 逐語。音声ファイルのパス解決には自分の image set が要る
+    /// （Java L32-38 `getMascot().getImageSet()`）。
+    fn apply(&mut self, mascot: &Mascot, env: &dyn EnvironmentView) -> Result<(), ActionError> {
         let sound = self.base.text_attr("Sound");
-        env.stop_sound(sound.as_deref());
+        env.stop_sound(mascot.image_set_name(), sound.as_deref());
         Ok(())
     }
 }
@@ -1121,7 +1122,7 @@ impl Action for MuteAction {
         self.base.init(mascot);
         // Java InstantAction.init L26-32: base hasNext の間 apply() する
         if self.base.base_has_next(mascot, env)? {
-            self.apply(env)?;
+            self.apply(mascot, env)?;
         }
         Ok(())
     }

@@ -155,14 +155,16 @@ pub fn scale_velocity(velocity: (i32, i32), scale: f64) -> (i32, i32) {
     (sx, sy)
 }
 
-/// ポーズを scale する。anchor / velocity は scale、image / duration は不変
-///（画像寸法のプリスケールは [`ImageSet::load`] が担当）。
+/// ポーズを scale する。anchor / velocity は scale、image / duration / sound /
+/// volume は不変（画像寸法のプリスケールは [`ImageSet::load`] が担当）。
 pub fn scale_pose(pose: &Pose, scale: f64) -> Pose {
     Pose {
         image: pose.image.clone(),
         anchor: scale_anchor(pose.anchor, scale),
         velocity: scale_velocity(pose.velocity, scale),
         duration: pose.duration,
+        sound: pose.sound.clone(),
+        volume: pose.volume,
     }
 }
 

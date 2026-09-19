@@ -314,6 +314,8 @@ fn scale_pose_scales_anchor_and_velocity_keeps_image_and_duration() {
         anchor: (64, 128),
         velocity: (-3, 0),
         duration: 6,
+        sound: Some("se.wav".to_string()),
+        volume: 0.5,
     };
     let scaled = scale_pose(&pose, 0.5);
     assert_eq!(scaled.image, "/shime1.png", "image は不変");
@@ -324,6 +326,12 @@ fn scale_pose_scales_anchor_and_velocity_keeps_image_and_duration() {
         (-1, 0),
         "velocity は java_round（Rust round なら -2）"
     );
+    assert_eq!(
+        scaled.sound.as_deref(),
+        Some("se.wav"),
+        "sound は不変（XML Sound 属性）"
+    );
+    assert_eq!(scaled.volume, 0.5, "volume は不変（XML Volume 属性）");
 
     // 0 に丸まる非ゼロ速度は ±1 補正される
     let walk = Pose {
@@ -331,6 +339,8 @@ fn scale_pose_scales_anchor_and_velocity_keeps_image_and_duration() {
         anchor: (64, 112),
         velocity: (1, 0),
         duration: 3,
+        sound: None,
+        volume: 0.0,
     };
     let tiny_walk = scale_pose(&walk, 0.25);
     assert_eq!(tiny_walk.velocity, (1, 0), "java_round(0.25)=0 → +1 補正");

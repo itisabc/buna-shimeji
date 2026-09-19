@@ -151,17 +151,26 @@ pub struct Animation {
     pub is_turn: bool,
 }
 
-/// ポーズ（画像パス・アンカー・速度・フレーム数。Java `Pose` 相当）。
+/// ポーズ（画像パス・アンカー・速度・フレーム数・効果音。Java `Pose` 相当）。
 /// 画像側のプリスケールは画像セット側（タスク #4）で行うため、本構造体は生値を保持する。
 /// アンカー / velocity の scale 変換はアクション構築時（タスク #7）に
 /// `imageset::scale_pose` / `scale_anchor` / `scale_velocity` で行う
 /// （Java は `AnimationBuilder.loadPose` L206-211 がロード時に適用するのと同じ位置）。
+/// `sound` / `volume` は Java `AnimationBuilder` L221-237 の `Sound` / `Volume` 属性。
+/// Java はパース時に音声ファイルをロードして Clip のキーを保持するが、Rust は音声の
+/// 実体を持たないため**生のファイル名と音量**を保持し、パス解決（`img/<set>/sound/` →
+/// `sound/<set>/` → `sound/`・Java `Main.getSoundFilePath` L446-461）とロードは
+/// 再生バックエンド（Phase 2）に残す（design §1.10 (z-12)）。
 #[derive(Debug, Clone)]
 pub struct Pose {
     pub image: String,
     pub anchor: (i32, i32),
     pub velocity: (i32, i32),
     pub duration: i32,
+    /// XML `Sound` 属性（任意）。ファイル名のみ（パス解決は再生側）。
+    pub sound: Option<String>,
+    /// XML `Volume` 属性（任意・既定 0.0・Java L227-230）。
+    pub volume: f32,
 }
 
 /// behaviors.xml のパース結果。
@@ -696,6 +705,7 @@ fn parse_animation(cx: &Cx, node: Node) -> Result<Animation, ConfigError> {
 
 /// Pose ノードをパースする（Java: config/AnimationBuilder.java#loadPose）。
 /// 必須属性: Image / ImageAnchor / Velocity / Duration（欠落は Err）。
+/// 任意属性: Sound（ファイル名）/ Volume（既定 0・Java L221-237）。
 fn parse_pose(cx: &Cx, node: Node) -> Result<Pose, ConfigError> {
     let image = node
         .attribute("Image")
@@ -712,11 +722,23 @@ fn parse_pose(cx: &Cx, node: Node) -> Result<Pose, ConfigError> {
             format!("Duration is not a valid integer: {duration_text}"),
         )
     })?;
+    // Java L221-237: Sound 属性があるときだけ音を扱う（無ければ null）。
+    // 実体（デコード）は持たないためファイル名のまま保持する。
+    let sound = node.attribute("Sound").map(str::to_string);
+    // Java L227-230: Volume は任意で既定 0。数値化失敗は Java と同じくロード失敗。
+    let volume = match node.attribute("Volume") {
+        Some(text) => text
+            .parse::<f32>()
+            .map_err(|_| cx.error_value(node, format!("Volume is not a valid number: {text}")))?,
+        None => 0.0,
+    };
     Ok(Pose {
         image,
         anchor,
         velocity,
         duration,
+        sound,
+        volume,
     })
 }
 

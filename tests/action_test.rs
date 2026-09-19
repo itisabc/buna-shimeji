@@ -109,8 +109,10 @@ struct SynthEnv {
     scan: RefCell<Vec<AffordanceScanEntry>>,
     /// #35: Interact 用の重なりアンカー（テストから差し替える）。
     overlapping: RefCell<Vec<(i32, i32)>>,
-    /// #35: Mute が発行した stop_sound 要求の記録。
-    stopped_sounds: RefCell<Vec<Option<String>>>,
+    /// #35: Mute が発行した stop_sound 要求の記録（image_set, sound）。
+    stopped_sounds: RefCell<Vec<(String, Option<String>)>>,
+    /// #36: play_sound 要求の記録（image_set, sound, volume）。
+    played_sounds: RefCell<Vec<(String, String, f32)>>,
     ctx: ProbeCtx,
 }
 
@@ -137,6 +139,7 @@ impl SynthEnv {
             scan: RefCell::new(Vec::new()),
             overlapping: RefCell::new(Vec::new()),
             stopped_sounds: RefCell::new(Vec::new()),
+            played_sounds: RefCell::new(Vec::new()),
             ctx: ProbeCtx,
         }
     }
@@ -270,11 +273,23 @@ impl EnvironmentView for SynthEnv {
         self.overlapping.borrow().contains(&anchor)
     }
 
-    /// #35: Mute の停止要求を記録する。
-    fn stop_sound(&self, sound: Option<&str>) {
+    /// #35: Mute の停止要求を記録する（#36: image_set 付き）。
+    fn stop_sound(&self, image_set: &str, sound: Option<&str>) {
         self.stopped_sounds
             .borrow_mut()
-            .push(sound.map(str::to_string));
+            .push((image_set.to_string(), sound.map(str::to_string)));
+    }
+
+    /// #36: 効果音は常に有効とする（無効時のゲートは Environment 側の契約テストで検証）。
+    fn sounds_enabled(&self) -> bool {
+        true
+    }
+
+    /// #36: 再生要求を記録する。
+    fn play_sound(&self, image_set: &str, sound: &str, volume: f32) {
+        self.played_sounds
+            .borrow_mut()
+            .push((image_set.to_string(), sound.to_string(), volume));
     }
 
     fn queue_spawn(
@@ -417,6 +432,8 @@ fn pose(image: &str, anchor: (i32, i32), velocity: (i32, i32), duration: i32) ->
         anchor,
         velocity,
         duration,
+        sound: None,
+        volume: 0.0,
     }
 }
 
@@ -3461,15 +3478,15 @@ fn mute_requests_named_sound_or_stop_all() {
     assert!(!named.has_next(&mut m, &env, &mut rng).unwrap());
     assert_eq!(
         *env.stopped_sounds.borrow(),
-        [Some("shime.wav".to_string())],
-        "Sound 属性の停止要求"
+        [("TestSet".to_string(), Some("shime.wav".to_string()))],
+        "Sound 属性の停止要求（音声パス解決に使う image set 付き）"
     );
 
     let mut all = create(ActionKind::Mute, &attrs(&[]), vec![], 1.0).unwrap();
     all.init(&mut m, &env, &mut rng).unwrap();
     assert_eq!(
         env.stopped_sounds.borrow().last(),
-        Some(&None),
+        Some(&("TestSet".to_string(), None)),
         "Sound 無しは全停止要求"
     );
 }

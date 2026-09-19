@@ -66,6 +66,32 @@ pub struct SpawnRequest {
     pub behavior_name: Option<String>,
 }
 
+/// 効果音の再生バックエンド（Java `sound.Sounds` + `javax.sound.sampled.Clip` の面）。
+///
+/// Rust は音声の実体（デコード・再生デバイス）を持たないため、ここが**唯一の接続点**
+/// になる（design §1.10 (z-12)）。テストは記録ダブルを [`Environment::set_sound_player`]
+/// で注入して要求を観測する。Phase 2 で実体（WAV デコード + 出力）を実装する。
+pub trait SoundPlayer {
+    /// Java `Mascot.apply` L700-707: 同じ音が再生中でなければ頭から再生する
+    /// （`!clip.isRunning()` → `clip.stop(); clip.setMicrosecondPosition(0); clip.start()`）。
+    /// 「再生中」の判定はバックエンドが持つ（Java の `Clip.isRunning()` に相当）。
+    /// `image_set` はパス解決（`img/<set>/sound/` → `sound/<set>/` → `sound/`）に使う。
+    fn play_if_idle(&mut self, image_set: &str, sound: &str, volume: f32);
+
+    /// Java `Mute.apply` L28-52: `Some` = その音の再生中クリップを停止、
+    /// `None` = 全部停止。
+    fn stop(&mut self, image_set: &str, sound: Option<&str>);
+}
+
+/// 音を鳴らさない既定バックエンド（Phase 2 で実体に差し替える）。
+pub struct NoopSoundPlayer;
+
+impl SoundPlayer for NoopSoundPlayer {
+    fn play_if_idle(&mut self, _image_set: &str, _sound: &str, _volume: f32) {}
+
+    fn stop(&mut self, _image_set: &str, _sound: Option<&str>) {}
+}
+
 /// OS 供給の抽象（実 Win32 供給は #10）。
 /// WindowsEnvironment.java の該当部分（EnumWindows / MonitorFromPoint /
 /// MouseInfo / SetWindowPos）をこの trait の背後に隠す（テストは fake source で差し替え）。
@@ -264,6 +290,9 @@ pub struct Environment {
     /// `EnvironmentView::random_unit` の doc 参照）。既定は OS シードの
     /// [`JavaRandom`]。テストは [`Environment::set_rng`] で固定できる。
     rng: RefCell<Box<dyn Rng>>,
+    /// 効果音の再生バックエンド（`&self` 更新のため RefCell・design §1.10 (z-12)）。
+    /// 既定は [`NoopSoundPlayer`]（Phase 2 で実体を接続）。テストは記録ダブルを注入する。
+    sound_player: RefCell<Box<dyn SoundPlayer>>,
     null_ctx: NullEnvCtx,
     /// Settings.java L32-37 / L45 既定値（settings.properties 無しのため既定適用）。
     breeding: bool,
@@ -271,6 +300,8 @@ pub struct Environment {
     transformation: bool,
     throwing: bool,
     multiscreen: bool,
+    /// Settings.java L37 sounds（Java `Sounds.isEnabled()` の供給元・#36）。
+    sounds: bool,
     scaling: f64,
 }
 
@@ -314,12 +345,14 @@ impl Environment {
             affordance_scan: RefCell::new(Vec::new()),
             overlap_counts: RefCell::new(HashMap::new()),
             rng: RefCell::new(Box::new(JavaRandom::from_os())),
+            sound_player: RefCell::new(Box::new(NoopSoundPlayer)),
             null_ctx: NullEnvCtx,
             breeding: true,
             transients: true,
             transformation: true,
             throwing: true,
             multiscreen: true,
+            sounds: true,
             scaling: 1.0,
         }
     }
@@ -472,6 +505,16 @@ impl Environment {
     /// 既定は OS シードの [`JavaRandom`]。テストで固定乱数を注入する経路。
     pub fn set_rng(&mut self, rng: Box<dyn Rng>) {
         *self.rng.borrow_mut() = rng;
+    }
+
+    /// 効果音トグル（Settings.java L37 sounds・Java `Sounds.isEnabled()` の供給元・#36）。
+    pub fn set_sounds_enabled(&mut self, enabled: bool) {
+        self.sounds = enabled;
+    }
+
+    /// 効果音バックエンドを差し替える（Phase 2 の実体接続点・テストの記録ダブル）。
+    pub fn set_sound_player(&mut self, player: Box<dyn SoundPlayer>) {
+        *self.sound_player.borrow_mut() = player;
     }
 
     /// Main.setMascotBehaviorEnabled L526-544 逐語のリスト変異（Allowed Behaviours
@@ -864,6 +907,35 @@ impl EnvironmentView for Environment {
     /// Settings.java L34 transformation 供給経路。
     fn transformation_allowed(&self) -> bool {
         self.transformation
+    }
+
+    /// Settings.java L37 sounds 供給経路（Java `Sounds.isEnabled()`・#36）。
+    fn sounds_enabled(&self) -> bool {
+        self.sounds
+    }
+
+    /// Java `Mascot.apply` L699-707: Sounds 有効なときだけ再生要求をバックエンドへ渡す。
+    /// 「既に再生中なら鳴らさない」判定はバックエンド側（Java `Clip.isRunning()`）が持つ。
+    fn play_sound(&self, image_set: &str, sound: &str, volume: f32) {
+        if !self.sounds {
+            return;
+        }
+        self.sound_player
+            .borrow_mut()
+            .play_if_idle(image_set, sound, volume);
+    }
+
+    /// Java `Mute.apply` L28-52: `Some` は Sounds の有効/無効に関わらず停止、
+    /// `None` は Sounds 有効なときだけ全停止する（Java L48 の `if (Sounds.isEnabled())`）。
+    fn stop_sound(&self, image_set: &str, sound: Option<&str>) {
+        match sound {
+            Some(_) => self.sound_player.borrow_mut().stop(image_set, sound),
+            None => {
+                if self.sounds {
+                    self.sound_player.borrow_mut().stop(image_set, None);
+                }
+            }
+        }
     }
 
     /// Breed 出生を spawn キューへ積む（&self から push 可 = RefCell・

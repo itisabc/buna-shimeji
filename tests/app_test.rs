@@ -107,7 +107,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use shimeji::app::environment::{Environment, OsSource};
+use shimeji::app::environment::{Environment, OsSource, SoundPlayer};
 use shimeji::app::manager::Manager;
 use shimeji::config::script::Variable;
 use shimeji::config::{
@@ -294,6 +294,8 @@ fn pose(image: &str, anchor: (i32, i32), velocity: (i32, i32), duration: i32) ->
         anchor,
         velocity,
         duration,
+        sound: None,
+        volume: 0.0,
     }
 }
 
@@ -1584,4 +1586,152 @@ fn environment_overlap_anchors_track_counts_and_moves() {
     env.move_overlap_anchor((100, 200), (500, 600));
     assert!(env.overlapping_mascots_at((100, 200)));
     assert!(!env.overlapping_mascots_at((500, 600)));
+}
+
+// =====================================================================
+// #36: 効果音の配線（環境のゲートと apply 段の再生要求）
+// =====================================================================
+
+/// #36: 再生要求の記録（image_set, sound, volume）。
+type PlayRec = (String, String, f32);
+/// #36: 停止要求の記録（image_set, sound）。
+type StopRec = (String, Option<String>);
+/// #36: 再生要求の記録先。
+type PlayLog = Rc<RefCell<Vec<PlayRec>>>;
+/// #36: 停止要求の記録先。
+type StopLog = Rc<RefCell<Vec<StopRec>>>;
+
+/// 再生/停止要求の記録ダブル（デバイスを使わない・design §1.10 (z-12)）。
+#[derive(Default)]
+struct RecordingSoundPlayer {
+    plays: PlayLog,
+    stops: StopLog,
+}
+
+impl SoundPlayer for RecordingSoundPlayer {
+    fn play_if_idle(&mut self, image_set: &str, sound: &str, volume: f32) {
+        self.plays
+            .borrow_mut()
+            .push((image_set.to_string(), sound.to_string(), volume));
+    }
+
+    fn stop(&mut self, image_set: &str, sound: Option<&str>) {
+        self.stops
+            .borrow_mut()
+            .push((image_set.to_string(), sound.map(str::to_string)));
+    }
+}
+
+/// 記録ダブルを注入した Environment と、記録先の (plays, stops) を返す。
+fn env_with_sound_recorder() -> (Environment, PlayLog, StopLog) {
+    let (mut env, _state) = single_monitor_env();
+    let plays = Rc::new(RefCell::new(Vec::new()));
+    let stops = Rc::new(RefCell::new(Vec::new()));
+    env.set_sound_player(Box::new(RecordingSoundPlayer {
+        plays: plays.clone(),
+        stops: stops.clone(),
+    }));
+    (env, plays, stops)
+}
+
+/// Java `Mascot.apply` L699-707: `Sounds.isEnabled()`（= `Settings.sounds`）が false なら
+/// 再生要求を出さない。
+#[test]
+fn environment_play_sound_is_gated_by_sounds_toggle() {
+    let (mut env, plays, _stops) = env_with_sound_recorder();
+
+    env.play_sound("TestSet", "se.wav", 0.5);
+    assert_eq!(
+        *plays.borrow(),
+        [("TestSet".to_string(), "se.wav".to_string(), 0.5)],
+        "有効時は (image_set, sound, volume) をそのまま渡す"
+    );
+
+    env.set_sounds_enabled(false);
+    env.play_sound("TestSet", "se.wav", 0.5);
+    assert_eq!(plays.borrow().len(), 1, "無効時は要求しない");
+}
+
+/// Java `Mute.apply` L28-52: `Some` は Sounds の有効/無効に関わらず停止、
+/// `None` は Sounds が有効なときだけ全停止する。
+#[test]
+fn environment_stop_sound_follows_mute_semantics() {
+    let (mut env, _plays, stops) = env_with_sound_recorder();
+
+    env.set_sounds_enabled(false);
+    env.stop_sound("TestSet", Some("se.wav"));
+    assert_eq!(
+        stops.borrow().len(),
+        1,
+        "Some は Sounds 無効でも停止する（Java L31-46）"
+    );
+    env.stop_sound("TestSet", None);
+    assert_eq!(
+        stops.borrow().len(),
+        1,
+        "None は Sounds 無効では全停止しない（Java L48）"
+    );
+
+    env.set_sounds_enabled(true);
+    env.stop_sound("TestSet", None);
+    assert_eq!(stops.borrow().len(), 2, "有効時は全停止する");
+    assert_eq!(
+        stops.borrow().last(),
+        Some(&("TestSet".to_string(), None)),
+        "image set 付きで全停止を要求する（音声パス解決に使う）"
+    );
+}
+
+/// Java `Mascot.apply` L669-671 / L699-707: アニメ中または再描画要求がある個体のうち、
+/// 保留音を持つものだけが再生要求を出す（保留音なし・停止済みは出さない）。
+#[test]
+fn manager_play_pending_sounds_requests_only_for_audible_mascots() {
+    let (env, _state) = single_monitor_env();
+    let mut manager = make_manager(env);
+    let plays = Rc::new(RefCell::new(Vec::new()));
+    let stops = Rc::new(RefCell::new(Vec::new()));
+    manager.set_sound_player(Box::new(RecordingSoundPlayer {
+        plays: plays.clone(),
+        stops: stops.clone(),
+    }));
+
+    // A（保留音あり）/ B（保留音なし）を tick で実体化する
+    //（fixture の Behavior は Walk / Stare の 2 種）
+    spawn_into(&mut manager, "TestSet", (100, 1040), false, "Walk");
+    spawn_into(&mut manager, "TestSet", (200, 1040), false, "Walk");
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 2, "2 体が tick で反映される");
+    // tick（apply の前段）で保留音が立つ想定: A にだけ音を差し込む
+    let mut index = 0usize;
+    manager.apply_all(|mascot| {
+        if index == 0 {
+            mascot.set_sound(Some("se.wav".to_string()), 0.25);
+        }
+        index += 1;
+    });
+
+    manager.play_pending_sounds();
+    assert_eq!(
+        *plays.borrow(),
+        [("TestSet".to_string(), "se.wav".to_string(), 0.25)],
+        "保留音を持つ個体だけが要求する"
+    );
+
+    // Sounds 無効（Settings.sounds = false）なら要求しない
+    manager.set_sounds_enabled(false);
+    manager.play_pending_sounds();
+    assert_eq!(plays.borrow().len(), 1, "Sounds 無効時は要求しない");
+
+    // アニメ中でなく再描画要求も無ければ要求しない（Java apply の early return）
+    manager.set_sounds_enabled(true);
+    manager.apply_all(|mascot| {
+        mascot.clear_needs_repaint();
+        mascot.dispose();
+    });
+    manager.play_pending_sounds();
+    assert_eq!(
+        plays.borrow().len(),
+        1,
+        "停止済みで再描画要求も無い個体は要求しない"
+    );
 }

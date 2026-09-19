@@ -191,6 +191,9 @@ impl App {
             }
 
             // ③ draw glue（draw + clear_needs_repaint）
+            // ③a 効果音（Java `Mascot.apply` L699-707 は draw の前に同期実行される）。
+            //     needs_repaint を消す前に判定するため handle_draws より先に呼ぶ。
+            self.manager.play_pending_sounds();
             handle_draws(
                 &mut self.views,
                 &mut self.manager,
@@ -628,12 +631,19 @@ fn try_main() -> anyhow::Result<()> {
         move |image_set_name| resolver_map.borrow().get(image_set_name).cloned()
     });
 
-    // 11. settings 初期適用（Sounds は Phase 1 no-op）
+    // 11. settings 初期適用（#36: Sounds も実配線）
     manager.set_breeding_allowed(settings.allowed.breeding);
     manager.set_transients_enabled(settings.allowed.transients);
     manager.set_transformation_allowed(settings.allowed.transformation);
     manager.set_throwing_allowed(settings.allowed.throwing);
     manager.set_multiscreen(settings.allowed.multiscreen);
+    manager.set_sounds_enabled(settings.allowed.sounds);
+
+    // 11b. 効果音バックエンド（#36: Win32 PlaySound の最小実体。`img/` の探索順は
+    //      Java Main.getSoundFilePath L446-461 準拠）。
+    manager.set_sound_player(Box::new(shimeji::win::sound::WinSoundPlayer::new(
+        img_dir.clone(),
+    )));
     // #30 item 1: pin トグルの永続値を起動時に読み戻す（settings.toml で ON 保存済みの
     // 場合でもトグル OFF 配線漏れがないよう、他 Allowed と同じ経路で適用する）。
     manager.set_pin_dropped_window_allowed(settings.allowed.pin_dropped_window);

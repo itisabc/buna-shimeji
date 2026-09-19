@@ -10,8 +10,9 @@
 //! 条件のキャッシュポリシーは script.rs の [`Variables`] 契約どおり（呼び出し側が
 //! `init` / `reset_values` を制御する）。
 //!
-//! Phase 1 の意図的な範囲外（doc 開示）: 効果音（Java Pose.apply の setSound）は
-//! 効果音実体ごと #9 の範囲外のため適用しない。資産の画像は ImagePairs の
+//! 効果音: Java `Pose.apply` L30 の `setSound(soundKey)` 相当として
+//! `mascot.set_sound(pose.sound, pose.volume)` を適用する（再生はフレーム末尾の
+//! `Manager::play_pending_sounds`・design §1.10 (z-12)）。資産の画像は ImagePairs の
 //! rightImage 相当（leftWidth - anchorX）を flip 調整済み center として再現する。
 //!
 //! scale 契約: 本モジュールは config の Pose（生値）をそのまま解釈する。set 単位
@@ -98,6 +99,8 @@ pub fn animation_reset_condition(
 ///   （look_right のとき width - anchor.x。Java ImagePairs.getImage(right) 相当）
 /// - 欠落フレームは set_image(None)（prev 保持・needs_repaint 立ち。Java の
 ///   setImage(null) 相当）
+/// - `mascot.set_sound(pose.sound, pose.volume)`（Java `Pose.apply` L30 逐語。
+///   音の再生はフレーム末尾の `Manager::play_pending_sounds` が行う）
 pub fn apply_pose(pose: &Pose, mascot: &mut Mascot) {
     let dx = if mascot.look_right() {
         -pose.velocity.0
@@ -106,6 +109,7 @@ pub fn apply_pose(pose: &Pose, mascot: &mut Mascot) {
     };
     let (anchor_x, anchor_y) = mascot.anchor();
     mascot.set_anchor((anchor_x + dx, anchor_y + pose.velocity.1));
+    mascot.set_sound(pose.sound.clone(), pose.volume);
 
     let look_right = mascot.look_right();
     match mascot.image_set.frame(&pose.image) {
