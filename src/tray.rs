@@ -214,7 +214,7 @@ pub struct GeneralSettings {
     /// コンソール表示（既定 false。main が起動時の窓表示制御に参照）。
     #[serde(default)]
     pub show_console: bool,
-    /// UI 言語コード（既定 "ja"。`conf/lang/<code>.toml` を選択）。
+    /// UI 言語コード（既定 [`DEFAULT_LANGUAGE`] = "en"。`conf/lang/<code>.toml` を選択）。
     #[serde(default = "default_language")]
     pub language: String,
 }
@@ -262,18 +262,50 @@ pub struct Settings {
     pub interactive_windows: InteractiveWindowsSettings,
 }
 
-/// 初回生成する settings.toml の `[general]` 直後へ添える対応言語の記入例。
-///
-/// serde シリアライザはコメントを出力できないため、`language` 行の直後へ挿入する。
-/// 有効化する場合は該当行の先頭 `#` を外して言語コードを書き換える。
+// =====================================================================
+// settings.toml の説明コメント
+// =====================================================================
+// serde シリアライザはコメントを出力できないため、生成した TOML 本文へ手で挿入する。
+// [`with_help`] を通した本文が「初回生成物」と「保存物」の共通形なので、
+// 同梱テンプレート `conf/settings.default.toml` もこの形に一致させる。
+
+/// `[general]` 見出しの直後へ添える説明。
 const GENERAL_HELP: &str = "\
-# --- [general] language 記入例 ---
-# language = \"ja\"   # 同梱: \"en\"（英語・既定） / \"ja\"（日本語）
+# --- [general] ---
+# show_console : true にするとログ表示用のコンソールウィンドウを確保する（既定 false・通常は不要）
+# language     : UI 文言の言語。同梱は \"en\"（英語・既定） / \"ja\"（日本語）。反映は次回起動時
+# 記入例: language = \"ja\"
 ";
 
-/// 初回生成する settings.toml の末尾へ添える `[interactive_windows]` の記入例。
+/// `[allowed]` 見出しの直後へ添える説明（トレイの Allowed Behaviours と同義）。
+const ALLOWED_HELP: &str = "\
+# --- [allowed] 許可する行為（トレイの Allowed Behaviours と同じ・true で許可）---
+# トレイから切り替えると、このファイルへその場で保存される。
+# breeding           : しめじを増やす動作（分裂）
+# transients         : 特殊効果（一定時間で消える増殖個体の発生）
+# transformation     : スキン変更、変身
+# throwing           : ウィンドウを投げる行為
+# sounds             : 効果音の許可
+# multiscreen        : マルチモニターで複数の画面をまたいで動作するのを許可
+# pin_dropped_window : ドロップしたウィンドウを最前面に固定（既定 false・Rust 版独自）
+";
+
+/// `[disabled_behaviors]` 見出しの直後へ添える説明と記入例。
+const DISABLED_BEHAVIORS_HELP: &str = "\
+# --- [disabled_behaviors] 特定の Behavior を止める（任意）---
+# 形式は `set 名 = [\"Behavior 名\", ...]`。Behavior 名は conf/behaviors.xml の名前（英語表記）。
+# 記入例: Shimeji = [\"SitDown\", \"SplitIntoTwo\"]
+";
+
+/// `[imagesets.scale]` 見出しの直後へ添える説明と記入例。
+const IMAGESETS_SCALE_HELP: &str = "\
+# --- [imagesets.scale] 画像セットごとの拡大率（任意）---
+# 形式は `set 名 = 倍率`。既定は 1.0（等倍）。0 より大きい有限値のみ有効。
+# 記入例: Shimeji = 0.5   # 解像度 2 倍の画像セットを 128px 相当で使う
+";
+
+/// `[interactive_windows]` の末尾へ添える説明と記入例。
 ///
-/// serde シリアライザはコメントを出力できないため、既定値本体の後へ追記する。
 /// `[interactive_windows]` は [`Settings`] の最後のフィールドなので、末尾追記で
 /// 同セクションの説明として読める。各例はコメントアウトしてあり、
 /// 有効化する場合は該当行の先頭 `#` を外す（部分一致・大文字小文字を区別）。
@@ -283,6 +315,29 @@ const INTERACTIVE_WINDOWS_HELP: &str = "\
 # blacklist = [\"タスク マネージャー\"]              # 部分一致で除外する（whitelist より優先）
 # 注意: whitelist と blacklist の両方が空のときは、どのウィンドウにも反応しません。
 ";
+
+/// TOML 本文へ上記の説明コメントを挿入する（初回生成とトグル操作時の保存で共用）。
+///
+/// 見出し行の直後・`[interactive_windows]` は末尾へ入れるため、値の並びは変わらない
+/// （コメントは TOML の解釈に影響しない）。保存のたびに同じ挿入を行うので、
+/// トレイ操作で設定が上書き保存されても説明はファイルに残る。
+fn with_help(mut text: String) -> String {
+    for (header, help) in [
+        ("[general]\n", GENERAL_HELP),
+        ("[allowed]\n", ALLOWED_HELP),
+        ("[disabled_behaviors]\n", DISABLED_BEHAVIORS_HELP),
+        ("[imagesets.scale]\n", IMAGESETS_SCALE_HELP),
+    ] {
+        if let Some(pos) = text.find(header) {
+            text.insert_str(pos + header.len(), help);
+        }
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(INTERACTIVE_WINDOWS_HELP);
+    text
+}
 
 impl Settings {
     /// settings.toml を読み込む（Java Settings.java load L61-68 相当）。
@@ -316,32 +371,23 @@ impl Settings {
 
     /// settings.toml を上書き保存する（Java Settings.java save L194-267 相当）。
     /// 出力は決定的（構造体フィールド順 + BTreeMap 辞書順）。
+    /// [`with_help`] を通すため、説明コメントは保存のたびに付き直す。
     pub fn save(path: &Path, settings: &Settings) -> Result<(), SettingsError> {
-        let text = toml::to_string(settings)?;
+        let text = with_help(toml::to_string(settings)?);
         std::fs::write(path, text)?;
         Ok(())
     }
 
     /// settings.toml が無ければ既定値で新規生成する（初回起動時の土台作成）。
-    /// - 不在 → [`Settings::default`] の TOML に [`GENERAL_HELP`] / [`INTERACTIVE_WINDOWS_HELP`]
-    ///   の記入例コメントを添えて生成し `Ok(true)`
+    /// - 不在 → [`Settings::default`] の TOML に [`with_help`] の説明コメントを添えて
+    ///   生成し `Ok(true)`（同梱テンプレート `conf/settings.default.toml` と同一内容）
     /// - 既存 → 何もせず `Ok(false)`（手編集を上書きしない）
     /// - 書込失敗 → エラーをそのまま伝播
     pub fn create_default_if_missing(path: &Path) -> Result<bool, SettingsError> {
         if path.is_file() {
             return Ok(false);
         }
-        let settings = Settings::default();
-        let mut text = toml::to_string(&settings)?;
-        // serde はコメントを出力できないため、`language` 行の直後へ記入例を挿入する
-        let anchor = format!("language = \"{}\"\n", settings.general.language);
-        if let Some(pos) = text.find(&anchor) {
-            text.insert_str(pos + anchor.len(), GENERAL_HELP);
-        }
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str(INTERACTIVE_WINDOWS_HELP);
+        let text = with_help(toml::to_string(&Settings::default())?);
         std::fs::write(path, text)?;
         Ok(true)
     }

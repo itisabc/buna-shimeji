@@ -76,23 +76,16 @@ Shimeji = 2.0
 
 - キーはセット名（= `img/` 直下のフォルダ名）、値は倍率（数値）です。`1.0`（および未指定のセット）は等倍です。
 - scale の効果は 2 箇所です:
-  1. **画像**: ロード時に全フレームを `round(寸法 × scale)` へ Nearest フィルタで一括拡縮します（プリスケール）。
+  1. **画像**: ロード時に全フレームを `round(寸法 × scale)` へ Lanczos3 で一括拡縮します（プリスケール）。
   2. **アンカー dx/dy と速度**: アクション構築時に `round(値 × scale)` で変換します（速度は非ゼロ成分が 0 に丸まった場合、符号付き ±1 に補正されます）。
 - **注意（Phase 1 の既定セット制限）**: アンカー/速度の構築時 scale には「既定セット（辞書順先頭）の scale 値」1 種のみが使われ、全セット共通で適用されます。画像のプリスケールはセット毎の scale で行われるため、セット毎に異なる scale を混在させると足元位置の整合が取れません。単一セット運用、または全セットに同一の scale を指定する場合は問題ありません。
 - scale を変更した場合、画像側は Reload でも再適用されますが、アンカー/速度側は起動時に確定するため **再起動での反映が確実** です。
-- `settings.toml` 全体は `[allowed]` / `[disabled_behaviors]` / `[imagesets]` の 3 セクションで、欠落セクション・フィールドは既定補完、未知キーは読み込み時に無視されます（保存時に失われます）。トグル操作時の自動保存は、構造体フィールド順 + セット名辞書順で決定的な内容に上書きされます。
+- `settings.toml` 全体は `[general]` / `[allowed]` / `[disabled_behaviors]` / `[imagesets]` / `[interactive_windows]` の 5 セクションで、欠落セクション・フィールドは既定補完、未知キーは読み込み時に無視されます（保存時に失われます）。トグル操作時の自動保存は、構造体フィールド順 + セット名辞書順で決定的な内容に上書きされます（説明コメントは保存のたびに付き直すため失われません）。
+- 各セクション・キーの意味は、同梱の `settings.toml`（リポジトリでは `conf/settings.default.toml`。初回起動時の生成物と同一内容）にコメントで書かれています。
 
-参考（全体構造・最小例。`[imagesets]` は scale 未指定なら省略可）:
+参考（scale だけを書く最小例）:
 
 ```toml
-[allowed]
-breeding = true
-transients = true
-transformation = true
-throwing = true
-sounds = true
-multiscreen = true
-
 [imagesets.scale]
 Shimeji = 2.0
 ```

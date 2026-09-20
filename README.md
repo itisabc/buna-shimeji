@@ -63,10 +63,12 @@ sprite は常にローカル座標 `(0,0)` に置いて（内容を位置に依�
 ## ディレクトリ構成
 
 ```text
-conf/            アクション・ビヘイビア定義（Shimeji-ee 互換 XML）
+conf/            アクション・ビヘイビア定義（Shimeji-ee 互換 XML）と設定
   actions.xml      アクション定義（set 専用ファイルが無い場合の共通定義）
   behaviors.xml    ビヘイビア（行動）定義と頻度（同上）
   Mascot.xsd       XML スキーマ（ドキュメント用。実行時の検証には使われない）
+  settings.toml    設定ファイル（初回起動時に自動生成。詳細は「設定」節）
+  lang/            UI 文言の辞書（en.toml / ja.toml）
   <SetName>/       set 専用の Actions.xml / Behavior.xml（任意・共通定義より優先）
 img/
   Shimeji/         標準しめじ画像セット（shime1.png〜shime46.png + banner.bmp）
@@ -79,6 +81,43 @@ img/
 （コミット `dea89528c10c066626a09609f0e742cbe6405a8d`）から取得し、
 内容を一切改変せずに同梱しています。
 
+## 設定（`conf/settings.toml`）
+
+設定 GUI はありません。挙動の切り替えはトレイメニュー、または exe と同じフォルダの
+`conf/settings.toml` を直接編集して行います（レジストリは使いません）。ファイルは起動時に
+読み込まれ、無ければ既定値で自動生成されます。削除して再起動すれば既定に戻ります。
+
+```toml
+[general]
+show_console = false        # true でログ表示用のコンソールウィンドウを確保する
+language     = "en"         # UI 文言の言語。同梱は "en"（英語・既定） / "ja"（日本語）
+
+[allowed]                   # トレイの Allowed Behaviours と同じ（true で許可）
+breeding           = true   # 増殖（分裂）
+transients         = true   # 特殊効果（一定時間で消える増殖個体）
+transformation     = true   # 変身（スキン変更）
+throwing           = true   # ウィンドウを投げる
+sounds             = true   # 効果音
+multiscreen        = true   # マルチモニタで複数の画面をまたいで動く
+pin_dropped_window = false  # ドロップしたウィンドウを最前面に固定（既定 OFF）
+
+[disabled_behaviors]        # 特定の Behavior を止める（任意・set 名 = ["Behavior 名", ...]）
+# Shimeji = ["SitDown", "SplitIntoTwo"]
+
+[imagesets.scale]           # 画像セットごとの拡大率（任意・既定 1.0）
+# Shimeji = 0.5
+
+[interactive_windows]       # 反応するウィンドウ（タイトル部分一致。両方空 = どのウィンドウにも反応しない）
+whitelist = []
+blacklist = []
+```
+
+- 初回起動時に生成される `conf/settings.toml` には、上の説明がコメントとして入っています
+  （トレイでトグルを切り替えて保存されても説明は残ります）。
+- 反映タイミング: `[allowed]` はトレイ操作なら即時（ファイルを編集した場合は次回起動時）、
+  それ以外（`language` / `[disabled_behaviors]` / `[imagesets.scale]` / `[interactive_windows]`）は
+  次回起動時です。
+
 ## ビルド・実行
 
 ```powershell
@@ -87,7 +126,7 @@ cargo run --release     # 実行（exe と同じ場所に conf/ と img/ が必�
 cargo test              # 単体テスト
 ```
 
-現状: 主要挙動の実装は完了（`cargo test` 569/569 PASS、2026-09-20）。
+現状: 主要挙動の実装は完了（`cargo test` 571/571 PASS、2026-09-20）。
 実装済み機能の一覧は [`doc/feature-status.md`](doc/feature-status.md) を参照してください。
 
 ## 対応環境・既知の制限

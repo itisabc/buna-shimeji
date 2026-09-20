@@ -1106,6 +1106,69 @@ fn create_default_if_missing_includes_language_help() {
     assert_eq!(loaded.general.language, "en", "既定言語は en");
 }
 
+/// 同梱テンプレート `conf/settings.default.toml` は初回生成物と byte 一致する。
+///
+/// zip にはテンプレートを `settings.toml` として同封するため（doc/releasing.md §1）、
+/// テンプレートが古いままだと利用者に届く説明がコードとずれる。ここで乖離を止める。
+#[test]
+fn default_settings_template_matches_generated() {
+    let home = TempHome::new("settings_template");
+    let path = home.settings_path();
+    Settings::create_default_if_missing(&path).expect("生成できる");
+
+    let generated = std::fs::read_to_string(&path).expect("生成物を読める");
+    let template =
+        std::fs::read_to_string("conf/settings.default.toml").expect("テンプレートを読める");
+
+    assert!(
+        template == generated,
+        "conf/settings.default.toml が初回生成物と一致しません\n\
+         --- template ---\n{template}\n--- generated ---\n{generated}"
+    );
+}
+
+/// 保存（トレイのトグル操作で走る経路）でも説明コメントが残り、値は往復で保存される。
+#[test]
+fn settings_save_keeps_help_comments() {
+    let home = TempHome::new("settings_help_save");
+    let path = home.settings_path();
+
+    let settings = Settings {
+        allowed: allowed(false, true, true, true, true, true, false),
+        ..Settings::default()
+    };
+    Settings::save(&path, &settings).expect("save できる");
+
+    let text = std::fs::read_to_string(&path).expect("保存結果を読める");
+    let comment_lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .collect();
+    for key in [
+        "show_console",
+        "language",
+        "breeding",
+        "transients",
+        "transformation",
+        "throwing",
+        "sounds",
+        "multiscreen",
+        "pin_dropped_window",
+        "disabled_behaviors",
+        "imagesets.scale",
+        "whitelist",
+        "blacklist",
+    ] {
+        assert!(
+            comment_lines.iter().any(|l| l.contains(key)),
+            "保存後も {key} の説明コメントが残る"
+        );
+    }
+
+    let loaded = Settings::load(&path).expect("コメント付き保存物を load できる");
+    assert_settings_eq(&settings, &loaded);
+}
+
 /// create_default_if_missing: 既存ファイル → Ok(false) かつ内容を一切変更しない
 ///（手編集を上書きしない）。
 #[test]

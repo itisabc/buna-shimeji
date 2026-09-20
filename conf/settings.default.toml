@@ -1,10 +1,21 @@
 [general]
+# --- [general] ---
+# show_console : true にするとログ表示用のコンソールウィンドウを確保する（既定 false・通常は不要）
+# language     : UI 文言の言語。同梱は "en"（英語・既定） / "ja"（日本語）。反映は次回起動時
+# 記入例: language = "ja"
 show_console = false
 language = "en"
-# --- [general] language 記入例 ---
-# language = "ja"   # 同梱: "en"（英語・既定） / "ja"（日本語）
 
 [allowed]
+# --- [allowed] 許可する行為（トレイの Allowed Behaviours と同じ・true で許可）---
+# トレイから切り替えると、このファイルへその場で保存される。
+# breeding           : しめじを増やす動作（分裂）
+# transients         : 特殊効果（一定時間で消える増殖個体の発生）
+# transformation     : スキン変更、変身
+# throwing           : ウィンドウを投げる行為
+# sounds             : 効果音の許可
+# multiscreen        : マルチモニターで複数の画面をまたいで動作するのを許可
+# pin_dropped_window : ドロップしたウィンドウを最前面に固定（既定 false・Rust 版独自）
 breeding = true
 transients = true
 transformation = true
@@ -14,8 +25,14 @@ multiscreen = true
 pin_dropped_window = false
 
 [disabled_behaviors]
+# --- [disabled_behaviors] 特定の Behavior を止める（任意）---
+# 形式は `set 名 = ["Behavior 名", ...]`。Behavior 名は conf/behaviors.xml の名前（英語表記）。
+# 記入例: Shimeji = ["SitDown", "SplitIntoTwo"]
 
 [imagesets.scale]
+# --- [imagesets.scale] 画像セットごとの拡大率（任意）---
+# 形式は `set 名 = 倍率`。既定は 1.0（等倍）。0 より大きい有限値のみ有効。
+# 記入例: Shimeji = 0.5   # 解像度 2 倍の画像セットを 128px 相当で使う
 
 [interactive_windows]
 whitelist = []
