@@ -10,7 +10,7 @@
     zip に加えて SHA256 を <zip>.sha256.txt（標準チェックサム形式）として出力する。
 
 .PARAMETER Version
-    パッケージのバージョン文字列（例: 0.1.0）。省略時は Cargo.toml の version を使用。
+    パッケージのバージョン文字列（例: 0.1.1）。省略時は Cargo.toml の version を使用。
 
 .PARAMETER SkipBuild
     指定時は cargo build --release をスキップする。
@@ -21,7 +21,7 @@
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1
 .EXAMPLE
-    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1 -SkipBuild -Version 0.1.0
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1 -SkipBuild -Version 0.1.1
 #>
 [CmdletBinding()]
 param(
