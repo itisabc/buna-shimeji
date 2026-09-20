@@ -30,7 +30,7 @@ use tao::window::{Window, WindowBuilder};
 use thiserror::Error;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HWND, POINT, RECT, SIZE,
+    CloseHandle, GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HWND, POINT, SIZE,
 };
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
@@ -39,10 +39,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, SetWindowPos, UpdateLayeredWindow,
-    GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, ULW_ALPHA,
-    WS_CAPTION, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_GROUP,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
+    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, UpdateLayeredWindow, GWL_EXSTYLE,
+    GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, ULW_ALPHA, WS_CAPTION,
+    WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_GROUP, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
 };
 
 #[derive(Error, Debug)]
@@ -62,6 +62,10 @@ pub enum WindowError {
     #[error("UpdateLayeredWindow failed")]
     UpdateLayeredWindowFailed(#[source] io::Error),
 }
+
+/// セル窓の余白 M（sprite がセル内を動ける幅の半分）。REPORT3 の最適点（128² フレーム基準）。
+/// セル寸法 = 最大フレーム寸法 + 2M。
+pub const CELL_MARGIN: u32 = 16;
 
 /// Win32 `HANDLE` の生の値（tao の `hwnd()` は `isize` を返す）。
 fn hwnd_from_isize(hwnd: isize) -> HWND {
@@ -88,35 +92,68 @@ pub fn premultiply_rgba_to_argb(rgba: &[u8]) -> Vec<u32> {
         .collect()
 }
 
-/// プレマルチプライド ARGB のピクセル列を `dst` へ転送コピーする。
+/// プレマルチプライド ARGB の sprite を `dst` の `at` に flip 付きで配置する。
 ///
-/// `flip == false` は完全コピー、`flip == true` は `width` 幅の各行を水平反転して書く。
-/// `flip` は転送コピーに融合されるため、描画ごとのフレーム全体コピーを避けられる。
+/// `dst` 全体を透明(0)でクリアしてから書く（セル内のゴースト防止）。`at` は負や
+/// はみ出しを許容し、`dst` の外へ出た画素はクリップする。`src` が空なら no-op。
 ///
-/// `src` が空なら何もしない（no-op）。非空時の前提:
-/// `dst.len() == src.len()`・`width > 0`・`src.len() % width == 0`（違反は assert）。
-pub fn blit_argb(dst: &mut [u32], src: &[u32], width: usize, flip: bool) {
-    if src.is_empty() {
-        return;
-    }
+/// `flip == true` は sprite を水平反転して置く（`dst` 上のピクセル位置は変えず、
+/// 対応する `src` の列を反転する）。転送コピーに融合するため、描画ごとのフレーム
+/// 全体コピーを避けられる。
+///
+/// 契約: `dst.len() == dst_w * dst_h`・`src.len() == src_w * src_h`（違反は assert）。
+pub fn blit_argb_at(
+    dst: &mut [u32],
+    dst_size: (u32, u32),
+    src: &[u32],
+    src_size: (u32, u32),
+    at: (i32, i32),
+    flip: bool,
+) {
+    let (dst_w, dst_h) = dst_size;
+    let (src_w, src_h) = src_size;
     assert_eq!(
         dst.len(),
-        src.len(),
-        "blit_argb: dst and src length mismatch"
+        dst_w as usize * dst_h as usize,
+        "blit_argb_at: dst size mismatch"
     );
-    assert!(width > 0, "blit_argb: width must be non-zero");
-    assert_eq!(
-        src.len() % width,
-        0,
-        "blit_argb: src length is not a multiple of width"
-    );
-    if !flip {
-        dst.copy_from_slice(src);
+    if src.is_empty() || dst_w == 0 || dst_h == 0 {
         return;
     }
-    for (dst_row, src_row) in dst.chunks_mut(width).zip(src.chunks_exact(width)) {
-        for (d, s) in dst_row.iter_mut().zip(src_row.iter().rev()) {
-            *d = *s;
+    assert_eq!(
+        src.len(),
+        src_w as usize * src_h as usize,
+        "blit_argb_at: src size mismatch"
+    );
+    assert!(
+        src_w > 0 && src_h > 0,
+        "blit_argb_at: src dims must be non-zero"
+    );
+
+    dst.fill(0);
+
+    let dst_w = dst_w as i64;
+    let dst_h = dst_h as i64;
+    let src_w = src_w as i64;
+    let src_h = src_h as i64;
+    for sy in 0..src_h {
+        let dy = at.1 as i64 + sy;
+        if dy < 0 || dy >= dst_h {
+            continue;
+        }
+        let dst_row = dy as usize * dst_w as usize;
+        let src_row = sy as usize * src_w as usize;
+        for sx in 0..src_w {
+            let dx = at.0 as i64 + sx;
+            if dx < 0 || dx >= dst_w {
+                continue;
+            }
+            let s = if flip {
+                src[src_row + (src_w - 1 - sx) as usize]
+            } else {
+                src[src_row + sx as usize]
+            };
+            dst[dst_row + dx as usize] = s;
         }
     }
 }
@@ -362,28 +399,48 @@ impl LayeredWindow {
         Ok(())
     }
 
-    /// プレマルチプライド済み 0xAARRGGBB のピクセル列を
-    /// `UpdateLayeredWindow(ULW_ALPHA)` でウィンドウに転送する。
+    /// sprite をセル DIB のローカル座標 `at` に描く（`flip` 付き）。
     ///
-    /// `pixels` の長さはバッファ（resize で設定した width × height）と一致すること。
-    /// `flip == true` のときは DIB バッファへの書き込み時に各行を水平反転する
-    ///（[`blit_argb`] 参照）。
-    ///
-    /// ULW には**現在のウィンドウ位置とバッファサイズを毎回明示的に渡す**
-    /// （Java 版 `NativeFactory` の updateWindow と同じ呼び方）。
-    /// pptDst/psize を NULL にした「内容のみ更新」形式は、この検証環境
-    /// （Windows 11 / スパイク検証 2026-09-05）では TRUE を返しながら
-    /// 画面に一切合成されないため、明示渡しが必須。
-    pub fn present(&mut self, pixels: &[u32], flip: bool) -> Result<(), WindowError> {
+    /// `pixels` は `width * height` 長のプレマルチプライド 0xAARRGGBB。
+    /// セル DIB 全体はクリアされる（[`blit_argb_at`]）。窓や画面へはまだ反映しない
+    /// （反映は [`LayeredWindow::present`]）。
+    pub fn blit(
+        &mut self,
+        pixels: &[u32],
+        width: u32,
+        height: u32,
+        at: (i32, i32),
+        flip: bool,
+    ) -> Result<(), WindowError> {
         let buffer = self.buffer.as_mut().ok_or(WindowError::NoBuffer)?;
-        if pixels.len() != buffer.len() {
+        let (buf_w, buf_h) = (buffer.width, buffer.height);
+        if pixels.len() != width as usize * height as usize {
             return Err(WindowError::SizeMismatch {
-                expected: buffer.len(),
+                expected: width as usize * height as usize,
                 actual: pixels.len(),
             });
         }
-        let width = buffer.width as usize;
-        blit_argb(buffer.pixels_mut(), pixels, width, flip);
+        blit_argb_at(
+            buffer.pixels_mut(),
+            (buf_w, buf_h),
+            pixels,
+            (width, height),
+            at,
+            flip,
+        );
+        Ok(())
+    }
+
+    /// バッファ内容を `UpdateLayeredWindow(ULW_ALPHA)` でウィンドウへ転送する。
+    ///
+    /// **目標位置 `dst` とバッファサイズを毎回明示的に渡す**。ULW は内容と位置を
+    /// **原子的に**更新するため、窓移動と再描画を 1 回で済ませられる（窓を先に
+    /// `SetWindowPos` で動かすと「旧内容のまま新位置」が 1 フレーム見える）。
+    /// pptDst を省略する「内容のみ更新」形式は、この検証環境（Windows 11 /
+    /// スパイク検証 2026-09-05）では TRUE を返しながら画面に一切合成されないため、
+    /// 明示渡しが必須。
+    pub fn present(&mut self, dst: (i32, i32)) -> Result<(), WindowError> {
+        let buffer = self.buffer.as_ref().ok_or(WindowError::NoBuffer)?;
 
         // AC_SRC_OVER + AC_SRC_ALPHA + 全体 α 255: DIB の per-pixel α をそのまま使う
         let blend = BLENDFUNCTION {
@@ -393,19 +450,12 @@ impl LayeredWindow {
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         let src_point = POINT { x: 0, y: 0 };
+        let dst_point = POINT { x: dst.0, y: dst.1 };
         let size = SIZE {
             cx: buffer.width as i32,
             cy: buffer.height as i32,
         };
         unsafe {
-            // 位置は現在値をそのまま渡す（ULW は pptDst で位置も設定するため、
-            // 同一座標の再設定 = 実質位置不変）。
-            let mut rect = RECT::default();
-            let _ = GetWindowRect(self.hwnd, &mut rect);
-            let dst_point = POINT {
-                x: rect.left,
-                y: rect.top,
-            };
             UpdateLayeredWindow(
                 self.hwnd,
                 None, // hdcDst: 既定のスクリーン DC を使用

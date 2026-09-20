@@ -8,13 +8,13 @@
 //!   straight RGBA8 をプレマルチプライして `argb` に格納する。式は既存
 //!   `premultiply_rgba_to_argb` と同一（切り捨て `(v * a) / 255`）。
 //!   `width == 0` または `rgba` 空 → `argb` は空。整合入力なら長さ = width*height。
-//! - `win::window::blit_argb(dst, src, width, flip) -> ()`:
-//!   flip=false は完全コピー、flip=true は各行（幅 width）を水平反転。
+//! - `win::window::blit_argb_at(dst, dst_w, dst_h, src, src_w, src_h, at, flip) -> ()`:
+//!   dst 全体を 0 クリアし、src を `at` に flip 付きで配置する（はみ出しはクリップ）。
 //!   `src` 空は no-op。プレマルチプライは済んでいる前提で、flip は転送コピーに融合する。
 //! - `ImageSet::load` は frames にプレマルチプライド `Frame` を格納する
 //!   （実資産 1 枚で参照一致を確認）。
 //!
-//! TDD RED: 上記 `argb` フィールド / `from_rgba` / `blit_argb` は未実装のため
+//! TDD RED: 上記 `argb` フィールド / `from_rgba` / `blit_argb_at` は未実装のため
 //! 「解決できない名前」「フィールドが存在しない」のコンパイルエラーになるのが正常。
 //!
 //! 網羅的な番号リストや見た目テストは行わない。契約（入力→振る舞い）の要点のみ。
@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use shimeji::render::imageset::{Frame, ImageSet};
-use shimeji::win::window::{blit_argb, premultiply_rgba_to_argb};
+use shimeji::win::window::{blit_argb_at, premultiply_rgba_to_argb};
 
 // =====================================================================
 // 共通ヘルパ
@@ -90,21 +90,21 @@ fn frame_from_rgba_empty_or_zero_width_yields_empty_argb() {
 }
 
 // =====================================================================
-// 契約 2: blit_argb はコピー / 行内水平反転
+// 契約 2: blit_argb_at は「全クリア → at に配置」/ クリップ / 行内水平反転
 // =====================================================================
 
-/// flip=false は dst が src と完全一致（単純コピー）。
+/// 同寸法・at=(0,0)・flip=false は dst が src と完全一致。
 #[test]
-fn blit_argb_without_flip_copies_src() {
+fn blit_argb_at_same_size_copies_src() {
     let src: Vec<u32> = vec![0x8005_0A0F, 0xFFFF_0000, 0x0000_0000, 0x4010_2030];
     let mut dst = vec![0u32; src.len()];
-    blit_argb(&mut dst, &src, 2, false);
-    assert_eq!(dst, src, "flip=false は完全コピー");
+    blit_argb_at(&mut dst, (2, 2), &src, (2, 2), (0, 0), false);
+    assert_eq!(dst, src, "同寸法 at=(0,0) は完全コピー");
 }
 
-/// 2×2: flip=true は各行を水平反転する（バッファ全体反転ではない）。
+/// 2×2: at=(0,0)・flip=true は各行を水平反転する（バッファ全体反転ではない）。
 #[test]
-fn blit_argb_flip_reverses_each_row_2x2() {
+fn blit_argb_at_flip_reverses_each_row_2x2() {
     // straight RGBA の 2×2 を先にプレマルチプライして src とする。
     let rgba: Vec<u8> = vec![
         10, 20, 30, 128, // A 行0左
@@ -114,7 +114,7 @@ fn blit_argb_flip_reverses_each_row_2x2() {
     ];
     let src = reference_argb(&rgba);
     let mut dst = vec![0u32; src.len()];
-    blit_argb(&mut dst, &src, 2, true);
+    blit_argb_at(&mut dst, (2, 2), &src, (2, 2), (0, 0), true);
 
     // 行0: [B, A] / 行1: [D, C]
     let expected = vec![0xFFFF_0000, 0x8005_0A0F, 0x0000_0000, 0x4010_2030];
@@ -123,10 +123,9 @@ fn blit_argb_flip_reverses_each_row_2x2() {
 
 /// flip の正しさの基準: 元 RGBA をプレマルチプライして得た ARGB を、行ごとに
 /// 水平反転したものと一致すること（プレマルチプライと反転は独立に交換可能）。
-/// 参照側で行反転した straight RGBA を作り `premultiply_rgba_to_argb` と比較する。
 #[test]
-fn blit_argb_flip_matches_premultiply_of_flipped_rgba() {
-    let (width, height) = (3usize, 2usize);
+fn blit_argb_at_flip_matches_premultiply_of_flipped_rgba() {
+    let (width, height) = (3u32, 2u32);
     let rgba: Vec<u8> = vec![
         1, 0, 0, 255, // P
         10, 20, 30, 128, // Q
@@ -138,28 +137,69 @@ fn blit_argb_flip_matches_premultiply_of_flipped_rgba() {
     let src = reference_argb(&rgba);
 
     let mut dst = vec![0u32; src.len()];
-    blit_argb(&mut dst, &src, width, true);
+    blit_argb_at(
+        &mut dst,
+        (width, height),
+        &src,
+        (width, height),
+        (0, 0),
+        true,
+    );
 
     // 参照: 各行を逆順に並べた straight RGBA をプレマルチプライ
     let mut flipped_rgba = Vec::with_capacity(rgba.len());
-    for row in rgba.chunks_exact(width * 4) {
+    for row in rgba.chunks_exact((width * 4) as usize) {
         for pixel in row.chunks_exact(4).rev() {
             flipped_rgba.extend_from_slice(pixel);
         }
     }
     let expected = reference_argb(&flipped_rgba);
-    assert_eq!((width, height), (3, 2), "非正方・行単位の前提");
     assert_eq!(dst, expected, "flip はプレマルチプライと交換可能");
 }
 
-/// src が空 → 何もしない（no-op・panic しない）。
+/// オフセット配置: src は `at` に置かれ、それ以外（および行末）は 0 にクリアされる。
 #[test]
-fn blit_argb_empty_src_is_noop() {
-    let mut dst: Vec<u32> = Vec::new();
-    blit_argb(&mut dst, &[], 0, false);
-    assert!(dst.is_empty(), "flip=false で no-op");
-    blit_argb(&mut dst, &[], 0, true);
-    assert!(dst.is_empty(), "flip=true で no-op");
+fn blit_argb_at_offset_places_sprite_and_clears_rest() {
+    // src = 2×1 [A, B]、dst = 4×2 を非 0 で初期化
+    let src = reference_argb(&[10, 20, 30, 128, 255, 0, 0, 255]);
+    let mut dst = vec![0xDEAD_BEEFu32; 4 * 2];
+    blit_argb_at(&mut dst, (4, 2), &src, (2, 1), (1, 0), false);
+
+    assert_eq!(dst[0], 0, "x=0 はクリア");
+    assert_eq!(dst[1], src[0], "src 左が x=1 に配置");
+    assert_eq!(dst[2], src[1], "src 右が x=2 に配置");
+    assert_eq!(dst[3], 0, "x=3 はクリア");
+    assert_eq!(&dst[4..8], &[0, 0, 0, 0], "y=1 は全クリア");
+}
+
+/// はみ出しはクリップする（負の at / dst 外への張り出し・panic しない）。
+#[test]
+fn blit_argb_at_clips_out_of_bounds() {
+    // src = 2×2 [1,2; 3,4]
+    let src: Vec<u32> = vec![1, 2, 3, 4];
+
+    // at=(-1,-1): src(1,1)=4 だけが dst(0,0) に載る
+    let mut dst = vec![0u32; 4];
+    blit_argb_at(&mut dst, (2, 2), &src, (2, 2), (-1, -1), false);
+    assert_eq!(dst, vec![4, 0, 0, 0], "左上はみ出しのクリップ");
+
+    // at=(1,1): src(0,0)=1 だけが dst(1,1) に載る
+    let mut dst2 = vec![0u32; 4];
+    blit_argb_at(&mut dst2, (2, 2), &src, (2, 2), (1, 1), false);
+    assert_eq!(dst2, vec![0, 0, 0, 1], "右下はみ出しのクリップ");
+
+    // 完全に外: 全て 0
+    let mut dst3 = vec![9u32; 4];
+    blit_argb_at(&mut dst3, (2, 2), &src, (2, 2), (10, 10), false);
+    assert_eq!(dst3, vec![0, 0, 0, 0], "全はみ出しでもクリアはされる");
+}
+
+/// src が空 → 何もしない（no-op・クリアもしない）。
+#[test]
+fn blit_argb_at_empty_src_is_noop() {
+    let mut dst = vec![7u32; 4];
+    blit_argb_at(&mut dst, (2, 2), &[], (0, 0), (0, 0), false);
+    assert_eq!(dst, vec![7u32; 4], "空 src は no-op（クリアしない）");
 }
 
 // =====================================================================

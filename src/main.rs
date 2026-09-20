@@ -103,7 +103,7 @@ use shimeji::i18n::{Lang, UiKey};
 use shimeji::mascot::action::factory::XmlBehaviorFactory;
 use shimeji::mascot::rng::JavaRandom;
 use shimeji::render::imageset::ImageSet;
-use shimeji::render::MascotView;
+use shimeji::render::{MascotView, SpriteDraw};
 use shimeji::tray::{
     apply_tray_command, load_tray_icon_rgba, Settings, TrayCommand, TrayContext, TrayMenuModel,
 };
@@ -430,7 +430,11 @@ fn warn_once(memo: &mut HashMap<usize, String>, index: usize, message: impl FnOn
     log::warn!("skipped drawing mascot #{index} due to a problem: {message}");
 }
 
-/// draw glue（③(T) sink = draw + clear_needs_repaint）。
+/// draw glue（各マスコットの描画）。
+///
+/// [`MascotView::draw`] がセル幾何・再センター・blit・**位置指定 ULW（原子更新）**を
+/// 1 回で行う。成功した個体だけ `needs_repaint` を落とす（失敗は次 tick 再試行）。
+///
 /// manager と views は別所有物のため、[`Manager::apply_all`] のクロージャ内で
 /// views[view_index] を借用できる（mascots 順 = views 順契約・実読確認済み）。
 fn handle_draws(
@@ -483,14 +487,16 @@ fn handle_draws(
             image_state.center
         };
 
-        match view.draw(
-            &image_state.image_ref,
+        let max_frame = image_set.max_frame_size();
+        match view.draw(SpriteDraw {
+            image_ref: &image_state.image_ref,
             frame,
             flip,
             pose_anchor,
-            mascot.anchor(),
-        ) {
-            Ok(_) => {
+            anchor_pos: mascot.anchor(),
+            max_frame,
+        }) {
+            Ok(()) => {
                 mascot.clear_needs_repaint();
                 last_draw_warns.remove(&index);
             }
