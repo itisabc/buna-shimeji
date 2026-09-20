@@ -108,7 +108,7 @@ use shimeji::tray::{
     apply_tray_command, load_tray_icon_rgba, Settings, TrayCommand, TrayContext, TrayMenuModel,
 };
 use shimeji::win::os_source::{ensure_window_above, restore_topmost_on_panic, Win32OsSource};
-use shimeji::win::window::{SingleInstance, SingleInstanceError};
+use shimeji::win::window::{MoveBatch, SingleInstance, SingleInstanceError};
 
 /// 単一起動 mutex 名（ユーザーセッション内単一・`Local\` 名前空間）。
 const SINGLE_INSTANCE_MUTEX: &str = "Local\\ShimejiSingleInstance";
@@ -432,8 +432,13 @@ fn warn_once(memo: &mut HashMap<usize, String>, index: usize, message: impl FnOn
 
 /// draw glue（各マスコットの描画）。
 ///
-/// [`MascotView::draw`] がセル幾何・再センター・blit・**位置指定 ULW（原子更新）**を
-/// 1 回で行う。成功した個体だけ `needs_repaint` を落とす（失敗は次 tick 再試行）。
+/// 2 段階で行う（[`MascotView`] の doc 参照）:
+/// 1. [`MascotView::stage`] で位置を [`MoveBatch`] に積み、内容が変わった個体は DIB を更新して反映を予約
+/// 2. [`MoveBatch::flush`] で全員の移動を 1 バッチ適用 → 予約分を [`MascotView::commit`]（ULW）
+///
+/// 移動を `SetWindowPos` の1バッチにまとめるのは、窓ごとの `SetWindowPos` が N に超線形で
+/// 伸びるため（100 窓 33.2 ms/tick → 3.0 ms/tick・2026-09-20 movespike 実測）。
+/// 成功した個体だけ `needs_repaint` を落とす（失敗は次 tick 再試行）。
 ///
 /// manager と views は別所有物のため、[`Manager::apply_all`] のクロージャ内で
 /// views[view_index] を借用できる（mascots 順 = views 順契約・実読確認済み）。
@@ -442,6 +447,10 @@ fn handle_draws(
     manager: &mut Manager,
     last_draw_warns: &mut HashMap<usize, String>,
 ) {
+    let mut moves = MoveBatch::new(views.len());
+    // stage に成功した index（commit を試す対象）。
+    let mut staged = vec![false; views.len()];
+
     let mut view_index = 0usize;
     manager.apply_all(|mascot| {
         let index = view_index;
@@ -470,7 +479,7 @@ fn handle_draws(
         };
 
         // `pose_anchor` は「flip 前」のポーズアンカー（dx/dy）を渡す:
-        // - [`MascotView::draw`] は flip=true 時に [`shimeji::render::flipped_offset_x`]
+        // - [`MascotView::stage`] は flip=true 時に [`shimeji::render::flipped_offset_x`]
         //   = `width - pose_anchor.0`（Java `ImagePairs.getImage(right)` L85-91 の
         //   `rightImage.getWidth() - scaledAnchorX` 相当）をオフセットに使用する
         // - [`ImageState::center`] は flip 調整済み（look_right 時 width - dx・
@@ -487,19 +496,44 @@ fn handle_draws(
             image_state.center
         };
 
-        let max_frame = image_set.max_frame_size();
-        match view.draw(SpriteDraw {
-            image_ref: &image_state.image_ref,
-            frame,
-            flip,
-            pose_anchor,
-            anchor_pos: mascot.anchor(),
-            max_frame,
-        }) {
-            Ok(()) => {
+        match view.stage(
+            SpriteDraw {
+                image_ref: &image_state.image_ref,
+                frame,
+                flip,
+                pose_anchor,
+                anchor_pos: mascot.anchor(),
+            },
+            &mut moves,
+        ) {
+            Ok(()) => staged[index] = true,
+            Err(err) => {
+                warn_once(last_draw_warns, index, || format!("draw failed: {err}"));
+            }
+        }
+    });
+
+    // 移動をまとめて適用してから内容（ULW）を反映する。ここで失敗した個体は
+    // needs_repaint を残し、次 tick に再試行する。
+    let moves_applied = moves.flush();
+
+    let mut view_index = 0usize;
+    manager.apply_all(|mascot| {
+        let index = view_index;
+        view_index += 1;
+        if !staged.get(index).copied().unwrap_or(false) {
+            return;
+        }
+        let Some(view) = views.get_mut(index) else {
+            return;
+        };
+        match view.commit(moves_applied) {
+            Ok(true) => {
                 mascot.clear_needs_repaint();
                 last_draw_warns.remove(&index);
             }
+            // 移動が未反映（HDWP 失敗）→ needs_repaint を残して次 tick にやり直す。
+            Ok(false) => {}
             Err(err) => {
                 warn_once(last_draw_warns, index, || format!("draw failed: {err}"));
             }

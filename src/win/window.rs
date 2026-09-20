@@ -39,8 +39,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, UpdateLayeredWindow, GWL_EXSTYLE,
-    GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, ULW_ALPHA, WS_CAPTION,
+    BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, GetClientRect, GetWindowLongPtrW,
+    SetWindowLongPtrW, SetWindowPos, UpdateLayeredWindow, GWL_EXSTYLE, GWL_STYLE, HDWP,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, ULW_ALPHA, WS_CAPTION,
     WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_GROUP, WS_MAXIMIZEBOX,
     WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
 };
@@ -62,10 +63,6 @@ pub enum WindowError {
     #[error("UpdateLayeredWindow failed")]
     UpdateLayeredWindowFailed(#[source] io::Error),
 }
-
-/// セル窓の余白 M（sprite がセル内を動ける幅の半分）。REPORT3 の最適点（128² フレーム基準）。
-/// セル寸法 = 最大フレーム寸法 + 2M。
-pub const CELL_MARGIN: u32 = 16;
 
 /// Win32 `HANDLE` の生の値（tao の `hwnd()` は `isize` を返す）。
 fn hwnd_from_isize(hwnd: isize) -> HWND {
@@ -399,10 +396,10 @@ impl LayeredWindow {
         Ok(())
     }
 
-    /// sprite をセル DIB のローカル座標 `at` に描く（`flip` 付き）。
+    /// sprite を DIB のローカル座標 `at` に描く（`flip` 付き）。
     ///
     /// `pixels` は `width * height` 長のプレマルチプライド 0xAARRGGBB。
-    /// セル DIB 全体はクリアされる（[`blit_argb_at`]）。窓や画面へはまだ反映しない
+    /// DIB 全体はクリアされる（[`blit_argb_at`]）。窓や画面へはまだ反映しない
     /// （反映は [`LayeredWindow::present`]）。
     pub fn blit(
         &mut self,
@@ -431,14 +428,17 @@ impl LayeredWindow {
         Ok(())
     }
 
-    /// バッファ内容を `UpdateLayeredWindow(ULW_ALPHA)` でウィンドウへ転送する。
+    /// バッファ内容を `UpdateLayeredWindow(ULW_ALPHA)` でウィンドウへ転送し、
+    /// あわせて窓位置を `dst` にする。
     ///
-    /// **目標位置 `dst` とバッファサイズを毎回明示的に渡す**。ULW は内容と位置を
-    /// **原子的に**更新するため、窓移動と再描画を 1 回で済ませられる（窓を先に
-    /// `SetWindowPos` で動かすと「旧内容のまま新位置」が 1 フレーム見える）。
-    /// pptDst を省略する「内容のみ更新」形式は、この検証環境（Windows 11 /
-    /// スパイク検証 2026-09-05）では TRUE を返しながら画面に一切合成されないため、
-    /// 明示渡しが必須。
+    /// **目標位置 `dst` とバッファサイズを毎回明示的に渡す**。pptDst / psize を
+    /// 省略する「内容のみ更新」形式は、この検証環境（Windows 11 / スパイク検証
+    /// 2026-09-05）では TRUE を返しながら画面に一切合成されないため、明示渡しが必須。
+    ///
+    /// **位置は呼び出し前に [`MoveBatch`]（`DeferWindowPos`）で確定させること**
+    /// （`dst` はその確定位置と一致させる）。毎 tick 動く `pptDst` を ULW で与えると
+    /// 旧内容が画面に残り、前ポーズの残像として見える（2026-09-20 実測・cellcap 117/181 異常）。
+    /// 内容が位置非依存なので、移動は窓 API 側で行い、ULW は内容更新専用にする。
     pub fn present(&mut self, dst: (i32, i32)) -> Result<(), WindowError> {
         let buffer = self.buffer.as_ref().ok_or(WindowError::NoBuffer)?;
 
@@ -482,10 +482,157 @@ impl LayeredWindow {
     pub fn buffer_size(&self) -> Option<(u32, u32)> {
         self.buffer.as_ref().map(|b| (b.width, b.height))
     }
+
+    /// クライアント領域の物理寸法（live の `GetClientRect`）。
+    ///
+    /// tao の `inner_size()` は DPI 遷移後に stale な scale を経由するため物理値を
+    /// ずらすことがある（遷移直後の 128px クリップ・2026-09-20 実測）。窓サイズの
+    /// 判定は Win32 の生値で行う。
+    pub fn client_size(&self) -> (u32, u32) {
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        if unsafe { GetClientRect(self.hwnd, &mut rect) }.is_err() {
+            return (0, 0);
+        }
+        (
+            (rect.right - rect.left).max(0) as u32,
+            (rect.bottom - rect.top).max(0) as u32,
+        )
+    }
+
+    /// 窓の物理寸法を `(width, height)` に変更する（tao を経由しない Win32 直呼び）。
+    ///
+    /// tao の `set_inner_size` は stale な scale で論理→物理変換するため、DPI 遷移直後に
+    /// 128×128 へ縮む（[`LayeredWindow::client_size`] の doc 参照）。位置は動かさない。
+    pub fn set_size(&self, width: u32, height: u32) {
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
+/// 1 tick 分の窓移動を `DeferWindowPos` に積んで一括適用する。
+///
+/// 窓ごとに `SetWindowPos` を呼ぶと N に超線形に伸びる（実測 100 窓で 33.2 ms/tick =
+/// 332 µs/窓）が、`BeginDeferWindowPos` / `DeferWindowPos` / `EndDeferWindowPos` の
+/// 1 バッチなら 100 窓で 3.0 ms/tick（30 µs/窓）に収まる（2026-09-20 movespike 実測）。
+///
+/// 使い方: 各 view が [`MoveBatch::add`] で位置を積み、tick の描画ループ末尾で
+/// [`MoveBatch::flush`] する。**内容の ULW（[`LayeredWindow::present`]）は flush 後に
+/// 呼ぶこと**（ULW に位置を動かさせない = 残像の原因を避ける）。
+///
+/// 失敗時は失われた移動を作らないことを優先する:
+/// - `BeginDeferWindowPos` 失敗 → 以降の `add` は即時 `SetWindowPos`
+/// - `DeferWindowPos` 失敗（この時点で HDWP は使用不可になる）→ 積み済みを即時
+///   `SetWindowPos` で適用してから、以降は即時 `SetWindowPos` に切り替える
+/// - `EndDeferWindowPos` 失敗 → [`MoveBatch::flush`] が `false` を返す（呼び出し側は
+///   「窓位置が未反映」として状態更新を見送り、次 tick にやり直す）
+pub struct MoveBatch {
+    hdwp: Option<HDWP>,
+    /// 積んだ移動（HDWP が途中で使えなくなったときの再適用用）。
+    pending: Vec<(HWND, i32, i32)>,
+}
+
+/// 窓を 1 枚動かす（サイズ・Z 順・アクティブ化は不変）。
+fn move_window(hwnd: HWND, x: i32, y: i32) {
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+impl MoveBatch {
+    /// `capacity` は 1 tick に動かす見込みの窓数（`DeferWindowPos` の初期容量ヒント）。
+    pub fn new(capacity: usize) -> Self {
+        let hdwp = unsafe { BeginDeferWindowPos(capacity.max(1) as i32) }.ok();
+        let pending = if hdwp.is_some() {
+            Vec::with_capacity(capacity)
+        } else {
+            Vec::new()
+        };
+        MoveBatch { hdwp, pending }
+    }
+
+    /// 窓 `hwnd` の位置を `(x, y)` にする予約を積む。
+    pub fn add(&mut self, hwnd: HWND, x: i32, y: i32) {
+        if let Some(hdwp) = self.hdwp {
+            match unsafe {
+                DeferWindowPos(
+                    hdwp,
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            } {
+                Ok(next) => {
+                    self.hdwp = Some(next);
+                    self.pending.push((hwnd, x, y));
+                    return;
+                }
+                Err(_) => {
+                    // MSDN: 失敗した HDWP は使用不可。積み済みを即時適用してから切替える。
+                    self.hdwp = None;
+                    self.apply_pending();
+                }
+            }
+        }
+        move_window(hwnd, x, y);
+    }
+
+    /// 積んだ移動をまとめて適用する。`EndDeferWindowPos` が失敗したときだけ `false`
+    /// （その場合も積み済みの移動を `SetWindowPos` で適用し、呼び出し側には
+    /// 「窓位置が確定していない」ことを伝える）。何も積んでいなければ `true`。
+    pub fn flush(&mut self) -> bool {
+        let Some(hdwp) = self.hdwp.take() else {
+            self.apply_pending();
+            return true;
+        };
+        match unsafe { EndDeferWindowPos(hdwp) } {
+            Ok(()) => {
+                self.pending.clear();
+                true
+            }
+            Err(_) => {
+                self.apply_pending();
+                false
+            }
+        }
+    }
+
+    /// 積んだ移動を 1 枚ずつ `SetWindowPos` で適用する（HDWP を使えない・失敗したとき）。
+    fn apply_pending(&mut self) {
+        for (hwnd, x, y) in self.pending.drain(..) {
+            move_window(hwnd, x, y);
+        }
+    }
+}
+
+impl Drop for MoveBatch {
+    fn drop(&mut self) {
+        // flush 忘れで移動が消えないように（EndDeferWindowPos は失敗しても無害）。
+        self.flush();
+    }
 }
 
 /// 単一起動を保証するガード（design.md §3-7「多重起動防止」）。
-///
 /// 名前付き mutex（`Local\` 名前空間 = ユーザーセッション内で単一）を取得し、
 /// 既に取得済みなら [`SingleInstanceError::AlreadyRunning`] を返す。
 /// Java 版には無い改善。ドロップ時に mutex を解放する。

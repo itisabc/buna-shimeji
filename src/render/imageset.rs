@@ -369,14 +369,6 @@ impl ImageSet {
     pub fn frame(&self, image_ref: &str) -> Option<&Frame> {
         self.frames.get(normalize_image_ref(image_ref))
     }
-
-    /// セル寸法の基礎: scale 適用後の最大フレーム寸法。
-    /// frames が空（全欠落で警告のみの経路）のときは (0, 0)。呼び出し側で 1 に clamp する。
-    pub fn max_frame_size(&self) -> (u32, u32) {
-        self.frames
-            .values()
-            .fold((0, 0), |acc, f| (acc.0.max(f.width), acc.1.max(f.height)))
-    }
 }
 
 /// conf の全アクション（トップレベルの animations）について、各ポーズの参照画像が

@@ -3,13 +3,13 @@
 //! 検証対象は coder が実装する公開 API（シグネチャ固定）のみ:
 //! - `flipped_offset_x(frame_width: u32, pose_dx: i32) -> i32`:
 //!   ImagePairs.java L85 の右画像アンカー相当 `width - dx`（dx は負でもそのまま演算）
+//! - `is_unchanged(...)`: 再描画要否（窓位置を含む・「投げると凍る」の回帰）
 //!
 //! タスク #31 で `compose_argb` は撤廃され、フレームはロード時にプレマルチプライド
 //! ARGB へ 1 回変換される（`from_rgba` / `blit_argb` の契約テストは
-//! tests/frame_argb_test.rs が担う）。MascotView（Win32 ウィンドウ制御）と
-//! DrawAction 等の enum 判定はテストしない。
+//! tests/frame_argb_test.rs が担う）。MascotView（Win32 ウィンドウ制御）はテストしない。
 
-use shimeji::render::flipped_offset_x;
+use shimeji::render::{flipped_offset_x, is_unchanged, ImageKey};
 
 // =====================================================================
 // 契約: flipped_offset_x は ImagePairs.java L85 相当 `width - dx`
@@ -25,4 +25,59 @@ fn flipped_offset_x_is_width_minus_dx() {
     assert_eq!(flipped_offset_x(128, 128), 0);
     // 負の dx もそのまま width - dx
     assert_eq!(flipped_offset_x(100, -20), 120);
+}
+
+// =====================================================================
+// 契約: 再描画要否は窓位置も含める（移動で sprite が凍り付くバグの回帰）
+// =====================================================================
+
+fn key() -> ImageKey {
+    ImageKey {
+        image_ref: "shime1.png".to_string(),
+        flip: false,
+        width: 128,
+        height: 128,
+    }
+}
+
+#[test]
+fn is_unchanged_requires_same_window_origin() {
+    let key = key();
+
+    // 内容が同じでも窓位置が違う（投げ = 毎 tick 移動）→ 描画必要
+    assert!(
+        !is_unchanged(Some(&key), Some((984, 984)), &key, (1016, 984), false),
+        "窓位置が変われば描画必要（凍り付き防止）"
+    );
+
+    // 内容・窓位置とも同じ → 不要
+    assert!(is_unchanged(
+        Some(&key),
+        Some((984, 984)),
+        &key,
+        (984, 984),
+        false
+    ));
+
+    // 内容が変わった → 必要
+    let other = ImageKey {
+        image_ref: "shime2.png".to_string(),
+        ..key.clone()
+    };
+    assert!(!is_unchanged(
+        Some(&key),
+        Some((984, 984)),
+        &other,
+        (984, 984),
+        false
+    ));
+
+    // 寸法ドリフト修復時は常に描画必要
+    assert!(
+        !is_unchanged(Some(&key), Some((984, 984)), &key, (984, 984), true),
+        "size_drift は描画必要"
+    );
+
+    // 初回（前回なし）は描画必要
+    assert!(!is_unchanged(None, None, &key, (984, 984), false));
 }
