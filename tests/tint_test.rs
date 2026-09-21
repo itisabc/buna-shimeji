@@ -6,7 +6,10 @@
 use std::path::PathBuf;
 
 use shimeji::config::parse_actions;
-use shimeji::tint::{hex_to_hue, hsl_to_rgb, Sweep, TintMode, TintStyle};
+use shimeji::tint::{
+    hex_to_hue, hsl_to_rgb, hue_to_palette_index, palette_hue, ColorSet, Sweep, TintMode,
+    TintStyle, PALETTE_HUES, PALETTE_LEN,
+};
 
 fn temp_actions(tag: &str, root_attrs: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -187,4 +190,96 @@ fn glow_alpha_is_zero_without_color() {
     };
     assert_eq!(off.mode, TintMode::Off);
     assert_eq!(off.glow_alpha(), 0);
+}
+
+// =====================================================================
+// パレット（出現を許可する色の単位）
+// =====================================================================
+
+/// パレットは 12 色・30° 刻み・色相順（色相 = 添字 × 30）。表示名は辞書が持つ。
+#[test]
+fn palette_is_twelve_hues_at_thirty_degree_steps() {
+    assert_eq!(PALETTE_LEN, 12, "コア固定の 12 色");
+    for (index, hue) in PALETTE_HUES.iter().enumerate() {
+        assert_eq!(*hue, index as u32 * 30, "色相 = 添字 × 30");
+        assert_eq!(palette_hue(index), Some(*hue));
+    }
+    assert_eq!(palette_hue(PALETTE_LEN), None, "範囲外は None");
+}
+
+/// 色相 → 最も近いパレット添字。境界 15° は上の色、負値・360 以上は wrap、NaN は 0。
+#[test]
+fn hue_to_palette_index_rounds_to_nearest_step() {
+    for (hue, expected) in [
+        (0.0, 0),
+        (14.9, 0),
+        (15.0, 1),
+        (29.9, 1),
+        (45.0, 2),
+        (344.9, 11),
+        (345.0, 0),
+        (359.9, 0),
+        (360.0, 0),
+        (390.0, 1),
+        (-30.0, 11),
+        (-1.0, 0),
+        (f32::NAN, 0),
+    ] {
+        assert_eq!(hue_to_palette_index(hue), expected, "hue = {hue}");
+    }
+}
+
+/// 既定は全 12 色（何も絞っていない状態）。`none()` は 1 色も許可しない。
+#[test]
+fn color_set_default_allows_every_palette_color() {
+    let all = ColorSet::default();
+    assert_eq!(all, ColorSet::all(), "既定 = 全色");
+    assert_eq!(all.len(), PALETTE_LEN);
+    assert_eq!(all.indices(), (0..PALETTE_LEN).collect::<Vec<usize>>());
+    assert!(!all.is_empty());
+    assert!(ColorSet::none().is_empty());
+    assert_eq!(ColorSet::none().len(), 0);
+    for index in 0..PALETTE_LEN {
+        assert!(all.contains(index), "添字 {index} は許可されている");
+    }
+}
+
+/// 色相の列は最も近い色へ丸め、重複を畳み、色相順に正規化する。
+#[test]
+fn color_set_from_hues_normalizes() {
+    // 29 は 30 へ、359 は 0 へ丸まる。240 の重複は 1 つに畳まれる。
+    let set = ColorSet::from_hues([240.0, 0.0, 150.0, 359.0, 29.0, 240.0]);
+    assert_eq!(set.indices(), [0, 1, 5, 8], "0/30/150/240 の 4 色");
+    assert_eq!(
+        set.hues().collect::<Vec<u32>>(),
+        [0, 30, 150, 240],
+        "色相順で戻る"
+    );
+    assert!(set.contains(5));
+    assert!(!set.contains(2), "許可していない色は contains が false");
+}
+
+// =====================================================================
+// 出現時の色を固定する（R19/R20 の個体）
+// =====================================================================
+
+/// `fixed_at` は宣言の sat / lum / glow / sweep を引き継ぎ、色と回転だけ差し替える。
+#[test]
+fn fixed_at_pins_the_color_and_stops_rotation() {
+    let declared = TintStyle {
+        mode: TintMode::Cycle,
+        rotate: 150.0,
+        sat: 35.0,
+        lum: 78.0,
+        glow: 0.5,
+        sweep: Sweep::Steps,
+    };
+    let fixed = declared.fixed_at(210.0);
+
+    assert_eq!(fixed.mode, TintMode::Fixed(210.0), "指定した色になる");
+    assert_eq!(fixed.rotate, 0.0, "回してしまうと選んだ色が変わってしまう");
+    assert_eq!(fixed.sat, 35.0, "彩度は宣言を引き継ぐ");
+    assert_eq!(fixed.lum, 78.0, "明度は宣言を引き継ぐ");
+    assert_eq!(fixed.glow, 0.5, "グローは宣言を引き継ぐ");
+    assert_eq!(fixed.sweep, Sweep::Steps, "回転のしかたは宣言を引き継ぐ");
 }

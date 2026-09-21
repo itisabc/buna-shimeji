@@ -102,7 +102,7 @@ use shimeji::mascot::behavior::{
 };
 use shimeji::mascot::{Mascot, Rect, Rng};
 use shimeji::render::imageset::{Frame, ImageSet};
-use shimeji::tint::{TintMode, TintStyle};
+use shimeji::tint::{ColorSet, TintMode, TintStyle};
 
 // =====================================================================
 // 合成データヘルパ（自己完結）
@@ -1562,4 +1562,146 @@ fn manager_reload_updates_persisting_mascot_tint() {
         after.flatten().is_some(),
         "reload 後の set 宣言の色が入る（旧 Off を残さない）"
     );
+}
+
+// =====================================================================
+// スライス 6: 出現時の色（R19 手動指定 / R20 許可色からの抽選）
+// =====================================================================
+
+/// `Tint="random"` の set は、出現のたびに許可色から 1 色抽選して**その色で固定**した
+/// 個体を出す（抽選母集団 = `[tint] colors`・R20）。
+#[test]
+fn manager_spawn_draws_random_tint_from_allowed_colors() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        _ => None,
+    });
+    manager.reload(vec![material_with_tint(
+        "SetA",
+        image_set_with("SetA", "a.png", 8, 8),
+        vec![row("Walk", 100)],
+        TintStyle {
+            mode: TintMode::Random,
+            ..Default::default()
+        },
+    )]);
+    // 0.5 x 3 色 → 色相順の 2 番目（150°）が選ばれる
+    manager.set_allowed_colors(ColorSet::from_hues([0.0, 150.0, 240.0]));
+
+    manager.request_spawn("SetA");
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 1);
+
+    let mut hue = None;
+    manager.apply_all(|m| hue = Some(m.tint_hue()));
+    assert_eq!(hue, Some(150.0), "許可色（色相順）から等確率で 1 色選ぶ");
+}
+
+/// 抽選母集団は許可色だけ（`[tint] colors` に 1 色しか無ければ必ずその色）。
+#[test]
+fn manager_random_tint_population_is_the_allowed_set() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        _ => None,
+    });
+    manager.reload(vec![material_with_tint(
+        "SetA",
+        image_set_with("SetA", "a.png", 8, 8),
+        vec![row("Walk", 100)],
+        TintStyle {
+            mode: TintMode::Random,
+            ..Default::default()
+        },
+    )]);
+    manager.set_allowed_colors(ColorSet::from_hues([240.0]));
+
+    manager.request_spawn("SetA");
+    manager.tick(Instant::now());
+
+    let mut hue = None;
+    manager.apply_all(|m| hue = Some(m.tint_hue()));
+    assert_eq!(hue, Some(240.0), "許可が 1 色なら必ずその色");
+}
+
+/// 許可色が 0 のときは抽選せず set 宣言のまま（色相 0・rng も消費しない）。
+#[test]
+fn manager_random_tint_without_allowed_colors_keeps_declaration() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        _ => None,
+    });
+    manager.reload(vec![material_with_tint(
+        "SetA",
+        image_set_with("SetA", "a.png", 8, 8),
+        vec![row("Walk", 100)],
+        TintStyle {
+            mode: TintMode::Random,
+            ..Default::default()
+        },
+    )]);
+    manager.set_allowed_colors(ColorSet::none());
+
+    manager.request_spawn("SetA");
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 1, "抽選できなくても spawn は成立する");
+
+    let mut hue = None;
+    manager.apply_all(|m| hue = Some(m.tint_hue()));
+    assert_eq!(hue, Some(0.0), "宣言の位相のまま（抽選しない）");
+}
+
+/// 色を指定して呼ぶと、その色で固定した個体が出る
+/// （宣言が `rainbow`（150°/s）でも回らない・R19）。
+#[test]
+fn manager_request_spawn_colored_uses_the_given_hue() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        _ => None,
+    });
+    manager.reload(vec![material_with_tint(
+        "SetA",
+        image_set_with("SetA", "a.png", 8, 8),
+        vec![row("Walk", 100)],
+        TintStyle {
+            mode: TintMode::Cycle,
+            rotate: 150.0,
+            ..Default::default()
+        },
+    )]);
+
+    manager.request_spawn_colored("SetA", 210.0);
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 1);
+
+    let mut hue = None;
+    manager.apply_all(|m| hue = Some(m.tint_hue()));
+    assert_eq!(hue, Some(210.0), "指定した色相で出る");
 }

@@ -31,6 +31,8 @@
 //!
 //! pub struct ImagesetsSettings { pub scale: BTreeMap<String, f64> }
 //!
+//! pub struct TintSettings { pub colors: ColorSet }   // [tint] colors = [色相 度, ...]
+//!
 //! pub struct Settings {
 //!     pub allowed: AllowedSettings,
 //!     pub disabled_behaviors: BTreeMap<String, Vec<String>>,
@@ -120,9 +122,11 @@ use shimeji::mascot::behavior::{
 };
 use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
 use shimeji::render::imageset::{Frame, ImageSet};
+use shimeji::tint::{ColorSet, PALETTE_LEN};
 use shimeji::tray::{
     apply_tray_command, AllowedKind, AllowedSettings, GeneralSettings, ImagesetsSettings,
-    InteractiveWindowsSettings, Settings, SettingsError, TrayCommand, TrayContext, TrayMenuModel,
+    InteractiveWindowsSettings, Settings, SettingsError, TintSettings, TrayCommand, TrayContext,
+    TrayMenuModel,
 };
 use tray_icon::menu::{CheckMenuItem, MenuId, MenuItemKind, Submenu};
 
@@ -715,6 +719,10 @@ fn assert_settings_eq(expected: &Settings, actual: &Settings) {
         "general.language"
     );
     assert_eq!(
+        actual.tint.colors, expected.tint.colors,
+        "tint.colors（許可する色の集合）"
+    );
+    assert_eq!(
         actual.interactive_windows.whitelist, expected.interactive_windows.whitelist,
         "interactive_windows.whitelist"
     );
@@ -909,6 +917,7 @@ fn settings_round_trip_preserves_all_values() {
             show_console: true,
             ..Default::default()
         },
+        tint: TintSettings::default(),
         interactive_windows: InteractiveWindowsSettings::default(),
     };
 
@@ -946,6 +955,7 @@ fn settings_save_is_deterministic_with_sorted_keys() {
         disabled_behaviors: disabled,
         imagesets: ImagesetsSettings { scale },
         general: GeneralSettings::default(),
+        tint: TintSettings::default(),
         interactive_windows: InteractiveWindowsSettings::default(),
     };
 
@@ -1156,6 +1166,7 @@ fn settings_save_keeps_help_comments() {
         "pin_dropped_window",
         "disabled_behaviors",
         "imagesets.scale",
+        "colors",
         "whitelist",
         "blacklist",
     ] {
@@ -2773,4 +2784,131 @@ fn settings_load_preserves_interactive_windows_entries_verbatim() {
         [" ".to_string(), "Chrome ".to_string()],
         "末尾空白を含む項目もそのまま保持"
     );
+}
+
+// =====================================================================
+// [tint] colors: 出現を許可する色（スライス 5）
+// =====================================================================
+
+/// 後方互換: `[tint]` セクションが無い settings.toml は全 12 色を許可する
+///（既存利用者の挙動を変えない・何も絞っていない状態）。
+#[test]
+fn settings_load_without_tint_section_allows_all_palette_colors() {
+    let home = TempHome::new("tint_absent");
+    std::fs::write(home.settings_path(), "[allowed]\nbreeding = false\n")
+        .expect("settings.toml を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("旧形式 TOML を読める");
+    assert_eq!(
+        settings.tint.colors.len(),
+        PALETTE_LEN,
+        "[tint] 欠落は全 12 色を許可"
+    );
+    for index in 0..PALETTE_LEN {
+        assert!(
+            settings.tint.colors.contains(index),
+            "パレット添字 {index} が許可されている"
+        );
+    }
+    assert!(!settings.allowed.breeding, "他セクションは従来どおり");
+}
+
+/// 明示した許可色は色相（度）で往復し、並びは色相順に正規化される。
+#[test]
+fn settings_tint_colors_round_trip_as_hues() {
+    let home = TempHome::new("tint_roundtrip");
+    let original = Settings {
+        tint: TintSettings {
+            colors: ColorSet::from_hues([240.0, 0.0, 150.0]),
+        },
+        ..Settings::default()
+    };
+
+    let path = home.settings_path();
+    Settings::save(&path, &original).expect("save できる");
+    let text = std::fs::read_to_string(&path).expect("保存結果を読める");
+    assert!(
+        text.contains("colors = [0, 150, 240]"),
+        "色相の整数・色相順で出る:\n{text}"
+    );
+
+    let loaded = Settings::load(&path).expect("load できる");
+    assert_settings_eq(&original, &loaded);
+    assert_eq!(
+        loaded.tint.colors.indices(),
+        [0, 5, 8],
+        "パレット添字は色相順"
+    );
+}
+
+/// 30° 刻みから外れた値は最も近い色へ丸め、重複は 1 つに畳む（起動は止めない）。
+#[test]
+fn settings_tint_colors_snap_and_dedupe() {
+    let home = TempHome::new("tint_snap");
+    std::fs::write(
+        home.settings_path(),
+        "[tint]\ncolors = [1, 359, 15, 29, 0]\n",
+    )
+    .expect("settings.toml を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("設定を読める");
+    let indices = settings.tint.colors.indices();
+    assert_eq!(
+        indices,
+        [0, 1],
+        "1/359/0 は 0° へ、15/29 は 30° へ丸まり、重複は畳まれる"
+    );
+    assert_eq!(
+        settings.tint.colors.hues().collect::<Vec<u32>>(),
+        [0, 30],
+        "丸めた結果は色相でも色相順"
+    );
+}
+
+/// `colors = []` は「1 色も許可しない」として往復する（キー欠落の全許可と区別する）。
+#[test]
+fn settings_tint_colors_empty_list_allows_none() {
+    let home = TempHome::new("tint_empty");
+    std::fs::write(home.settings_path(), "[tint]\ncolors = []\n").expect("settings.toml を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("設定を読める");
+    assert!(
+        settings.tint.colors.is_empty(),
+        "空リストは 1 色も許可しない"
+    );
+
+    let path = home.settings_path();
+    Settings::save(&path, &settings).expect("save できる");
+    let text = std::fs::read_to_string(&path).expect("保存結果を読める");
+    assert!(
+        text.contains("colors = []"),
+        "空も空のまま保存される:\n{text}"
+    );
+}
+
+/// 小数（30.0）でも整数（30）と同じ色として読む（TOML の数値型に依存しない）。
+#[test]
+fn settings_tint_colors_accept_float_hues() {
+    let home = TempHome::new("tint_float");
+    std::fs::write(home.settings_path(), "[tint]\ncolors = [30.0, 210.5]\n")
+        .expect("settings.toml を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("設定を読める");
+    assert_eq!(
+        settings.tint.colors.indices(),
+        [1, 7],
+        "小数も同じ丸めで読む（210.5 は 210 の枠）"
+    );
+}
+
+/// 色の指定が壊れている（文字列・配列以外）→ パースエラーとして拒否する
+///（起動時にファイルパス付きで表示して終了する既存方針に合わせる）。
+#[test]
+fn settings_tint_colors_rejects_non_numeric_entries() {
+    let home = TempHome::new("tint_bad_type");
+    std::fs::write(home.settings_path(), "[tint]\ncolors = [\"strawberry\"]\n")
+        .expect("settings.toml を書ける");
+
+    let result = Settings::load(&home.settings_path());
+    assert!(result.is_err(), "文字列の色指定はパースエラー: {result:?}");
 }

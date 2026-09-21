@@ -691,6 +691,8 @@ fn try_main() -> anyhow::Result<()> {
     manager.set_pin_dropped_window_allowed(settings.allowed.pin_dropped_window);
     // 無効 Behavior map（Manager passthrough・全体置換）
     manager.set_disabled_behaviors(settings.disabled_behaviors.clone());
+    // 出現を許可する色（`[tint] colors`・R19/R20 の抽選母集団と一覧の母集団）
+    manager.set_allowed_colors(settings.tint.colors.clone());
 
     // 12. 起動時 1 体
     manager.request_spawn_random(&image_sets);

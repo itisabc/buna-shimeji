@@ -61,7 +61,7 @@ use crate::app::reload::ReloadMaterial;
 use crate::mascot::behavior::{BehaviorError, BehaviorFactory, BehaviorTable};
 use crate::mascot::{AffordanceArrival, EnvironmentView, Mascot, Rng, TransformRequest};
 use crate::render::imageset::ImageSet;
-use crate::tint::TintStyle;
+use crate::tint::{ColorSet, TintMode, TintStyle};
 
 mod behavior_resolver;
 mod menu;
@@ -78,6 +78,24 @@ pub use menu::BehaviorMenu;
 
 /// image set resolver の型（Java `Main.getConfiguration(imageSet)` 相当の注入点）。
 type ImageSetResolver = dyn FnMut(&str) -> Option<Arc<ImageSet>>;
+
+/// 許可された色から 1 色を等確率で抽選する（R20 の抽選母集団・[`Manager::tick`] の spawn drain 用）。
+///
+/// 許可色が 0 のときは `None`（= 抽選せず set 宣言のまま）で、**rng を消費しない**
+/// （[`Manager::request_spawn_random`] の空スライスと同じ扱い）。母集団の順は
+/// [`ColorSet::indices`]（色相順）で、`(unit * len) as usize` の切り捨て
+/// （Java `createMascot` の set 選択と同じ式）。
+///
+/// `Manager` のメソッドにしないのは、drain ループが `Environment` を借用したまま
+/// `&mut self` を取れないため（フィールド単位の借用に分ける）。
+fn draw_allowed_hue(colors: &ColorSet, rng: &mut dyn Rng) -> Option<f32> {
+    let population = colors.indices();
+    if population.is_empty() {
+        return None;
+    }
+    let index = (rng.unit() * population.len() as f64) as usize;
+    crate::tint::palette_hue(population[index]).map(|hue| hue as f32)
+}
 
 /// マスコット集合の所有者（Java `Manager` 相当・スレッド/lock は排除）。
 pub struct Manager {
@@ -126,6 +144,9 @@ pub struct Manager {
     /// set 別の色づけスタイル（Reload が set 宣言から登録・[`Manager::set_tables`] と
     /// 同じ寿命）。未登録 set は [`TintStyle::default`]（= 色づけなし）。
     set_tints: HashMap<String, TintStyle>,
+    /// 出現を許可する色（R19/R20）。`settings.toml` の `[tint] colors` を main が注入する。
+    /// 既定は全 12 色、空 = 1 色も許可しない（抽選しない）。
+    allowed_colors: ColorSet,
 }
 
 impl Manager {
@@ -183,6 +204,7 @@ impl Manager {
             pin_pull_off: false,
             pin_has_clung: false,
             set_tints: HashMap::new(),
+            allowed_colors: ColorSet::default(),
         }
     }
 
@@ -239,10 +261,33 @@ impl Manager {
         self.request_spawn(&image_sets[index]);
     }
 
+    /// 色を指定して 1 体 spawn する（R19・トレイの「色を選んで呼ぶ」）。
+    ///
+    /// [`Manager::request_spawn`] と同じく向き決定で rng を 1 回消費し、要求をキューへ
+    /// 積む（反映は次 tick）。個体は set 宣言の sat / lum / glow / sweep を保ったまま
+    /// **指定色で固定**される（[`crate::tint::TintStyle::fixed_at`]）。
+    pub fn request_spawn_colored(&mut self, image_set_name: &str, hue: f32) {
+        let look_right = self.rng.unit() < 0.5;
+        self.environment_view().queue_spawn_next_colored(
+            image_set_name,
+            (-4000, -4000),
+            look_right,
+            hue,
+        );
+    }
+
     /// Mascot を追加キューへ積む（Java `add` L252-269 逐語のうち
     /// manager 二重管理制御を除く部分・反映は次 tick・AGENTS §5-6）。
     pub fn add(&mut self, mascot: Mascot) {
         self.added.push(mascot);
+    }
+
+    /// 出現を許可する色を差し替える（`settings.toml` の `[tint] colors` の注入経路・R19/R20）。
+    ///
+    /// 注入した集合がそのままランダム出現の抽選母集団になり、色を選んで呼ぶ一覧の母集団にもなる。
+    /// 実行中の変更を反映するのは呼び出し側（main / トレイ）の責務。
+    pub fn set_allowed_colors(&mut self, colors: ColorSet) {
+        self.allowed_colors = colors;
     }
 
     /// Java `tick` L201-244 逐語:
@@ -326,13 +371,32 @@ impl Manager {
                 Mascot::new(request.image_set_name.as_str(), image_set, request.anchor);
             // Java Breed.java L90: setLookRight(action.getMascot().isLookRight())
             mascot.set_look_right(request.look_right);
-            // set 宣言の tint を注入する（未登録 set は既定 = 色づけなし）。
-            mascot.set_tint_style(
-                self.set_tints
-                    .get(&request.image_set_name)
-                    .copied()
-                    .unwrap_or_default(),
-            );
+            // 出現時の色を決める（未登録 set は既定 = 色づけなし）。
+            // - 手動指定（`SpawnRequest::tint` = R19）→ その色で固定した個体
+            // - set 宣言が `Tint="random"`（R20）→ 許可色から 1 色抽選して固定した個体
+            // - それ以外（宣言なし / rainbow / 固定色）→ 宣言どおり
+            let declared = self
+                .set_tints
+                .get(&request.image_set_name)
+                .copied()
+                .unwrap_or_default();
+            let style = match request.tint {
+                Some(hue) => declared.fixed_at(hue),
+                None if declared.mode == TintMode::Random => {
+                    match draw_allowed_hue(&self.allowed_colors, self.rng.as_mut()) {
+                        Some(hue) => declared.fixed_at(hue),
+                        None => {
+                            log::warn!(
+                                "no allowed color to draw for `{}`: using the declared tint",
+                                request.image_set_name
+                            );
+                            declared
+                        }
+                    }
+                }
+                None => declared,
+            };
+            mascot.set_tint_style(style);
             let table = table_for(&self.set_tables, &self.table, &request.image_set_name);
             // Java Breed.java L93 / Main.java L497: born behavior 構築（第 4 引数伝播・#8）
             let built = match &request.behavior_name {

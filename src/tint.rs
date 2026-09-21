@@ -67,6 +67,116 @@ pub const DEFAULT_GLOW: f32 = 1.0;
 /// 加算すると面積ぶん白飛びする（プロトタイプの `gain` と同じ値）。
 pub const GLOW_GAIN: f32 = 0.4;
 
+/// 出現を許可する色の単位（コア固定の 12 色・色相 30° 刻み）。
+///
+/// 添字は色相順で、色相 = 添字 × 30。**表示名は辞書**（`conf/lang/<code>.toml`）が持ち、
+/// ここには色相値だけを置く（設計: 「12 色の表示名は辞書に置く」）。
+/// 既定の日本語名は いちご / みかん / レモン / メロン / マスカット / ミント / ソーダ /
+/// そらいろ / ブルーベリー / ぶどう / カシス / もも、英語名は Strawberry / Tangerine /
+/// Lemon / Melon / Muscat / Mint / Soda / Sky blue / Blueberry / Grape / Cassis / Peach。
+pub const PALETTE_HUES: [u32; 12] = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330];
+
+/// パレットの色数（[`PALETTE_HUES`] の長さ）。
+pub const PALETTE_LEN: usize = PALETTE_HUES.len();
+
+/// パレット添字の色相（度）。範囲外は `None`。
+pub fn palette_hue(index: usize) -> Option<u32> {
+    PALETTE_HUES.get(index).copied()
+}
+
+/// 色相（度）を最も近いパレット色の添字へ丸める。
+///
+/// 丸めは 30° 刻みで、境界の 15° は上の色（`f32::round` の half away from zero）。
+/// 負値と 360 以上は wrap し、NaN は 0 になる。宣言の `#RRGGBB` から得た色相も
+/// この関数を通して「どの名前付き色か」を決める（設計: 最も近い名前付き色に丸める）。
+pub fn hue_to_palette_index(hue: f32) -> usize {
+    // NaN は `as usize` で 0 になる（丸めた値をそのまま使う。位相を進める関数ではない）
+    ((hue.rem_euclid(360.0) / 30.0).round() as usize) % PALETTE_LEN
+}
+
+/// 出現を許可する色の集合（パレット添字・色相順・重複なし）。
+///
+/// この集合が「お気に入り」であり、同時にランダム出現（[`TintMode::Random`]）の
+/// 抽選母集団、[`Sweep::Within`] / [`Sweep::Steps`] の回転範囲になる（別々に持たない）。
+/// 空 = 1 色も許可しない。**オン/オフの切り替え UI は持たない**（トレイ・右クリックは別スライス）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorSet {
+    /// 許可するパレット添字（昇順・重複なし）。
+    slots: Vec<usize>,
+}
+
+impl Default for ColorSet {
+    /// 既定は全 12 色（何も絞っていない状態。絞るのは利用者の操作）。
+    fn default() -> Self {
+        ColorSet {
+            slots: (0..PALETTE_LEN).collect(),
+        }
+    }
+}
+
+impl ColorSet {
+    /// 全 12 色を許可する集合。
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// 許可色なしの集合（`settings.toml` の `colors = []`）。
+    pub fn none() -> Self {
+        ColorSet { slots: Vec::new() }
+    }
+
+    /// 色相の列から作る（`settings.toml` の `[tint] colors`）。
+    ///
+    /// 各値は最も近いパレット色へ丸める。30° 刻みから外れた値は `log::warn` で
+    /// 知らせる（起動は止めない＝宣言の不正値と同じ方針）。重複は 1 つに畳み、
+    /// 並びは色相順に正規化する（抽選と回転が色相順を前提にするため）。
+    pub fn from_hues(hues: impl IntoIterator<Item = f32>) -> Self {
+        let mut slots: Vec<usize> = Vec::new();
+        for hue in hues {
+            let index = hue_to_palette_index(hue);
+            let snapped = PALETTE_HUES[index] as f32;
+            let wrapped = hue.rem_euclid(360.0);
+            // 円環距離（359.9 は 0 へ丸まるので、差は 0.1 として見る）
+            let delta = (wrapped - snapped)
+                .abs()
+                .min(360.0 - (wrapped - snapped).abs());
+            if hue.is_finite() && delta > 0.5 {
+                log::warn!("[tint] colors: {hue} is not a 30-degree palette hue; using {snapped}");
+            }
+            if !slots.contains(&index) {
+                slots.push(index);
+            }
+        }
+        slots.sort_unstable();
+        ColorSet { slots }
+    }
+
+    /// その色を許可しているか（パレット添字）。
+    pub fn contains(&self, index: usize) -> bool {
+        self.slots.binary_search(&index).is_ok()
+    }
+
+    /// 許可色のパレット添字（色相順）。抽選母集団と回転範囲の正本。
+    pub fn indices(&self) -> &[usize] {
+        &self.slots
+    }
+
+    /// 許可色の色相（度・色相順）。`settings.toml` への書き出しに使う。
+    pub fn hues(&self) -> impl Iterator<Item = u32> + '_ {
+        self.slots.iter().map(|&index| PALETTE_HUES[index])
+    }
+
+    /// 許可色数。
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// 許可色が 1 つも無いか。
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+}
+
 impl Default for TintStyle {
     fn default() -> Self {
         TintStyle {
@@ -92,6 +202,19 @@ impl TintStyle {
         }
         // NaN は `as u8` で 0 になる（負値と 255 超もこのクランプで吸収する）。
         (self.glow * GLOW_GAIN * 255.0).round().clamp(0.0, 255.0) as u8
+    }
+
+    /// 出現時の色を固定した見せ方（宣言の sat / lum / glow / sweep は引き継ぎ、回転は止める）。
+    ///
+    /// 手動で選んだ色（R19）とランダム抽選（R20）の個体に使う。回転を残すと選んだ色が
+    /// 数秒で変わってしまい「その色の個体を出す」にならないため `rotate = 0` にする。
+    /// 宣言で回している set（`Tint="rainbow"`）でも、色を指定して出した個体は固定色になる。
+    pub fn fixed_at(self, hue: f32) -> Self {
+        TintStyle {
+            mode: TintMode::Fixed(hue),
+            rotate: 0.0,
+            ..self
+        }
     }
 }
 

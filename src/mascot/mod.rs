@@ -239,6 +239,22 @@ pub trait EnvironmentView {
         todo!("app impl at #9b")
     }
 
+    /// 色を指定した createMascot 経路の追加マスコット要求をキューへ積む（R19）。
+    ///
+    /// [`EnvironmentView::queue_spawn_next`] と同じだが、出現時の色相 `hue`（度）を
+    /// 添える。drain は set 宣言の見せ方（sat / lum / glow / sweep）を保ったまま
+    /// **その色で固定した個体**を作る（[`crate::tint::TintStyle::fixed_at`]）。
+    /// トレイの「色を選んで呼ぶ」が使う経路（Action は使わない）。
+    fn queue_spawn_next_colored(
+        &self,
+        image_set_name: &str,
+        anchor: (i32, i32),
+        look_right: bool,
+        hue: f32,
+    ) {
+        todo!("app impl at #9b")
+    }
+
     /// 画面外の窓を作業領域へ戻す（Java `WindowsEnvironment.restoreWindows`
     /// L292-347 相当・tray RestoreWindows の供給経路・#9b）。
     fn restore_windows(&self) {

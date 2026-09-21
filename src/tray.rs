@@ -37,7 +37,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
@@ -45,6 +45,7 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem,
 use crate::app::manager::{BehaviorMenu, Manager};
 use crate::app::reload::load_materials;
 use crate::i18n::{Lang, UiKey, DEFAULT_LANGUAGE};
+use crate::tint::ColorSet;
 
 // =====================================================================
 // トレイアイコン: Java Main.getIcon()（.tmp/java-ref/Main.java L764-792）
@@ -253,6 +254,10 @@ pub struct Settings {
     /// set 単位 scale（design §3-14 の `[imagesets] scale = { ... }`）。
     #[serde(default)]
     pub imagesets: ImagesetsSettings,
+    /// 色づけのユーザー設定（設計の `[tint]`）。`[tint]` の直後に
+    /// `[interactive_windows]` を出すため、この位置で宣言する（ヘルプ挿入順に依存）。
+    #[serde(default)]
+    pub tint: TintSettings,
     /// アクティブウィンドウ選別の whitelist / blacklist
     /// （design §3-14 の `[interactive_windows]`・[`Win32OsSource`] へ注入）。
     /// 後方互換: セクション欠落は空リスト補完。
@@ -260,6 +265,50 @@ pub struct Settings {
     /// [`Win32OsSource`]: crate::win::os_source::Win32OsSource
     #[serde(default)]
     pub interactive_windows: InteractiveWindowsSettings,
+}
+
+/// `[tint]` セクション（色づけ＝Gaming Shimeji のユーザー設定）。
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TintSettings {
+    /// 出現を許可する色（[`ColorSet`]）。この集合が「お気に入り」であり、同時に
+    /// ランダム出現の抽選母集団になる。
+    ///
+    /// 値はパレットの色相（度・30° 刻み・色相順）。**キー欠落 = 全 12 色**、
+    /// `colors = []` = 1 色も許可しない。30° 刻みから外れた値は最も近い色へ丸める（警告）。
+    #[serde(
+        default,
+        deserialize_with = "de_color_hues",
+        serialize_with = "ser_color_hues"
+    )]
+    pub colors: ColorSet,
+}
+
+/// `[tint] colors` の読み込み。整数（`0`）と小数（`30.0`）のどちらでも受ける。
+fn de_color_hues<'de, D>(deserializer: D) -> Result<ColorSet, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    /// TOML の整数・小数を同じ扱いにするための受け皿。
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Hue {
+        Int(i64),
+        Float(f64),
+    }
+
+    let hues = Vec::<Hue>::deserialize(deserializer)?;
+    Ok(ColorSet::from_hues(hues.into_iter().map(|hue| match hue {
+        Hue::Int(value) => value as f32,
+        Hue::Float(value) => value as f32,
+    })))
+}
+
+/// `[tint] colors` の書き出し。色相（度）を整数・色相順で出す（保存は決定的）。
+fn ser_color_hues<S>(colors: &ColorSet, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    colors.hues().collect::<Vec<u32>>().serialize(serializer)
 }
 
 // =====================================================================
@@ -304,6 +353,17 @@ const IMAGESETS_SCALE_HELP: &str = "\
 # 記入例: Shimeji = 0.5   # 解像度 2 倍の画像セットを 128px 相当で使う
 ";
 
+/// `[tint]` 見出しの直後へ添える説明と記入例。
+const TINT_HELP: &str = "\
+# --- [tint] 色づけ（Gaming Shimeji）---
+# colors : 出現を許可する色。この集合が「お気に入り」であり、同時にランダム出現の抽選母集団。
+#          色相 30° 刻みの 12 色を度で指定する。キーを書かない（既定）と全 12 色。
+#          0=いちご / 30=みかん / 60=レモン / 90=メロン / 120=マスカット / 150=ミント /
+#          180=ソーダ / 210=そらいろ / 240=ブルーベリー / 270=ぶどう / 300=カシス / 330=もも
+# 記入例: colors = [0, 150, 240]   # いちご・ミント・ブルーベリーだけ出す
+#          30° 刻みでない値は最も近い色に丸める。colors = [] は 1 色も許可しない。
+";
+
 /// `[interactive_windows]` の末尾へ添える説明と記入例。
 ///
 /// `[interactive_windows]` は [`Settings`] の最後のフィールドなので、末尾追記で
@@ -327,6 +387,7 @@ fn with_help(mut text: String) -> String {
         ("[allowed]\n", ALLOWED_HELP),
         ("[disabled_behaviors]\n", DISABLED_BEHAVIORS_HELP),
         ("[imagesets.scale]\n", IMAGESETS_SCALE_HELP),
+        ("[tint]\n", TINT_HELP),
     ] {
         if let Some(pos) = text.find(header) {
             text.insert_str(pos + header.len(), help);
