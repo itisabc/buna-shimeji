@@ -41,11 +41,11 @@ use tao::event_loop::EventLoopWindowTarget;
 use tao::window::Window;
 
 use crate::render::imageset::Frame;
-use crate::win::window::{LayeredWindow, MoveBatch, WindowError};
+use crate::win::window::{GlowLayer, LayeredWindow, MoveBatch, WindowError};
 
-/// 最後に描画した画像を識別するキー（image_ref + flip + 寸法 + tint の同一性のみ。
+/// 最後に描画した画像を識別するキー（image_ref + flip + 寸法 + tint + グローの同一性のみ。
 /// ピクセル内容は比較しない — 同一 image_ref のフレーム内容は実行中に不変で、
-/// 色づけは描画のたびに tint を掛けて作る）。
+/// 色づけとグローは描画のたびに掛けて作る）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageKey {
     pub image_ref: String,
@@ -54,6 +54,8 @@ pub struct ImageKey {
     pub height: u32,
     /// 色づけの乗算係数（`None` = 無変化）。色が変われば内容も変わるので同一性に含める。
     pub tint: Option<[u8; 3]>,
+    /// グローの α 倍率（`0` = グローなし）。強度が変われば内容も変わる。
+    pub glow: u8,
 }
 
 /// [`MascotView::stage`] へ渡す sprite の描画パラメータ（引数過多を避ける束ね）。
@@ -68,6 +70,8 @@ pub struct SpriteDraw<'a> {
     pub anchor_pos: (i32, i32),
     /// 色づけの乗算係数（`None` = 無変化＝元画像のまま）。
     pub tint: Option<[u8; 3]>,
+    /// グローの α 倍率（`0` = グローなし）。色は `tint` と同じ色を使う。
+    pub glow: u8,
 }
 
 /// flip 時の水平描画オフセット（Java ImagePairs.java L85:
@@ -198,6 +202,7 @@ impl MascotView {
             width: frame.width,
             height: frame.height,
             tint: sprite.tint,
+            glow: sprite.glow,
         };
         // 内容キーの比較（位置は見ない）。移動だけの tick で ULW を省く判定に使う。
         let content_changed = self.last_image.as_ref() != Some(&key);
@@ -223,6 +228,22 @@ impl MascotView {
                 sprite.flip,
                 sprite.tint,
             )?;
+            // グローは α ブラー層を blit の後に加算合成する（色と強度はここで掛ける）。
+            // 色づけなしの個体は色を持たないため光らせない。
+            if sprite.glow > 0 {
+                if let Some(color) = sprite.tint {
+                    self.window.blit_add(
+                        GlowLayer {
+                            blur: &frame.glow,
+                            size: (frame.width, frame.height),
+                            color,
+                            strength: sprite.glow,
+                        },
+                        (0, 0),
+                        sprite.flip,
+                    )?;
+                }
+            }
         }
         // 予約と状態更新（`last_*`）は [`MascotView::commit`] の成功時に確定する。
         self.pending = Some(PendingDraw {

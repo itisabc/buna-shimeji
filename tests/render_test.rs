@@ -38,6 +38,7 @@ fn key() -> ImageKey {
         width: 128,
         height: 128,
         tint: None,
+        glow: 0,
     }
 }
 
@@ -60,6 +61,37 @@ fn is_unchanged_distinguishes_tint() {
     assert!(
         is_unchanged(Some(&key), Some((984, 984)), &key, (984, 984), false),
         "tint が同じなら不要"
+    );
+}
+
+/// グロー強度が違えば内容が違う＝描画が必要。同じなら再送しない
+/// （ゲーミングの「毎 tick 回る」再描画は tint 側だけで起きる）。
+#[test]
+fn is_unchanged_distinguishes_glow() {
+    let key = key();
+    let glowing = ImageKey {
+        tint: Some([255, 128, 0]),
+        glow: 143,
+        ..key.clone()
+    };
+    let same = ImageKey {
+        tint: Some([255, 128, 0]),
+        glow: 143,
+        ..key.clone()
+    };
+    let dimmer = ImageKey {
+        tint: Some([255, 128, 0]),
+        glow: 51,
+        ..key.clone()
+    };
+
+    assert!(
+        !is_unchanged(Some(&glowing), Some((984, 984)), &dimmer, (984, 984), false),
+        "グロー強度が変われば描画必要"
+    );
+    assert!(
+        is_unchanged(Some(&glowing), Some((984, 984)), &same, (984, 984), false),
+        "グローが同じなら不要"
     );
 }
 

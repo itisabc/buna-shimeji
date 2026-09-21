@@ -1929,6 +1929,28 @@ fn cycle_tint_phase_wraps_at_360() {
     );
 }
 
+/// `tint_glow()` はグロー用の α 倍率（描画サイト `SpriteDraw::glow` 用）。
+/// 色を持たない `TintMode::Off` の個体は光らせない。
+#[test]
+fn tint_glow_is_zero_without_color_and_follows_declaration() {
+    let mut m = mascot_at((500, 500));
+    assert_eq!(m.tint_glow(), 0, "既定（Off）はグローなし");
+
+    m.set_tint_style(TintStyle {
+        mode: TintMode::Cycle,
+        glow: 1.4,
+        ..Default::default()
+    });
+    assert_eq!(m.tint_glow(), 143, "宣言値 × gain の α 倍率");
+
+    m.set_tint_style(TintStyle {
+        mode: TintMode::Off,
+        glow: 1.4,
+        ..Default::default()
+    });
+    assert_eq!(m.tint_glow(), 0, "Off は色が無いので光らせない");
+}
+
 #[test]
 fn apply_pose_missing_frame_keeps_previous_image_bounds() {
     let set = image_set_with(&[("shime1.png", 128, 128)]);

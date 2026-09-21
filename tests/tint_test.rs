@@ -155,3 +155,36 @@ fn hsl_to_rgb_known_values() {
         "負の色相は wrap する"
     );
 }
+
+// =====================================================================
+// グロー強度（描画時に加算合成する α 倍率）
+// =====================================================================
+
+/// `glow_alpha` は gain（シルエットの白飛び防止）を掛けた α 倍率（0..=255）。
+/// ムード表の宣言値がそのまま入る: ゲーミング 1.4 / パステル 0.5。
+#[test]
+fn glow_alpha_scales_with_gain_and_clamps() {
+    let cycle = |glow: f32| TintStyle {
+        mode: TintMode::Cycle,
+        glow,
+        ..TintStyle::default()
+    };
+    assert_eq!(cycle(0.0).glow_alpha(), 0, "0 は光らない");
+    assert_eq!(cycle(1.0).glow_alpha(), 102, "既定 1.0 × gain 0.4");
+    assert_eq!(cycle(1.4).glow_alpha(), 143, "ゲーミングの宣言値");
+    assert_eq!(cycle(0.5).glow_alpha(), 51, "パステルの宣言値");
+    assert_eq!(cycle(-1.0).glow_alpha(), 0, "負値は 0");
+    assert_eq!(cycle(10.0).glow_alpha(), 255, "上限で飽和する");
+    assert_eq!(cycle(f32::NAN).glow_alpha(), 0, "NaN は 0");
+}
+
+/// 色づけなし（`Off`）は色を持たないため光らせない（従来の set は影響を受けない）。
+#[test]
+fn glow_alpha_is_zero_without_color() {
+    let off = TintStyle {
+        glow: 1.4,
+        ..TintStyle::default()
+    };
+    assert_eq!(off.mode, TintMode::Off);
+    assert_eq!(off.glow_alpha(), 0);
+}

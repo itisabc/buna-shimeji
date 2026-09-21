@@ -174,6 +174,115 @@ fn tint_argb(s: u32, t: [u8; 3]) -> u32 {
     a | (r << 16) | (g << 8) | b
 }
 
+/// プレマルチプライド 0xAARRGGBB をチャンネル毎に飽和加算する（加算合成）。
+///
+/// 両辺がプレマルチプライド（`r,g,b <= a`）なら、結果もその不変条件を保つ
+/// （チャンネル毎に同じ上限 255 で飽和するため `r1+r2 <= a1+a2` が崩れない）。
+fn add_argb(base: u32, add: u32) -> u32 {
+    let mut out = 0u32;
+    for shift in [24, 16, 8, 0] {
+        let sum = ((base >> shift) & 0xFF) + ((add >> shift) & 0xFF);
+        out |= sum.min(255) << shift;
+    }
+    out
+}
+
+/// グロー層（α ブラー）の加算合成指定（引数過多を避ける束ね）。
+///
+/// 色と強度は個体ごとに変わるため層には焼き込まず、描画時にここで渡す
+/// （設計: 「ブラー層は素の α ブラーで保持し、強度は加算合成時に掛ける」）。
+#[derive(Debug, Clone, Copy)]
+pub struct GlowLayer<'a> {
+    /// α をぼかした層（1 画素 1 バイト・`size` = 元フレームの寸法）。
+    pub blur: &'a [u8],
+    pub size: (u32, u32),
+    /// グローの色（sprite の tint と同じ乗算係数）。
+    pub color: [u8; 3],
+    /// 層全体の α 倍率（`0` = 何もしない）。
+    pub strength: u8,
+}
+
+/// グロー層（α ブラー）を `dst` に加算合成する（[`blit_argb_at`] の後に呼ぶ）。
+///
+/// 画素ごとに `GlowLayer::color` を、その画素の α（`strength` を掛けたもの）で
+/// プレマルチプライした値を足す。`dst` はクリアしない（sprite を消さないため）。
+/// ブラー層が空 / `strength == 0` は no-op。はみ出しは [`blit_argb_at`] と同じくクリップする。
+///
+/// 契約: `dst.len() == dst_size.0 * dst_size.1`・
+/// `blur.len() == size.0 * size.1`（`blur` が空でない場合。違反は assert）。
+pub fn blit_add_argb_at(
+    dst: &mut [u32],
+    dst_size: (u32, u32),
+    glow: GlowLayer<'_>,
+    at: (i32, i32),
+    flip: bool,
+) {
+    let GlowLayer {
+        blur,
+        size,
+        color,
+        strength,
+    } = glow;
+    let (dst_w, dst_h) = dst_size;
+    let (glow_w, glow_h) = size;
+    assert_eq!(
+        dst.len(),
+        dst_w as usize * dst_h as usize,
+        "blit_add_argb_at: dst size mismatch"
+    );
+    if blur.is_empty() || strength == 0 || dst_w == 0 || dst_h == 0 {
+        return;
+    }
+    assert_eq!(
+        blur.len(),
+        glow_w as usize * glow_h as usize,
+        "blit_add_argb_at: glow size mismatch"
+    );
+    assert!(
+        glow_w > 0 && glow_h > 0,
+        "blit_add_argb_at: glow dims must be non-zero"
+    );
+
+    let dst_w = dst_w as i64;
+    let dst_h = dst_h as i64;
+    let glow_w = glow_w as i64;
+    let glow_h = glow_h as i64;
+    for sy in 0..glow_h {
+        let dy = at.1 as i64 + sy;
+        if dy < 0 || dy >= dst_h {
+            continue;
+        }
+        let dst_row = dy as usize * dst_w as usize;
+        let glow_row = sy as usize * glow_w as usize;
+        for sx in 0..glow_w {
+            let dx = at.0 as i64 + sx;
+            if dx < 0 || dx >= dst_w {
+                continue;
+            }
+            let g = blur[glow_row
+                + if flip {
+                    (glow_w - 1 - sx) as usize
+                } else {
+                    sx as usize
+                }];
+            if g == 0 {
+                continue;
+            }
+            // α の倍率を掛けた「その画素の不透明度」で色をプレマルチプライする。
+            let a = u32::from(g) * u32::from(strength) / 255;
+            if a == 0 {
+                continue;
+            }
+            let src = (a << 24)
+                | ((u32::from(color[0]) * a / 255) << 16)
+                | ((u32::from(color[1]) * a / 255) << 8)
+                | (u32::from(color[2]) * a / 255);
+            let index = dst_row + dx as usize;
+            dst[index] = add_argb(dst[index], src);
+        }
+    }
+}
+
 /// style を真の枠なし窓（WS_POPUP）に矯正する純関数。
 ///
 /// 装飾系 6 ビット（WS_CAPTION / WS_SYSMENU / WS_MAXIMIZEBOX / WS_MINIMIZEBOX /
@@ -448,6 +557,29 @@ impl LayeredWindow {
             flip,
             tint,
         );
+        Ok(())
+    }
+
+    /// グロー層（α ブラー）を DIB に加算合成する（[`LayeredWindow::blit`] の後に呼ぶ）。
+    ///
+    /// `glow` のブラー層は `width` × `height` の 1 画素 1 バイトの α
+    /// （[`crate::render::imageset::Frame`] の `glow`）。バッファのクリアは行わない。
+    pub fn blit_add(
+        &mut self,
+        glow: GlowLayer<'_>,
+        at: (i32, i32),
+        flip: bool,
+    ) -> Result<(), WindowError> {
+        let buffer = self.buffer.as_mut().ok_or(WindowError::NoBuffer)?;
+        let (buf_w, buf_h) = (buffer.width, buffer.height);
+        let (width, height) = glow.size;
+        if glow.blur.len() != width as usize * height as usize {
+            return Err(WindowError::SizeMismatch {
+                expected: width as usize * height as usize,
+                actual: glow.blur.len(),
+            });
+        }
+        blit_add_argb_at(buffer.pixels_mut(), (buf_w, buf_h), glow, at, flip);
         Ok(())
     }
 

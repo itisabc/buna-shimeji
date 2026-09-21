@@ -772,6 +772,13 @@ impl Mascot {
         }
     }
 
+    /// この個体のグローの α 倍率（0..=255）。`0` = グローなし。
+    /// 色は [`Mascot::tint_rgb`] と同じものを使う（描画サイトが
+    /// [`crate::render::SpriteDraw::glow`] へ渡す）。
+    pub fn tint_glow(&self) -> u8 {
+        self.tint.glow_alpha()
+    }
+
     /// リソース解放 + Manager からの削除依頼（Java dispose L713-730 のうち
     /// ウィンドウ破棄を除く部分）。削除反映は次 tick（remove_pending・#8）。
     pub fn dispose(&mut self) {

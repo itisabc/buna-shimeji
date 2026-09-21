@@ -63,6 +63,9 @@ pub const DEFAULT_LUM: f32 = 62.0;
 pub const DEFAULT_ROTATE: f32 = 150.0;
 /// 既定のグロー強度。
 pub const DEFAULT_GLOW: f32 = 1.0;
+/// グロー強度に掛ける gain。加算するのは α をぼかした**シルエット**なので、そのまま
+/// 加算すると面積ぶん白飛びする（プロトタイプの `gain` と同じ値）。
+pub const GLOW_GAIN: f32 = 0.4;
 
 impl Default for TintStyle {
     fn default() -> Self {
@@ -74,6 +77,21 @@ impl Default for TintStyle {
             glow: DEFAULT_GLOW,
             sweep: Sweep::Within,
         }
+    }
+}
+
+impl TintStyle {
+    /// 描画時に加算合成するグローの α 倍率（0..=255）。`0` = グローなし。
+    ///
+    /// ブラー層は素の α ブラー（最大 255）で保持し、強度はここで掛ける
+    /// （設計: 「ブラー層は素の α ブラーで保持し、強度は加算合成時に掛ける」）。
+    /// 色づけなし（[`TintMode::Off`]）の個体は色を持たないため光らせない。
+    pub fn glow_alpha(&self) -> u8 {
+        if self.mode == TintMode::Off {
+            return 0;
+        }
+        // NaN は `as u8` で 0 になる（負値と 255 超もこのクランプで吸収する）。
+        (self.glow * GLOW_GAIN * 255.0).round().clamp(0.0, 255.0) as u8
     }
 }
 

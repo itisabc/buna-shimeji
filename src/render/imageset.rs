@@ -62,32 +62,96 @@ pub enum ImagesetError {
     NotPng(String),
 }
 
+/// グロー（α ブラー）の半径（px・フレームの画素単位）。
+///
+/// プロトタイプ（`.tmp/demo/gaming-shimeji-moods.html`、128px フレームで `RADIUS = 4`）
+/// と同じ値。ムード（グロー強度）の見た目はこの半径で決めたため、変えると印象が変わる。
+const GLOW_RADIUS: usize = 4;
+
 /// 1 フレーム（1 ポーズ画像）。プレマルチプライド 0xAARRGGBB（行優先・非反転）。
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,
     pub argb: Vec<u32>,
+    /// グロー用の α ブラー層（1 画素 1 バイト・`argb` と同じ並び・`width * height`）。
+    /// 色と強度は描画時に掛けるため、ここには素のブラーだけを保持する。
+    /// `argb` が空なら空。
+    pub glow: Vec<u8>,
 }
 
 impl Frame {
-    /// straight RGBA8 をプレマルチプライド 0xAARRGGBB に変換して保持する。
+    /// straight RGBA8 をプレマルチプライド 0xAARRGGBB に変換し、あわせて
+    /// グロー用の α ブラー層（[`Frame::glow`]）を 1 回だけ生成して保持する。
     ///
-    /// `width == 0 || height == 0 || rgba.is_empty()` のとき `argb` は空になる。
-    /// それ以外は [`crate::win::window::premultiply_rgba_to_argb`] で変換する
-    ///（切り捨て `(v * a) / 255`。整合入力なら `argb.len() == width * height`）。
+    /// `width == 0 || height == 0 || rgba.is_empty() || rgba` が短すぎる場合は
+    /// `argb` / `glow` とも空になる。それ以外は `argb` は
+    /// [`crate::win::window::premultiply_rgba_to_argb`]（切り捨て `(v * a) / 255`）、
+    /// `glow` は α チャンネルの分離型 box blur ×3（端は clamp）で作る。
     pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Self {
-        let argb = if width == 0 || height == 0 || rgba.is_empty() {
-            Vec::new()
+        let (argb, glow) = if width == 0
+            || height == 0
+            || rgba.is_empty()
+            || rgba.len() < width as usize * height as usize * 4
+        {
+            (Vec::new(), Vec::new())
         } else {
-            crate::win::window::premultiply_rgba_to_argb(&rgba)
+            let glow = blur_alpha(&rgba, width as usize, height as usize, GLOW_RADIUS);
+            (crate::win::window::premultiply_rgba_to_argb(&rgba), glow)
         };
         Frame {
             width,
             height,
             argb,
+            glow,
         }
     }
+}
+
+/// straight RGBA8 の α チャンネルを box blur ×3（ガウス近似）でぼかす。
+/// プロトタイプの `gauss`（`boxBlur` 3 回・端は clamp）と同じ式で、
+/// [`Frame::from_rgba`] のロード時生成専用。
+fn blur_alpha(rgba: &[u8], width: usize, height: usize, radius: usize) -> Vec<u8> {
+    let mut current: Vec<u8> = (0..width * height).map(|i| rgba[i * 4 + 3]).collect();
+    if radius == 0 {
+        return current;
+    }
+    for _ in 0..3 {
+        current = box_blur_alpha(&current, width, height, radius);
+    }
+    current
+}
+
+/// α の分離型 box blur を 1 回かける。窓が画像の外へ出る分は端の画素で埋める（clamp）。
+/// 端の扱いまでプロトタイプの `boxBlur` と一致させる。
+fn box_blur_alpha(src: &[u8], width: usize, height: usize, radius: usize) -> Vec<u8> {
+    let win = (2 * radius + 1) as u32;
+    let mut tmp = vec![0u8; width * height];
+    for y in 0..height {
+        let row = y * width;
+        let mut sum: u32 = (0..2 * radius + 1)
+            .map(|k| u32::from(src[row + k.saturating_sub(radius).min(width - 1)]))
+            .sum();
+        for x in 0..width {
+            tmp[row + x] = ((sum + win / 2) / win) as u8;
+            let add = (x + radius + 1).min(width - 1);
+            let sub = x.saturating_sub(radius);
+            sum = sum + u32::from(src[row + add]) - u32::from(src[row + sub]);
+        }
+    }
+    let mut out = vec![0u8; width * height];
+    for x in 0..width {
+        let mut sum: u32 = (0..2 * radius + 1)
+            .map(|k| u32::from(tmp[k.saturating_sub(radius).min(height - 1) * width + x]))
+            .sum();
+        for y in 0..height {
+            out[y * width + x] = ((sum + win / 2) / win) as u8;
+            let add = (y + radius + 1).min(height - 1);
+            let sub = y.saturating_sub(radius);
+            sum = sum + u32::from(tmp[add * width + x]) - u32::from(tmp[sub * width + x]);
+        }
+    }
+    out
 }
 
 /// 画像セット。frames のキーは正規化済み PNG 名（例: "shime1.png"）。

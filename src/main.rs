@@ -504,6 +504,7 @@ fn handle_draws(
                 pose_anchor,
                 anchor_pos: mascot.anchor(),
                 tint: mascot.tint_rgb(),
+                glow: mascot.tint_glow(),
             },
             &mut moves,
         ) {
