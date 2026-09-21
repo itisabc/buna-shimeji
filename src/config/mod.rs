@@ -18,6 +18,8 @@ use thiserror::Error;
 
 pub mod script;
 
+use crate::tint::{Sweep, TintMode, TintStyle};
+
 use script::Variable;
 
 /// XML 属性値のマップ（属性名 → [`Variable`]。Java の params 相当）。
@@ -42,6 +44,9 @@ pub struct ConfigError {
 #[derive(Debug, Clone, Default)]
 pub struct ActionsConfig {
     pub actions: BTreeMap<String, ActionDef>,
+    /// ルート `<Mascot>` の色づけ宣言（`Tint` / `TintSpeed` / `TintSat` / `TintLum` /
+    /// `TintGlow` / `TintSweep`）。未指定・不正値は既定（色づけなし）。
+    pub tint: TintStyle,
 }
 
 impl ActionsConfig {
@@ -252,7 +257,79 @@ pub fn parse_actions(path: &Path) -> Result<ActionsConfig, ConfigError> {
             actions.insert(name, def);
         }
     }
-    Ok(ActionsConfig { actions })
+    let tint = parse_tint_decl(&cx, root);
+    Ok(ActionsConfig { actions, tint })
+}
+
+/// ルート `<Mascot>` の色づけ宣言を読む（設計: `.tmp/design-gaming-color.md`）。
+///
+/// `Tint` の値は `off` / `rainbow` / `random` / `#RRGGBB`。未知の値と数値のパース失敗は
+/// **警告ログ + 既定値**へフォールバックする（未対応の script 式と同じ方針で、
+/// 起動は止めない）。
+fn parse_tint_decl(cx: &Cx, root: Node) -> TintStyle {
+    let mut style = TintStyle::default();
+    let Some(text) = root.attribute("Tint") else {
+        return style;
+    };
+    style.mode = match text {
+        "off" | "none" => TintMode::Off,
+        "rainbow" | "cycle" => TintMode::Cycle,
+        "random" => TintMode::Random,
+        other => match crate::tint::hex_to_hue(other) {
+            Some(hue) => TintMode::Fixed(hue),
+            None => {
+                log::warn!(
+                    "{}:{}: unknown Tint value `{other}`: treating as off",
+                    cx.file,
+                    cx.line_of(root)
+                );
+                TintMode::Off
+            }
+        },
+    };
+    // 回転速度の既定は「回す宣言のときだけ 150」。固定色・抽選では 0（回さない）
+    let default_rotate = if style.mode == TintMode::Cycle {
+        crate::tint::DEFAULT_ROTATE
+    } else {
+        0.0
+    };
+    style.rotate = tint_num_attr(cx, root, "TintSpeed", default_rotate);
+    style.sat = tint_num_attr(cx, root, "TintSat", crate::tint::DEFAULT_SAT);
+    style.lum = tint_num_attr(cx, root, "TintLum", crate::tint::DEFAULT_LUM);
+    style.glow = tint_num_attr(cx, root, "TintGlow", crate::tint::DEFAULT_GLOW);
+    style.sweep = match root.attribute("TintSweep") {
+        None => Sweep::Within,
+        Some("within") => Sweep::Within,
+        Some("full") => Sweep::Full,
+        Some("steps") => Sweep::Steps,
+        Some(other) => {
+            log::warn!(
+                "{}:{}: unknown TintSweep value `{other}`: using within",
+                cx.file,
+                cx.line_of(root)
+            );
+            Sweep::Within
+        }
+    };
+    style
+}
+
+/// ルート属性の数値。未指定は `default`、パース失敗・非有限は警告 + `default`。
+fn tint_num_attr(cx: &Cx, node: Node, name: &str, default: f32) -> f32 {
+    let Some(text) = node.attribute(name) else {
+        return default;
+    };
+    match text.trim().parse::<f32>() {
+        Ok(value) if value.is_finite() => value,
+        _ => {
+            log::warn!(
+                "{}:{}: invalid {name} `{text}`: using {default}",
+                cx.file,
+                cx.line_of(node)
+            );
+            default
+        }
+    }
 }
 
 /// behaviors.xml をパースする

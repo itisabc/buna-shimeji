@@ -337,7 +337,10 @@ fn fixture_actions() -> ActionsConfig {
             animations: vec![anim(None, false, vec![pose("s.png", (64, 64), (3, 0), 30)])],
         },
     );
-    ActionsConfig { actions: map }
+    ActionsConfig {
+        actions: map,
+        ..Default::default()
+    }
 }
 
 /// "Walk" / "Stare" の BehaviorTable（frequency 100・action は同名 Ref）。
@@ -1213,7 +1216,10 @@ fn scan_fixture_actions() -> ActionsConfig {
             },
         );
     }
-    ActionsConfig { actions: map }
+    ActionsConfig {
+        actions: map,
+        ..Default::default()
+    }
 }
 
 /// scan_fixture_actions の BehaviorTable（必須 4 種 + Idle / Scan / Arrived / Sit・
@@ -1433,7 +1439,10 @@ fn interact_fixture_actions() -> ActionsConfig {
             )],
         },
     );
-    ActionsConfig { actions: map }
+    ActionsConfig {
+        actions: map,
+        ..Default::default()
+    }
 }
 
 /// interact_fixture_actions の BehaviorTable（頻度 0 = 明示指定のみ）。

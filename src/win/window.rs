@@ -99,6 +99,10 @@ pub fn premultiply_rgba_to_argb(rgba: &[u8]) -> Vec<u32> {
 /// 全体コピーを避けられる。
 ///
 /// 契約: `dst.len() == dst_w * dst_h`・`src.len() == src_w * src_h`（違反は assert）。
+///
+/// `tint` は RGB の乗算係数（`None` = 無変化で、従来と 1 バイトも変わらない）。
+/// プレマルチプライドは色成分が線形なので、チャンネル毎の乗算で不変条件
+/// （`r, g, b <= a`）が保たれる（`r*t/255 <= a*t/255 <= a`）。α は変えない。
 pub fn blit_argb_at(
     dst: &mut [u32],
     dst_size: (u32, u32),
@@ -106,6 +110,7 @@ pub fn blit_argb_at(
     src_size: (u32, u32),
     at: (i32, i32),
     flip: bool,
+    tint: Option<[u8; 3]>,
 ) {
     let (dst_w, dst_h) = dst_size;
     let (src_w, src_h) = src_size;
@@ -150,9 +155,23 @@ pub fn blit_argb_at(
             } else {
                 src[src_row + sx as usize]
             };
-            dst[dst_row + dx as usize] = s;
+            dst[dst_row + dx as usize] = match tint {
+                None => s,
+                Some(t) => tint_argb(s, t),
+            };
         }
     }
+}
+
+/// プレマルチプライド 0xAARRGGBB に RGB の乗算係数を掛ける（切り捨て）。
+///
+/// 丸めはプレマルチプライ時（[`premultiply_rgba_to_argb`] の `v * a / 255`）と揃える。
+fn tint_argb(s: u32, t: [u8; 3]) -> u32 {
+    let a = s & 0xFF00_0000;
+    let r = ((s >> 16) & 0xFF) * u32::from(t[0]) / 255;
+    let g = ((s >> 8) & 0xFF) * u32::from(t[1]) / 255;
+    let b = (s & 0xFF) * u32::from(t[2]) / 255;
+    a | (r << 16) | (g << 8) | b
 }
 
 /// style を真の枠なし窓（WS_POPUP）に矯正する純関数。
@@ -401,6 +420,8 @@ impl LayeredWindow {
     /// `pixels` は `width * height` 長のプレマルチプライド 0xAARRGGBB。
     /// DIB 全体はクリアされる（[`blit_argb_at`]）。窓や画面へはまだ反映しない
     /// （反映は [`LayeredWindow::present`]）。
+    ///
+    /// `tint` は RGB の乗算係数（`None` = 無変化）。
     pub fn blit(
         &mut self,
         pixels: &[u32],
@@ -408,6 +429,7 @@ impl LayeredWindow {
         height: u32,
         at: (i32, i32),
         flip: bool,
+        tint: Option<[u8; 3]>,
     ) -> Result<(), WindowError> {
         let buffer = self.buffer.as_mut().ok_or(WindowError::NoBuffer)?;
         let (buf_w, buf_h) = (buffer.width, buffer.height);
@@ -424,6 +446,7 @@ impl LayeredWindow {
             (width, height),
             at,
             flip,
+            tint,
         );
         Ok(())
     }

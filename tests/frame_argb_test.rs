@@ -98,7 +98,7 @@ fn frame_from_rgba_empty_or_zero_width_yields_empty_argb() {
 fn blit_argb_at_same_size_copies_src() {
     let src: Vec<u32> = vec![0x8005_0A0F, 0xFFFF_0000, 0x0000_0000, 0x4010_2030];
     let mut dst = vec![0u32; src.len()];
-    blit_argb_at(&mut dst, (2, 2), &src, (2, 2), (0, 0), false);
+    blit_argb_at(&mut dst, (2, 2), &src, (2, 2), (0, 0), false, None);
     assert_eq!(dst, src, "同寸法 at=(0,0) は完全コピー");
 }
 
@@ -114,7 +114,7 @@ fn blit_argb_at_flip_reverses_each_row_2x2() {
     ];
     let src = reference_argb(&rgba);
     let mut dst = vec![0u32; src.len()];
-    blit_argb_at(&mut dst, (2, 2), &src, (2, 2), (0, 0), true);
+    blit_argb_at(&mut dst, (2, 2), &src, (2, 2), (0, 0), true, None);
 
     // 行0: [B, A] / 行1: [D, C]
     let expected = vec![0xFFFF_0000, 0x8005_0A0F, 0x0000_0000, 0x4010_2030];
@@ -144,6 +144,7 @@ fn blit_argb_at_flip_matches_premultiply_of_flipped_rgba() {
         (width, height),
         (0, 0),
         true,
+        None,
     );
 
     // 参照: 各行を逆順に並べた straight RGBA をプレマルチプライ
@@ -163,7 +164,7 @@ fn blit_argb_at_offset_places_sprite_and_clears_rest() {
     // src = 2×1 [A, B]、dst = 4×2 を非 0 で初期化
     let src = reference_argb(&[10, 20, 30, 128, 255, 0, 0, 255]);
     let mut dst = vec![0xDEAD_BEEFu32; 4 * 2];
-    blit_argb_at(&mut dst, (4, 2), &src, (2, 1), (1, 0), false);
+    blit_argb_at(&mut dst, (4, 2), &src, (2, 1), (1, 0), false, None);
 
     assert_eq!(dst[0], 0, "x=0 はクリア");
     assert_eq!(dst[1], src[0], "src 左が x=1 に配置");
@@ -180,17 +181,17 @@ fn blit_argb_at_clips_out_of_bounds() {
 
     // at=(-1,-1): src(1,1)=4 だけが dst(0,0) に載る
     let mut dst = vec![0u32; 4];
-    blit_argb_at(&mut dst, (2, 2), &src, (2, 2), (-1, -1), false);
+    blit_argb_at(&mut dst, (2, 2), &src, (2, 2), (-1, -1), false, None);
     assert_eq!(dst, vec![4, 0, 0, 0], "左上はみ出しのクリップ");
 
     // at=(1,1): src(0,0)=1 だけが dst(1,1) に載る
     let mut dst2 = vec![0u32; 4];
-    blit_argb_at(&mut dst2, (2, 2), &src, (2, 2), (1, 1), false);
+    blit_argb_at(&mut dst2, (2, 2), &src, (2, 2), (1, 1), false, None);
     assert_eq!(dst2, vec![0, 0, 0, 1], "右下はみ出しのクリップ");
 
     // 完全に外: 全て 0
     let mut dst3 = vec![9u32; 4];
-    blit_argb_at(&mut dst3, (2, 2), &src, (2, 2), (10, 10), false);
+    blit_argb_at(&mut dst3, (2, 2), &src, (2, 2), (10, 10), false, None);
     assert_eq!(dst3, vec![0, 0, 0, 0], "全はみ出しでもクリアはされる");
 }
 
@@ -198,8 +199,75 @@ fn blit_argb_at_clips_out_of_bounds() {
 #[test]
 fn blit_argb_at_empty_src_is_noop() {
     let mut dst = vec![7u32; 4];
-    blit_argb_at(&mut dst, (2, 2), &[], (0, 0), (0, 0), false);
+    blit_argb_at(&mut dst, (2, 2), &[], (0, 0), (0, 0), false, None);
     assert_eq!(dst, vec![7u32; 4], "空 src は no-op（クリアしない）");
+}
+
+/// tint が None なら、従来（tint なし）と 1 バイトも変わらない。
+#[test]
+fn blit_argb_at_tint_none_is_identity() {
+    let rgba = [10, 20, 30, 128, 255, 0, 0, 255, 0, 255, 0, 0, 1, 2, 3, 64];
+    let src = reference_argb(&rgba);
+    let mut dst = vec![0u32; src.len()];
+    blit_argb_at(&mut dst, (4, 1), &src, (4, 1), (0, 0), false, None);
+    assert_eq!(dst, src, "tint なしは src のコピー（従来と同一）");
+}
+
+/// tint はチャンネル毎の乗算（切り捨て `v * t / 255`）。α は変えない。
+#[test]
+fn blit_argb_at_tint_multiplies_channels() {
+    // プレマルチプライド 0xAARRGGBB を直接与える（A=255, R=200, G=100, B=50）
+    let src = vec![0xFF_C8_64_32u32];
+    let mut dst = vec![0u32; 1];
+    blit_argb_at(
+        &mut dst,
+        (1, 1),
+        &src,
+        (1, 1),
+        (0, 0),
+        false,
+        Some([128, 255, 0]),
+    );
+    let out = dst[0];
+    assert_eq!(out & 0xFF00_0000, 0xFF00_0000, "α は変えない");
+    assert_eq!(
+        (out >> 16) & 0xFF,
+        200 * 128 / 255,
+        "R は 128/255 倍（切り捨て）"
+    );
+    assert_eq!((out >> 8) & 0xFF, 100 * 255 / 255, "G は不変");
+    assert_eq!(out & 0xFF, 0, "B は 0 倍");
+}
+
+/// tint 後もプレマルチプライドの不変条件（r, g, b <= a）が保たれる。
+#[test]
+fn blit_argb_at_tint_keeps_premultiplied_invariant() {
+    let src: Vec<u32> = (0..=255u32)
+        .map(|a| {
+            let r = 200 * a / 255;
+            let g = 100 * a / 255;
+            let b = 50 * a / 255;
+            (a << 24) | (r << 16) | (g << 8) | b
+        })
+        .collect();
+    let width = src.len() as u32;
+    let mut dst = vec![0u32; src.len()];
+    blit_argb_at(
+        &mut dst,
+        (width, 1),
+        &src,
+        (width, 1),
+        (0, 0),
+        false,
+        Some([255, 255, 255]),
+    );
+    assert_eq!(dst, src, "全 255 の tint は恒等");
+    for (i, &p) in dst.iter().enumerate() {
+        let a = (p >> 24) & 0xFF;
+        assert!(((p >> 16) & 0xFF) <= a, "R <= A (i={i})");
+        assert!(((p >> 8) & 0xFF) <= a, "G <= A (i={i})");
+        assert!((p & 0xFF) <= a, "B <= A (i={i})");
+    }
 }
 
 // =====================================================================

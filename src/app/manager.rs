@@ -61,6 +61,7 @@ use crate::app::reload::ReloadMaterial;
 use crate::mascot::behavior::{BehaviorError, BehaviorFactory, BehaviorTable};
 use crate::mascot::{AffordanceArrival, EnvironmentView, Mascot, Rng, TransformRequest};
 use crate::render::imageset::ImageSet;
+use crate::tint::TintStyle;
 
 mod behavior_resolver;
 mod menu;
@@ -122,6 +123,9 @@ pub struct Manager {
     /// true のとき保持者が Fall / Thrown へ遷移したら unpin する。
     /// pin 成立時・unpin 時に false へリセットする。
     pin_has_clung: bool,
+    /// set 別の色づけスタイル（Reload が set 宣言から登録・[`Manager::set_tables`] と
+    /// 同じ寿命）。未登録 set は [`TintStyle::default`]（= 色づけなし）。
+    set_tints: HashMap<String, TintStyle>,
 }
 
 impl Manager {
@@ -178,6 +182,7 @@ impl Manager {
             pin_dropped_window_allowed: false,
             pin_pull_off: false,
             pin_has_clung: false,
+            set_tints: HashMap::new(),
         }
     }
 
@@ -321,6 +326,13 @@ impl Manager {
                 Mascot::new(request.image_set_name.as_str(), image_set, request.anchor);
             // Java Breed.java L90: setLookRight(action.getMascot().isLookRight())
             mascot.set_look_right(request.look_right);
+            // set 宣言の tint を注入する（未登録 set は既定 = 色づけなし）。
+            mascot.set_tint_style(
+                self.set_tints
+                    .get(&request.image_set_name)
+                    .copied()
+                    .unwrap_or_default(),
+            );
             let table = table_for(&self.set_tables, &self.table, &request.image_set_name);
             // Java Breed.java L93 / Main.java L497: born behavior 構築（第 4 引数伝播・#8）
             let built = match &request.behavior_name {
@@ -809,8 +821,14 @@ impl Manager {
             // base table 変更なし
             self.dispose_all();
             self.set_tables.clear();
+            self.set_tints.clear();
             return;
         }
+
+        // set 別 tint も宣言から再構築する（stale エントリを残さない・set_tables と同型）。
+        self.set_tints.clear();
+        self.set_tints
+            .extend(materials.iter().map(|m| (m.name.clone(), m.actions.tint)));
 
         // rebind 用の set 名 → 新 Arc 対応（materials は table 抽出で消費するため
         // 先に作る。残存 set も新オブジェクトへ付け替える）
@@ -845,6 +863,9 @@ impl Manager {
                 None => mascot.rebind_image_set(first_name.clone(), Arc::clone(&first_image_set)),
             }
             let set_name = mascot.image_set_name().to_string();
+            // 色は ImageSet ではなく set 宣言に由来するため、付け替え後 set の宣言へ
+            // tint も更新する（旧宣言のスタイルを残さない）。
+            mascot.set_tint_style(self.set_tints.get(&set_name).copied().unwrap_or_default());
 
             // 3. behavior 再構築（判定は「付け替え後 set」の table で行う）
             let table = table_for(&self.set_tables, &self.table, &set_name);

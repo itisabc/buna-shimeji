@@ -37,7 +37,30 @@ fn key() -> ImageKey {
         flip: false,
         width: 128,
         height: 128,
+        tint: None,
     }
+}
+
+/// tint が違えば内容が違う＝描画が必要（色を毎 tick 変えるモードの前提）。
+#[test]
+fn is_unchanged_distinguishes_tint() {
+    let key = key();
+    let tinted = ImageKey {
+        tint: Some([255, 128, 0]),
+        ..key.clone()
+    };
+    assert!(
+        !is_unchanged(Some(&key), Some((984, 984)), &tinted, (984, 984), false),
+        "tint が変われば描画必要"
+    );
+    assert!(
+        !is_unchanged(Some(&tinted), Some((984, 984)), &key, (984, 984), false),
+        "tint が外れたときも描画必要"
+    );
+    assert!(
+        is_unchanged(Some(&key), Some((984, 984)), &key, (984, 984), false),
+        "tint が同じなら不要"
+    );
 }
 
 #[test]

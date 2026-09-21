@@ -503,6 +503,7 @@ fn handle_draws(
                 flip,
                 pose_anchor,
                 anchor_pos: mascot.anchor(),
+                tint: mascot.tint_rgb(),
             },
             &mut moves,
         ) {

@@ -9,5 +9,6 @@ pub mod config;
 pub mod i18n;
 pub mod mascot;
 pub mod render;
+pub mod tint;
 pub mod tray;
 pub mod win;

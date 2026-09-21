@@ -14,6 +14,41 @@
             <element name="ActionList" type="tns:ActionList" minOccurs="0" maxOccurs="unbounded"/>
             <element name="BehaviorList" type="tns:BehaviorList" minOccurs="0" maxOccurs="unbounded"/>
         </sequence>
+        <attribute name="Tint" type="string" use="optional">
+            <annotation>
+                <documentation>
+                    Colour tinting for this image set. "off" (default, no tinting), "rainbow"
+                    (cycle through hues), "random" (pick a colour from the allowed palette for
+                    each mascot), or "#RRGGBB" (fixed hue). Original extension of this project;
+                    other implementations ignore unknown attributes.
+                </documentation>
+            </annotation>
+        </attribute>
+        <attribute name="TintSpeed" type="string" use="optional">
+            <annotation>
+                <documentation>Hue rotation speed in degrees per second. Defaults to 150 when Tint="rainbow", otherwise 0.</documentation>
+            </annotation>
+        </attribute>
+        <attribute name="TintSat" type="string" use="optional">
+            <annotation>
+                <documentation>Saturation percentage used when tinting. Defaults to 100 (vivid).</documentation>
+            </annotation>
+        </attribute>
+        <attribute name="TintLum" type="string" use="optional">
+            <annotation>
+                <documentation>Lightness percentage used when tinting. Defaults to 62.</documentation>
+            </annotation>
+        </attribute>
+        <attribute name="TintGlow" type="string" use="optional">
+            <annotation>
+                <documentation>Strength of the additive glow around the silhouette. 0 disables it. Defaults to 1.</documentation>
+            </annotation>
+        </attribute>
+        <attribute name="TintSweep" type="string" use="optional">
+            <annotation>
+                <documentation>How the hue rotates: "within" (default, smooth rotation inside the allowed colours), "full" (smooth rotation across all hues), or "steps" (switch between allowed colours without blending).</documentation>
+            </annotation>
+        </attribute>
     </complexType>
 
     <complexType name="Information">

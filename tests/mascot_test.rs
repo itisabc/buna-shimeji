@@ -56,6 +56,7 @@ use shimeji::mascot::{
     EnvironmentView, EvalSnapshot, ImageState, Mascot, MascotContext, Rect, Rng,
 };
 use shimeji::render::imageset::{Frame, ImageSet};
+use shimeji::tint::{hsl_to_rgb, TintMode, TintStyle, DEFAULT_LUM, DEFAULT_SAT};
 
 // =====================================================================
 // 共通モック（自己完結。tests/common は使わない・変更しない）
@@ -1808,6 +1809,124 @@ fn apply_pose_moves_anchor_and_sets_image_with_flip_aware_center() {
     apply_pose(&p, &mut m);
     assert_eq!(m.anchor(), (997, 498));
     assert_eq!(m.image().unwrap().center, (28, 48));
+}
+
+// =====================================================================
+// 色づけ（スライス 3）: Mascot の位相と tick での前進
+// =====================================================================
+
+/// `tint_rgb()` は描画サイト（`SpriteDraw::tint`）へ渡す乗算係数。
+/// `TintMode::Off`（既定）の個体は `None` = 従来とバイト同一。
+#[test]
+fn off_tint_yields_no_color_and_fixed_uses_its_hue() {
+    let mut m = mascot_at((500, 500));
+    assert_eq!(
+        m.tint_rgb(),
+        None,
+        "既定（Off）は色づけなし = 描画は従来とバイト同一"
+    );
+
+    m.set_tint_style(TintStyle {
+        mode: TintMode::Fixed(120.0),
+        rotate: 0.0,
+        ..Default::default()
+    });
+    assert_eq!(m.tint_hue(), 120.0, "固定色は宣言した色相をそのまま使う");
+    assert_eq!(
+        m.tint_rgb(),
+        Some(hsl_to_rgb(120.0, DEFAULT_SAT, DEFAULT_LUM)),
+        "固定色は sat/lum を掛けた RGB になる"
+    );
+}
+
+/// 位相の前進は tick に線形（1 tick = 40ms）。paused 中は進まない。
+#[test]
+fn cycle_tint_phase_advances_linearly_with_ticks() {
+    let env = MockEnv::new();
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let mut m = mascot_at((500, 500));
+    m.set_image(Some(on_screen_image()));
+    m.set_tint_style(TintStyle {
+        mode: TintMode::Cycle,
+        rotate: 150.0,
+        ..Default::default()
+    });
+
+    let t = table(vec![single("Walk", 100)]);
+    let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
+        .unwrap();
+
+    let mut rng = FakeRng::new(&[]);
+    m.tick(&env, &t, &mut factory, &mut rng);
+    assert!(
+        (m.tint_hue() - 6.0).abs() < 1e-3,
+        "150°/s × 0.04s = 6°/tick: {}",
+        m.tint_hue()
+    );
+    m.tick(&env, &t, &mut factory, &mut rng);
+    assert!(
+        (m.tint_hue() - 12.0).abs() < 1e-3,
+        "位相は tick 数に線形: {}",
+        m.tint_hue()
+    );
+
+    m.set_paused(true);
+    m.tick(&env, &t, &mut factory, &mut rng);
+    assert!(
+        (m.tint_hue() - 12.0).abs() < 1e-3,
+        "paused 中は位相が進まない: {}",
+        m.tint_hue()
+    );
+}
+
+/// 位相は 360 で wrap する（色相は常に 0..360）。
+#[test]
+fn cycle_tint_phase_wraps_at_360() {
+    let env = MockEnv::new();
+    let log = new_log();
+    let mut factory = MockFactory::new(&log);
+    let mut m = mascot_at((500, 500));
+    m.set_image(Some(on_screen_image()));
+    // 7500°/s × 0.04s = 300°/tick
+    m.set_tint_style(TintStyle {
+        mode: TintMode::Cycle,
+        rotate: 7500.0,
+        ..Default::default()
+    });
+
+    let t = table(vec![single("Walk", 100)]);
+    let mut rng = FakeRng::new(&[]);
+    let runner = t
+        .build_behavior("Walk", &mut m, &env, &mut factory, &mut rng)
+        .unwrap();
+    m.set_behavior(Some(runner), &env, &t, &mut factory, &mut rng)
+        .unwrap();
+
+    let mut rng = FakeRng::new(&[]);
+    m.tick(&env, &t, &mut factory, &mut rng);
+    assert!((m.tint_hue() - 300.0).abs() < 1e-2, "{}", m.tint_hue());
+    m.tick(&env, &t, &mut factory, &mut rng);
+    assert!(
+        (m.tint_hue() - 240.0).abs() < 1e-2,
+        "600° → 240° へ wrap: {}",
+        m.tint_hue()
+    );
+    m.tick(&env, &t, &mut factory, &mut rng);
+    assert!(
+        (m.tint_hue() - 180.0).abs() < 1e-2,
+        "540° → 180° へ wrap: {}",
+        m.tint_hue()
+    );
+    assert!(
+        (0.0..360.0).contains(&m.tint_hue()),
+        "位相は常に 0..360: {}",
+        m.tint_hue()
+    );
 }
 
 #[test]

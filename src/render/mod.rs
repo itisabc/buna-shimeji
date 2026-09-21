@@ -43,14 +43,17 @@ use tao::window::Window;
 use crate::render::imageset::Frame;
 use crate::win::window::{LayeredWindow, MoveBatch, WindowError};
 
-/// 最後に描画した画像を識別するキー（image_ref + flip + 寸法の同一性のみ。
-/// ピクセル内容は比較しない — 同一 image_ref のフレーム内容は実行中に不変）。
+/// 最後に描画した画像を識別するキー（image_ref + flip + 寸法 + tint の同一性のみ。
+/// ピクセル内容は比較しない — 同一 image_ref のフレーム内容は実行中に不変で、
+/// 色づけは描画のたびに tint を掛けて作る）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageKey {
     pub image_ref: String,
     pub flip: bool,
     pub width: u32,
     pub height: u32,
+    /// 色づけの乗算係数（`None` = 無変化）。色が変われば内容も変わるので同一性に含める。
+    pub tint: Option<[u8; 3]>,
 }
 
 /// [`MascotView::stage`] へ渡す sprite の描画パラメータ（引数過多を避ける束ね）。
@@ -63,6 +66,8 @@ pub struct SpriteDraw<'a> {
     pub pose_anchor: (i32, i32),
     /// アンカー点のスクリーン座標。
     pub anchor_pos: (i32, i32),
+    /// 色づけの乗算係数（`None` = 無変化＝元画像のまま）。
+    pub tint: Option<[u8; 3]>,
 }
 
 /// flip 時の水平描画オフセット（Java ImagePairs.java L85:
@@ -192,6 +197,7 @@ impl MascotView {
             flip: sprite.flip,
             width: frame.width,
             height: frame.height,
+            tint: sprite.tint,
         };
         // 内容キーの比較（位置は見ない）。移動だけの tick で ULW を省く判定に使う。
         let content_changed = self.last_image.as_ref() != Some(&key);
@@ -209,8 +215,14 @@ impl MascotView {
         moves.add(self.window.hwnd(), origin.0, origin.1);
         if content_changed || size_drift {
             // 内容を DIB に用意し、ULW は flush 後にまとめて送る（位置は窓 API が担う）。
-            self.window
-                .blit(&frame.argb, frame.width, frame.height, (0, 0), sprite.flip)?;
+            self.window.blit(
+                &frame.argb,
+                frame.width,
+                frame.height,
+                (0, 0),
+                sprite.flip,
+                sprite.tint,
+            )?;
         }
         // 予約と状態更新（`last_*`）は [`MascotView::commit`] の成功時に確定する。
         self.pending = Some(PendingDraw {

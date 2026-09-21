@@ -102,6 +102,7 @@ use shimeji::mascot::behavior::{
 };
 use shimeji::mascot::{Mascot, Rect, Rng};
 use shimeji::render::imageset::{Frame, ImageSet};
+use shimeji::tint::{TintMode, TintStyle};
 
 // =====================================================================
 // 合成データヘルパ（自己完結）
@@ -423,6 +424,25 @@ fn material(name: &str, image_set: Arc<ImageSet>, entries: Vec<BehaviorEntry>) -
         table: table(entries),
         // manager 側テストは action 定義集合を使わない（空集合）
         actions: Arc::new(ActionsConfig::default()),
+        disabled_animations: Vec::new(),
+    }
+}
+
+/// tint 宣言付きの ReloadMaterial（スライス 3: set 別 tint の注入検証用）。
+fn material_with_tint(
+    name: &str,
+    image_set: Arc<ImageSet>,
+    entries: Vec<BehaviorEntry>,
+    tint: TintStyle,
+) -> ReloadMaterial {
+    ReloadMaterial {
+        name: name.to_string(),
+        image_set,
+        table: table(entries),
+        actions: Arc::new(ActionsConfig {
+            tint,
+            ..Default::default()
+        }),
         disabled_animations: Vec::new(),
     }
 }
@@ -1433,4 +1453,113 @@ fn manager_reload_gives_behavior_to_behaviorless_mascot() {
     assert_eq!(a.frame_dims, Some((16, 16)));
     assert!(!a.remove_pending, "存続する（dispose されない）");
     assert_eq!(manager.count(), 1);
+}
+
+// =====================================================================
+// スライス 3: set 別 tint（reload が登録 → spawn / 存続個体へ注入）
+// =====================================================================
+
+/// reload は set 宣言の tint を Manager に登録し、spawn する個体へその set の
+/// tint を注入する。Off の set（宣言なし）は色なしのまま = 既存 set は影響を受けない。
+#[test]
+fn manager_reload_injects_per_set_tint_into_spawned_mascots() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        "SetB" => Some(image_set_with("SetB", "b.png", 8, 8)),
+        _ => None,
+    });
+
+    let cycle = TintStyle {
+        mode: TintMode::Cycle,
+        rotate: 150.0,
+        ..Default::default()
+    };
+    manager.reload(vec![
+        material_with_tint(
+            "SetA",
+            image_set_with("SetA", "a.png", 8, 8),
+            vec![row("Walk", 100)],
+            cycle,
+        ),
+        material_with_tint(
+            "SetB",
+            image_set_with("SetB", "b.png", 8, 8),
+            vec![row("Walk", 100)],
+            TintStyle::default(),
+        ),
+    ]);
+
+    manager.request_spawn("SetA");
+    manager.request_spawn("SetB");
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 2);
+
+    // apply_all 経由（公開 API）で set ごとの色を観測する。位相の線形前進・wrap は
+    // mascot_test が直接検証するため、ここでは「set 宣言が個体へ届くこと」を見る。
+    let mut tints = Vec::new();
+    manager.apply_all(|m| {
+        tints.push((m.image_set_name().to_string(), m.tint_rgb(), m.tint_hue()));
+    });
+    let tint_of = |tints: &[(String, Option<[u8; 3]>, f32)], set: &str| -> (Option<[u8; 3]>, f32) {
+        tints
+            .iter()
+            .find(|(name, _, _)| name.as_str() == set)
+            .map(|(_, rgb, hue)| (*rgb, *hue))
+            .unwrap_or_else(|| panic!("set {set} の mascot が居ない"))
+    };
+
+    let (a_rgb, a_hue) = tint_of(&tints, "SetA");
+    assert!(a_rgb.is_some(), "宣言のある set は色づけされる");
+    assert!(
+        (a_hue - 6.0).abs() < 1e-3,
+        "spawn と同一 tick で 150°/s × 0.04s = 6° 進む: {a_hue}"
+    );
+
+    let (b_rgb, _) = tint_of(&tints, "SetB");
+    assert_eq!(b_rgb, None, "宣言の無い set は色なし = 従来とバイト同一");
+}
+
+/// reload は存続する個体の tint も「付け替え後 set」の宣言へ更新する
+/// （色は ImageSet ではなく set 宣言に由来するため、旧宣言を残さない）。
+#[test]
+fn manager_reload_updates_persisting_mascot_tint() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_behavior_table("SetA", table(vec![row("Walk", 100)]));
+    manager.add(mascot_of_set("SetA", (10, 500)));
+    manager.tick(Instant::now());
+
+    let mut before = None;
+    manager.apply_all(|m| before = Some(m.tint_rgb()));
+    assert_eq!(before.flatten(), None, "既定は色なし");
+
+    manager.reload(vec![material_with_tint(
+        "SetA",
+        image_set_with("SetA", "a.png", 8, 8),
+        vec![row("Walk", 100)],
+        TintStyle {
+            mode: TintMode::Cycle,
+            rotate: 150.0,
+            ..Default::default()
+        },
+    )]);
+
+    let mut after = None;
+    manager.apply_all(|m| after = Some(m.tint_rgb()));
+    assert!(
+        after.flatten().is_some(),
+        "reload 後の set 宣言の色が入る（旧 Off を残さない）"
+    );
 }

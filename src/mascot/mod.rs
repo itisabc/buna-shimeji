@@ -36,10 +36,14 @@ use std::sync::Arc;
 
 use crate::config::script::{EvalContext, Variables};
 use crate::render::imageset::ImageSet;
+use crate::tint::{hsl_to_rgb, TintMode, TintStyle};
 use behavior::{BehaviorError, BehaviorFactory, BehaviorRunner, BehaviorTable};
 use env::{
     is_env_path, resolve_env_is_on, resolve_env_path, AreaSlot, AreaState, CursorState, EnvValue,
 };
+
+/// 1 tick の秒数（40ms）。色相の前進量 = `TintStyle::rotate` × この値。
+const TICK_SECONDS: f32 = 0.04;
 
 /// 矩形（Java `Area` / `Rectangle` 相当の最小セット。right/bottom は含まない）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -443,6 +447,10 @@ pub struct Mascot {
     /// action は resolver / 他 set の table に触れないため要求を積む
     /// （Java `Transform.transform` L44-54 相当・意図的差異）。
     transform_request: Option<TransformRequest>,
+    /// set 宣言で決まる色づけの見せ方（`TintStyle::default()` = 色づけなし）。
+    tint: TintStyle,
+    /// 色相の位相（度・0..360）。`rotate > 0` のとき tick ごとに進む。
+    tint_hue: f32,
 }
 
 impl Mascot {
@@ -477,6 +485,8 @@ impl Mascot {
             pinned_window: None,
             affordance_arrival: None,
             transform_request: None,
+            tint: TintStyle::default(),
+            tint_hue: 0.0,
         }
     }
 
@@ -493,6 +503,12 @@ impl Mascot {
     ) {
         if !self.is_animating() {
             return;
+        }
+        // 色相の位相を進める（1 tick = 40ms）。rotate == 0 の個体は静止色なので
+        // needs_repaint も立てない（従来どおり画像変化時のみ再描画）。
+        if self.tint.rotate != 0.0 {
+            self.tint_hue = (self.tint_hue + self.tint.rotate * TICK_SECONDS).rem_euclid(360.0);
+            self.needs_repaint = true;
         }
         // take/put-back: next 内の遷移は self.behavior を直接差し替えるため、
         // 遷移済みなら take した古い runner は破棄する。
@@ -731,6 +747,29 @@ impl Mascot {
     /// 経路の遮断用）。
     pub fn set_needs_repaint(&mut self, needs_repaint: bool) {
         self.needs_repaint = needs_repaint;
+    }
+
+    /// set 宣言の色づけスタイルを設定する（Manager が spawn / Reload 時に注入）。
+    /// `TintMode::Fixed` は宣言色相を位相の初期値にする。
+    pub fn set_tint_style(&mut self, tint: TintStyle) {
+        if let TintMode::Fixed(hue) = tint.mode {
+            self.tint_hue = hue;
+        }
+        self.tint = tint;
+    }
+
+    /// 現在の色相の位相（度・0..360）。
+    pub fn tint_hue(&self) -> f32 {
+        self.tint_hue
+    }
+
+    /// この個体の色（描画の乗算係数）。`None` = 色づけなし（[`TintMode::Off`]）で、
+    /// 描画サイトが [`crate::render::SpriteDraw::tint`] へそのまま渡す。
+    pub fn tint_rgb(&self) -> Option<[u8; 3]> {
+        match self.tint.mode {
+            TintMode::Off => None,
+            _ => Some(hsl_to_rgb(self.tint_hue, self.tint.sat, self.tint.lum)),
+        }
     }
 
     /// リソース解放 + Manager からの削除依頼（Java dispose L713-730 のうち

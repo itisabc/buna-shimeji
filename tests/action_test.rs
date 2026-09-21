@@ -461,7 +461,10 @@ fn actions_config(entries: Vec<(&str, ActionDef)>) -> ActionsConfig {
     for (name, def) in entries {
         map.insert(name.to_string(), def);
     }
-    ActionsConfig { actions: map }
+    ActionsConfig {
+        actions: map,
+        ..Default::default()
+    }
 }
 
 fn single_table(name: &str, frequency: i32) -> BehaviorTable {

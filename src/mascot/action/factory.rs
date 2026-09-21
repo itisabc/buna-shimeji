@@ -91,6 +91,7 @@ impl XmlBehaviorFactory {
             default: default.unwrap_or_else(|| {
                 Arc::new(ActionsConfig {
                     actions: BTreeMap::new(),
+                    tint: crate::tint::TintStyle::default(),
                 })
             }),
             current: None,
