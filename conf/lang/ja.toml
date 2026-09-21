@@ -1,6 +1,6 @@
 # 日本語 UI 辞書（出荷同梱・外部ファイル）。
 # フラット `key = "値"` TOML。UI キーは Java language.properties 準拠。
-# Behavior 名は conf/behaviors.xml と一致（.tmp/localization-table.md §4 が訳の正本）。
+# Behavior 名は conf/behaviors.xml と一致（docs/plans/done/localization-table.md §4 が訳の正本）。
 
 # --- UI キー（UiKey） ---
 CallShimeji = "しめじを呼ぶ"

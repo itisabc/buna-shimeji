@@ -261,7 +261,7 @@ pub fn parse_actions(path: &Path) -> Result<ActionsConfig, ConfigError> {
     Ok(ActionsConfig { actions, tint })
 }
 
-/// ルート `<Mascot>` の色づけ宣言を読む（設計: `.tmp/design-gaming-color.md`）。
+/// ルート `<Mascot>` の色づけ宣言を読む（設計: `docs/plans/design-gaming-color.md`）。
 ///
 /// `Tint` の値は `off` / `rainbow` / `random` / `#RRGGBB`。未知の値と数値のパース失敗は
 /// **警告ログ + 既定値**へフォールバックする（未対応の script 式と同じ方針で、

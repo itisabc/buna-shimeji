@@ -1,7 +1,7 @@
 //! ルート `<Mascot>` の色づけ宣言（`Tint` / `TintSpeed` / `TintSat` / `TintLum` /
 //! `TintGlow` / `TintSweep`）のパースと、色の変換のテスト。
 //!
-//! 設計: `.tmp/design-gaming-color.md`（ローカル専用）
+//! 設計: `docs/plans/design-gaming-color.md`（ローカル専用）
 
 use std::path::PathBuf;
 

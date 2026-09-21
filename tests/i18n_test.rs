@@ -1,8 +1,8 @@
 //! T2: i18n モジュール + 辞書整合 + フォールバック契約テスト（RED → GREEN）。
 //!
-//! 設計正本: `.tmp/i18n-design.md` §1（API）/ §2（settings）/ §3（キー）/
+//! 設計正本: `docs/plans/done/i18n-design.md` §1（API）/ §2（settings）/ §3（キー）/
 //! §6.2（本テストが満たす契約）/ §8（エッジケース）。
-//! Java キー対応: `.tmp/localization-table.md` §1・§3・§4。
+//! Java キー対応: `docs/plans/done/localization-table.md` §1・§3・§4。
 //!
 //! coder が実装する公開 API（本テストが固定する契約）:
 //!

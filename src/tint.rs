@@ -8,7 +8,7 @@
 //! ```
 //!
 //! 色は「基準色相 + 回転速度」で表し、ゲーミング / パステル の違いは [`TintStyle`] の
-//! 数値の組でしかない（設計: `.tmp/design-gaming-color.md`）。
+//! 数値の組でしかない（設計: `docs/plans/design-gaming-color.md`）。
 //! 個体が持つのは位相だけ（[`crate::mascot::Mascot`] 側）で、速度・彩度・明度・グロー・
 //! 回転のしかたは set 単位のこの型が持つ。
 
