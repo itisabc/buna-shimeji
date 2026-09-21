@@ -5,6 +5,9 @@
 /.tmp
 /handoff.json
 
+# AI エージェントの記録（設計ノート・Backlog・引き継ぎ。ローカル専用）
+/docs
+
 # 実行時に自動生成されるユーザー固有設定（言語・トグル・対象ウィンドウ）
 /conf/settings.toml
 
