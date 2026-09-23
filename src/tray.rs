@@ -34,18 +34,18 @@
 //!   `Environment::set_behavior_enabled`（#9b）・settings 復元の全体注入は
 //!   `Environment::set_disabled_behaviors`（#9c・別経路）
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
-use crate::app::manager::{BehaviorMenu, Manager};
+use crate::app::manager::{AllowedColorSets, BehaviorMenu, Manager};
 use crate::app::reload::load_materials;
 use crate::i18n::{Lang, UiKey, DEFAULT_LANGUAGE};
-use crate::tint::{ColorSet, PALETTE_HUES, PALETTE_LEN};
+use crate::tint::{id_allowed, Palette, PaletteColor};
 
 // =====================================================================
 // トレイアイコン: Java Main.getIcon()（.tmp/java-ref/Main.java L764-792）
@@ -268,48 +268,32 @@ pub struct Settings {
 }
 
 /// `[tint]` セクション（色づけ＝Gaming Shimeji のユーザー設定）。
-#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// 出現を許可する色は **set ごと**に持つ（`[tint.sets.<set>] colors`）。
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TintSettings {
-    /// 出現を許可する色（[`ColorSet`]）。この集合が「お気に入り」であり、同時に
-    /// ランダム出現の抽選母集団になる。
+    /// set 名 → 許可する色（`[tint.sets.<set>] colors`）。**キー欠落 = その set の全色**。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sets: SetColors,
+    /// 旧形式 `[tint] colors = [色相, ...]` の受け皿。
+    /// 旧バージョンの settings.toml を起動エラーにしないため読める形だけ残し、
+    /// **読み込み時に警告して捨てる**（結果は「全色許可」＝キー欠落と同じ）。
+    #[serde(default, rename = "colors", skip_serializing)]
+    pub(crate) legacy_colors: Option<toml::Value>,
+}
+
+/// `[tint.sets.<set>]` セクション（1 set ぶんの許可色）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TintSetSettings {
+    /// 出現を許可する色の `Id`（その set の `<TintPalette>` が定義する）。
     ///
-    /// 値はパレットの色相（度・30° 刻み・色相順）。**キー欠落 = 全 12 色**、
-    /// `colors = []` = 1 色も許可しない。30° 刻みから外れた値は最も近い色へ丸める（警告）。
-    #[serde(
-        default,
-        deserialize_with = "de_color_hues",
-        serialize_with = "ser_color_hues"
-    )]
-    pub colors: ColorSet,
+    /// **キー欠落 = 全色 / `colors = []` = 1 色も許可しない**を区別するために `Option` で持つ。
+    /// パレットに無い id は無視して警告する（作者が id を戻したときのために保存は自己修復しない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colors: Option<BTreeSet<String>>,
 }
 
-/// `[tint] colors` の読み込み。整数（`0`）と小数（`30.0`）のどちらでも受ける。
-fn de_color_hues<'de, D>(deserializer: D) -> Result<ColorSet, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    /// TOML の整数・小数を同じ扱いにするための受け皿。
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Hue {
-        Int(i64),
-        Float(f64),
-    }
-
-    let hues = Vec::<Hue>::deserialize(deserializer)?;
-    Ok(ColorSet::from_hues(hues.into_iter().map(|hue| match hue {
-        Hue::Int(value) => value as f32,
-        Hue::Float(value) => value as f32,
-    })))
-}
-
-/// `[tint] colors` の書き出し。色相（度）を整数・色相順で出す（保存は決定的）。
-fn ser_color_hues<S>(colors: &ColorSet, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    colors.hues().collect::<Vec<u32>>().serialize(serializer)
-}
+/// set 別の許可色（`[tint.sets]`。トレイ / 右クリックの色 UI へ渡す形）。
+pub type SetColors = BTreeMap<String, TintSetSettings>;
 
 // =====================================================================
 // settings.toml の説明コメント
@@ -356,12 +340,13 @@ const IMAGESETS_SCALE_HELP: &str = "\
 /// `[tint]` 見出しの直後へ添える説明と記入例。
 const TINT_HELP: &str = "\
 # --- [tint] 色づけ（Gaming Shimeji）---
-# colors : 出現を許可する色。この集合が「お気に入り」であり、同時にランダム出現の抽選母集団。
-#          色相 30° 刻みの 12 色を度で指定する。キーを書かない（既定）と全 12 色。
-#          0=いちご / 30=みかん / 60=レモン / 90=メロン / 120=マスカット / 150=ミント /
-#          180=ソーダ / 210=そらいろ / 240=ブルーベリー / 270=ぶどう / 300=カシス / 330=もも
-# 記入例: colors = [0, 150, 240]   # いちご・ミント・ブルーベリーだけ出す
-#          30° 刻みでない値は最も近い色に丸める。colors = [] は 1 色も許可しない。
+# 出現を許可する色を set ごとに書く。形式は `[tint.sets.<set>] colors = [\"色 id\", ...]`。
+# 色 id はその set の actions.xml の <TintPalette> が定義する（例: strawberry / mint）。
+# この集合が「お気に入り」であり、同時にランダム出現（Tint=\"random\"）の抽選母集団になる。
+# キーを書かない（既定）とその set の全色を許可する。colors = [] は 1 色も許可しない。
+# 記入例:
+# [tint.sets.Shimeji]
+# colors = [\"strawberry\", \"mint\"]   # いちごとミントだけ出す
 ";
 
 /// `[interactive_windows]` の末尾へ添える説明と記入例。
@@ -387,17 +372,33 @@ fn with_help(mut text: String) -> String {
         ("[allowed]\n", ALLOWED_HELP),
         ("[disabled_behaviors]\n", DISABLED_BEHAVIORS_HELP),
         ("[imagesets.scale]\n", IMAGESETS_SCALE_HELP),
-        ("[tint]\n", TINT_HELP),
     ] {
         if let Some(pos) = text.find(header) {
             text.insert_str(pos + header.len(), help);
         }
+    }
+    // `[tint]` は set ごとの許可色を書くと `[tint.sets.<set>]` に変わる（空のときだけ
+    // `[tint]` が出る）ため、見出しの完全一致ではなく `[tint` で始まる最初の行の後ろへ入れる。
+    if let Some(pos) = first_line_end_with_prefix(&text, "[tint") {
+        text.insert_str(pos, TINT_HELP);
     }
     if !text.ends_with('\n') {
         text.push('\n');
     }
     text.push_str(INTERACTIVE_WINDOWS_HELP);
     text
+}
+
+/// `text` 内で `prefix` で始まる最初の行の**行末**（次の行の先頭）位置。
+fn first_line_end_with_prefix(text: &str, prefix: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if line.starts_with(prefix) {
+            return Some(offset + line.len());
+        }
+        offset += line.len();
+    }
+    None
 }
 
 impl Settings {
@@ -413,7 +414,13 @@ impl Settings {
         }
         let text = std::fs::read_to_string(path)?;
         // 欠落補完は serde default・未知キーは serde が無視する
-        let settings: Settings = toml::from_str(&text)?;
+        let mut settings: Settings = toml::from_str(&text)?;
+        // 旧形式 `[tint] colors`（数値の色相）は読めるが使わない（全色許可 = キー欠落と同じ）
+        if settings.tint.legacy_colors.take().is_some() {
+            log::warn!(
+                "[tint] colors is no longer used: write [tint.sets.<set>] colors with colour ids instead"
+            );
+        }
         settings.validate_scales()?;
         Ok(settings)
     }
@@ -497,9 +504,9 @@ const ALLOWED_MENU_ITEMS: [(AllowedKind, UiKey); 7] = [
 pub enum TrayCommand {
     /// 呼ぶ。`None` = set ランダム選択（「（ランダム）」）/ `Some(set)` = set 指定。
     Spawn(Option<String>),
-    /// 色を指定して呼ぶ（R19）。`hue` はパレットの色相（度・30° 刻み）。
-    /// 指定色の個体は set 宣言の sat / lum / glow / sweep を保ったまま固定色になる。
-    SpawnColored(String, f32),
+    /// 色を指定して呼ぶ（R19）。`(set 名, 色 id)`。id は set の `<TintPalette>` が定義する。
+    /// 指定色の個体は**その色の確定色**になる（[`crate::tint::TintStyle::with_color`]）。
+    SpawnColored(String, String),
     /// Follow Cursor（全員に ChaseMouse 指示）。
     FollowCursor,
     /// Reduce to One（先頭 1 体を残す）。
@@ -516,8 +523,8 @@ pub enum TrayCommand {
     SetAllowed(AllowedKind, bool),
     /// 「出現を許可する色」トグル（スライス 7・R21）。bool は**適用値** =
     /// MenuEvent 受信時の checked（[`TrayCommand::SetAllowed`] と同じ扱い。
-    /// muda の自動トグル後の値をそのまま使う）。`usize` はパレット添字。
-    SetColorAllowed(usize, bool),
+    /// muda の自動トグル後の値をそのまま使う）。`(set 名, 色 id)`。
+    SetColorAllowed(String, String, bool),
     /// 右クリック「この色を出す」（スライス 7・R21）。`usize` はマスコット index。
     /// その個体の現在色を許可集合へ加える（色づけなしの個体は何もしない）。
     AllowColorOf(usize),
@@ -557,71 +564,75 @@ pub struct TrayMenuModel {
     /// Allowed Behaviours の 6 CheckMenuItem（`command_of` の動的変換と
     /// [`TrayMenuModel::sync_allowed`] 用。CheckMenuItem は Rc 共有 Clone）。
     allowed_checks: Vec<(AllowedKind, CheckMenuItem)>,
-    /// 「出現を許可する色」の 12 CheckMenuItem（`command_of` の動的変換と
-    /// [`TrayMenuModel::sync_colors`] 用）。値はパレット添字。
-    color_checks: Vec<(usize, CheckMenuItem)>,
-}
-
-/// パレット添字 → 色名の辞書キー。並びは [`PALETTE_HUES`]（色相 30° 刻み）と一致させる。
-const TINT_COLOR_KEYS: [UiKey; PALETTE_LEN] = [
-    UiKey::TintStrawberry,
-    UiKey::TintTangerine,
-    UiKey::TintLemon,
-    UiKey::TintMelon,
-    UiKey::TintMuscat,
-    UiKey::TintMint,
-    UiKey::TintSoda,
-    UiKey::TintSkyBlue,
-    UiKey::TintBlueberry,
-    UiKey::TintGrape,
-    UiKey::TintCassis,
-    UiKey::TintPeach,
-];
-
-/// パレット添字の色名キー。`index` は [`ColorSet::indices`] の値（常に範囲内）。
-fn color_ui_key(index: usize) -> UiKey {
-    debug_assert!(index < PALETTE_LEN, "palette index out of range: {index}");
-    TINT_COLOR_KEYS[index]
+    /// 「出現を許可する色」の CheckMenuItem（`command_of` の動的変換と
+    /// [`TrayMenuModel::sync_colors`] 用）。値は `(set 名, 色 id)`。
+    color_checks: Vec<(String, String, CheckMenuItem)>,
 }
 
 /// トレイ / 右クリック メニューの構築に渡す set と色の情報（両構築で共用）。
 pub struct MenuInputs<'a> {
     /// 「呼ぶ」に並べる set（辞書順）。
     pub image_sets: &'a [String],
-    /// 色づけ対応 set（宣言 `Tint` が `off` 以外）。ここだけ色 UI を出す（スライス 6c）。
-    pub color_capable: &'a [String],
-    /// 出現を許可する色（`settings.toml` の `[tint] colors`）。
-    pub allowed_colors: &'a ColorSet,
+    /// set 名 → パレット（Reload が登録した宣言。空のパレット = 色なし）。
+    pub palettes: &'a HashMap<String, Palette>,
+    /// set 名 → 許可色（`settings.toml` の `[tint.sets.<set>] colors`。キー欠落 = 全色）。
+    pub allowed: &'a SetColors,
 }
 
 impl<'a> MenuInputs<'a> {
-    /// 3 つの入力をまとめる。
+    /// 2 つの入力をまとめる（色づけ対応 set は [`MenuInputs::palettes`] から導出する）。
     pub fn new(
         image_sets: &'a [String],
-        color_capable: &'a [String],
-        allowed_colors: &'a ColorSet,
+        palettes: &'a HashMap<String, Palette>,
+        allowed: &'a SetColors,
     ) -> Self {
         MenuInputs {
             image_sets,
-            color_capable,
-            allowed_colors,
+            palettes,
+            allowed,
         }
     }
 
-    /// この set が色づけ対応か（色 UI を出すか）。
-    pub fn is_color_capable(&self, set: &str) -> bool {
-        self.color_capable.iter().any(|name| name == set)
+    /// この set の色 UI を出すか（**パレットが非空**のときだけ）。
+    pub fn palette_of(&self, set: &str) -> Option<&'a Palette> {
+        self.palettes.get(set).filter(|palette| !palette.is_empty())
+    }
+
+    /// 色づけ対応 set（パレットが空でない set）が 1 つ以上あるか。
+    pub fn has_colours(&self) -> bool {
+        self.palettes.values().any(|palette| !palette.is_empty())
+    }
+
+    /// その set の色 `id` が許可されているか。
+    pub fn is_allowed(&self, set: &str, id: &str) -> bool {
+        id_allowed(
+            self.allowed
+                .get(set)
+                .and_then(|entry| entry.colors.as_ref()),
+            id,
+        )
+    }
+
+    /// その set の**許可されている色**（パレットの宣言順）。
+    fn allowed_colours<'b>(
+        &'b self,
+        set: &'b str,
+        palette: &'b Palette,
+    ) -> impl Iterator<Item = &'b PaletteColor> + 'b {
+        palette
+            .iter()
+            .filter(move |color| self.is_allowed(set, &color.id))
     }
 }
 
 /// 「呼ぶ」サブメニュー（tray / popup 共通構成・案 1）:
 /// 先頭 [`UiKey::SpawnRandom`] = [`TrayCommand::Spawn`]`(None)` + 各 set のサブメニュー。
 /// set のサブメニューは [`UiKey::SpawnDefault`]（宣言の tint のまま =
-/// [`TrayCommand::Spawn`]`(Some(set))`）に続けて、許可色を色相順に並べる
-/// （[`TrayCommand::SpawnColored`]）。
+/// [`TrayCommand::Spawn`]`(Some(set))`）に続けて、**許可されている色**をパレットの
+/// 宣言順に並べる（[`TrayCommand::SpawnColored`]。ラベルは宣言の `Name`）。
 ///
-/// **色一覧はその set が色づけ対応（[`MenuInputs::is_color_capable`]）で、許可色が 1 つ以上
-/// あるときだけ出す**（宣言 `Tint` の無い set は「（既定）」のみ・スライス 6c）。
+/// **色一覧はその set のパレットが非空で、許可色が 1 つ以上あるときだけ出す**
+/// （パレットを宣言していない set は「（既定）」のみ・許可 0 色のときも同じ）。
 /// サブメニュー名は `label`（tray = `CallShimeji` / popup = `CallAnother`）を辞書で解決する。
 fn build_spawn_submenu(
     inputs: &MenuInputs,
@@ -645,15 +656,20 @@ fn build_spawn_submenu(
         set_menu
             .append(&default)
             .expect("failed to append the (default) menu item");
-        if inputs.is_color_capable(image_set) && !inputs.allowed_colors.is_empty() {
+        let colours: Vec<&PaletteColor> = match inputs.palette_of(image_set) {
+            Some(palette) => inputs.allowed_colours(image_set, palette).collect(),
+            None => Vec::new(),
+        };
+        if !colours.is_empty() {
             set_menu
                 .append(&PredefinedMenuItem::separator())
                 .expect("failed to append the colour separator");
-            for &index in inputs.allowed_colors.indices() {
-                let item = MenuItem::new(lang.text(color_ui_key(index)), true, None);
+            for color in colours {
+                // 色名は作者データ（辞書を通さない・設計 §red-team 反映 10）
+                let item = MenuItem::new(color.name.clone(), true, None);
                 commands.insert(
                     item.id().clone(),
-                    TrayCommand::SpawnColored(image_set.clone(), PALETTE_HUES[index] as f32),
+                    TrayCommand::SpawnColored(image_set.clone(), color.id.clone()),
                 );
                 set_menu
                     .append(&item)
@@ -710,27 +726,36 @@ impl TrayMenuModel {
                 .append(&check)
                 .expect("failed to append a toggle menu item");
         }
-        // 6. 出現を許可する色（12 CheckMenuItem・checked = 許可色の含有）。
-        //    色づけ対応 set が 1 つも無ければ色機能自体をメニューに出さない（スライス 6c）
+        // 6. 出現を許可する色（set ごとのサブメニュー・checked = 許可色の含有）。
+        //    パレットを持つ set が 1 つも無ければ色機能自体をメニューに出さない
         let mut color_checks = Vec::new();
-        let colors_menu = if inputs.color_capable.is_empty() {
-            None
-        } else {
+        let colors_menu = if inputs.has_colours() {
             let colors_menu = Submenu::new(lang.text(UiKey::AllowedColors), true);
-            color_checks.reserve(PALETTE_LEN);
-            for index in 0..PALETTE_LEN {
-                let check = CheckMenuItem::new(
-                    lang.text(color_ui_key(index)),
-                    true,
-                    inputs.allowed_colors.contains(index),
-                    None,
-                );
-                color_checks.push((index, check.clone()));
+            for image_set in inputs.image_sets {
+                let Some(palette) = inputs.palette_of(image_set) else {
+                    continue;
+                };
+                let set_menu = Submenu::new(image_set, true);
+                for color in palette.iter() {
+                    // ラベルは宣言の `Name`（辞書を通さない・設計 §red-team 反映 10）
+                    let check = CheckMenuItem::new(
+                        color.name.clone(),
+                        true,
+                        inputs.is_allowed(image_set, &color.id),
+                        None,
+                    );
+                    color_checks.push((image_set.clone(), color.id.clone(), check.clone()));
+                    set_menu
+                        .append(&check)
+                        .expect("failed to append a colour toggle item");
+                }
                 colors_menu
-                    .append(&check)
-                    .expect("failed to append a colour toggle item");
+                    .append(&set_menu)
+                    .expect("failed to append a set colour submenu");
             }
             Some(colors_menu)
+        } else {
+            None
         };
         // 7 / 10. separator
         let separator1 = PredefinedMenuItem::separator();
@@ -855,9 +880,13 @@ impl TrayMenuModel {
                 return Some(TrayCommand::SetAllowed(*kind, check.is_checked()));
             }
         }
-        for (index, check) in &self.color_checks {
+        for (set, colour_id, check) in &self.color_checks {
             if check.id() == id {
-                return Some(TrayCommand::SetColorAllowed(*index, check.is_checked()));
+                return Some(TrayCommand::SetColorAllowed(
+                    set.clone(),
+                    colour_id.clone(),
+                    check.is_checked(),
+                ));
             }
         }
         self.commands.get(id).cloned()
@@ -874,11 +903,14 @@ impl TrayMenuModel {
         }
     }
 
-    /// 12 色の CheckMenuItem の checked を `colors` に同期する（[`TrayCommand::SetColorAllowed`] /
+    /// 色の CheckMenuItem の checked を set 別の許可集合へ同期する（[`TrayCommand::SetColorAllowed`] /
     /// [`TrayCommand::AllowColorOf`] 適用後に #10 が呼ぶ・[`TrayMenuModel::sync_allowed`] と同型）。
-    pub fn sync_colors(&self, colors: &ColorSet) {
-        for (index, check) in &self.color_checks {
-            check.set_checked(colors.contains(*index));
+    pub fn sync_colors(&self, allowed: &SetColors) {
+        for (set, id, check) in &self.color_checks {
+            check.set_checked(id_allowed(
+                allowed.get(set).and_then(|entry| entry.colors.as_ref()),
+                id,
+            ));
         }
     }
 }
@@ -897,14 +929,79 @@ fn apply_allowed(settings: &mut Settings, kind: AllowedKind, value: bool) {
     }
 }
 
-/// `[tint] colors` の変更を settings.toml へ即時保存し、Manager の抽選母集団へ反映する
+/// 許可色の変更を settings.toml へ即時保存し、Manager の抽選母集団へ反映する
 /// （[`TrayCommand::SetColorAllowed`] / [`TrayCommand::AllowColorOf`] の共通経路）。
 /// 保存失敗でもメモリ上の適用は続行する（panic しない・[`TrayCommand::SetAllowed`] と同じ方針）。
 fn persist_allowed_colors(manager: &mut Manager, settings: &Settings, context: &TrayContext) {
     if let Err(err) = Settings::save(&context.conf_dir.join("settings.toml"), settings) {
         log::error!("failed to save settings.toml: {err}");
     }
-    manager.set_allowed_colors(settings.tint.colors.clone());
+    manager.set_allowed_colors(allowed_color_sets(&settings.tint.sets));
+}
+
+/// settings の許可色（`Option` を構造体で包んだ形）を Manager の実行時表現へ落とす
+/// （起動時の注入とトレイでの変更反映で共用）。
+pub fn allowed_color_sets(sets: &SetColors) -> AllowedColorSets {
+    sets.iter()
+        .map(|(set, entry)| (set.clone(), entry.colors.clone()))
+        .collect()
+}
+
+/// `[tint.sets.<set>] colors` を 1 色ぶん書き換える。
+///
+/// **キー欠落 = 全色**なので、外すときは全色を明示リストへ展開してから外す（絞る操作が
+/// 設定に現れる）。逆に加えるときは、全色のままなら何もしない（既に許可されている）。
+/// メニューを出していない set（パレットが無い）は触らない。
+fn set_colour_allowed(
+    manager: &Manager,
+    settings: &mut Settings,
+    set: &str,
+    id: &str,
+    allowed: bool,
+) {
+    let Some(palette) = manager
+        .palettes()
+        .get(set)
+        .filter(|palette| !palette.is_empty())
+    else {
+        log::warn!("ignoring colour toggle for `{set}`: it has no palette");
+        return;
+    };
+    // 加えるときは、明示リストがあるときだけ足す（キー欠落 = 全色のままなら既に許可済みで、
+    // 空のセクションを書き足さない）。
+    if allowed {
+        if let Some(colors) = settings
+            .tint
+            .sets
+            .get_mut(set)
+            .and_then(|entry| entry.colors.as_mut())
+        {
+            colors.insert(id.to_string());
+        }
+        return;
+    }
+    // 外すときは全色を明示リストへ展開してから外す（絞る操作が設定に現れる）。
+    let entry = settings.tint.sets.entry(set.to_string()).or_default();
+    let colors = entry.colors.get_or_insert_with(|| {
+        palette
+            .iter()
+            .map(|color| color.id.clone())
+            .collect::<BTreeSet<_>>()
+    });
+    colors.remove(id);
+}
+
+/// 個体の現在色を許可集合へ加える（R21 の「この色を出す」）。
+///
+/// 個体 → パレット色の写像は [`Manager::color_id_at`]（完全一致 → 最近色）。
+/// 写せない個体（色づけなし / パレットが無い）は警告して何もしない。
+fn allow_colour_of(manager: &Manager, settings: &mut Settings, index: usize) -> bool {
+    let Some((set, id)) = manager.color_id_at(index) else {
+        log::warn!("allow colour: mascot {index} has no palette colour to allow; ignoring");
+        return false;
+    };
+    set_colour_allowed(manager, settings, &set, &id, true);
+    true
 }
 
 /// トレイ / ポップアップ コマンドを適用する（#10 が MenuEvent 受信後に呼ぶ）。
@@ -917,7 +1014,7 @@ fn persist_allowed_colors(manager: &mut Manager, settings: &Settings, context: &
 /// - SetAllowed: settings 更新 → `conf_dir/settings.toml` への**即時保存**
 ///   （Err → log で続行・panic しない）→ Environment passthrough（`Sounds` は #36 で
 ///   `Manager::set_sounds_enabled` へ実配線）
-/// - SetColorAllowed / AllowColorOf: `[tint] colors` 更新 → [`persist_allowed_colors`]
+/// - SetColorAllowed / AllowColorOf: `[tint.sets.<set>] colors` 更新 → [`persist_allowed_colors`]
 ///   （settings.toml へ保存 + 抽選母集団 `Manager::set_allowed_colors` の反映）
 /// - TogglePauseAll / DismissAll: 全員操作・exit は次 tick の
 ///   [`Manager::should_exit`] 経由（apply 内では exit 操作しない）
@@ -934,7 +1031,9 @@ pub fn apply_tray_command(
     match command {
         TrayCommand::Spawn(Some(image_set)) => manager.request_spawn(&image_set),
         TrayCommand::Spawn(None) => manager.request_spawn_random(&context.image_sets),
-        TrayCommand::SpawnColored(image_set, hue) => manager.request_spawn_colored(&image_set, hue),
+        TrayCommand::SpawnColored(image_set, colour_id) => {
+            manager.request_spawn_colored(&image_set, &colour_id)
+        }
         TrayCommand::FollowCursor => manager.set_behavior_all("ChaseMouse"),
         TrayCommand::ReduceToOne => manager.remain_one(),
         TrayCommand::RestoreWindows => {
@@ -961,18 +1060,15 @@ pub fn apply_tray_command(
                 AllowedKind::PinDroppedWindow => manager.set_pin_dropped_window_allowed(value),
             }
         }
-        TrayCommand::SetColorAllowed(index, allowed) => {
-            settings.tint.colors.set_index(index, allowed);
+        TrayCommand::SetColorAllowed(set, colour_id, allowed) => {
+            set_colour_allowed(manager, settings, &set, &colour_id, allowed);
             persist_allowed_colors(manager, settings, context);
         }
-        TrayCommand::AllowColorOf(mascot_index) => match manager.tint_hue_at(mascot_index) {
-            Some(hue) => {
-                settings.tint.colors.insert_hue(hue);
+        TrayCommand::AllowColorOf(mascot_index) => {
+            if allow_colour_of(manager, settings, mascot_index) {
                 persist_allowed_colors(manager, settings, context);
             }
-            // 色づけなし（TintMode::Off）の個体は色を持たない（色相 0 を誤解釈しない）
-            None => log::warn!("allow colour: mascot {mascot_index} has no tint; ignoring"),
-        },
+        }
         TrayCommand::TogglePauseAll => manager.toggle_pause_all(),
         TrayCommand::DismissAll => {
             manager.dispose_all();

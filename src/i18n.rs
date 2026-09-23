@@ -50,19 +50,6 @@ pub enum UiKey {
     AllowedColors,
     /// 右クリックの「この色を出す」（R21）。
     AllowThisColor,
-    // パレット 12 色の表示名（色相 30° 刻みの並び = `tint::PALETTE_HUES` の順）。
-    TintStrawberry,
-    TintTangerine,
-    TintLemon,
-    TintMelon,
-    TintMuscat,
-    TintMint,
-    TintSoda,
-    TintSkyBlue,
-    TintBlueberry,
-    TintGrape,
-    TintCassis,
-    TintPeach,
 }
 
 impl UiKey {
@@ -92,18 +79,6 @@ impl UiKey {
         UiKey::SpawnDefault,
         UiKey::AllowedColors,
         UiKey::AllowThisColor,
-        UiKey::TintStrawberry,
-        UiKey::TintTangerine,
-        UiKey::TintLemon,
-        UiKey::TintMelon,
-        UiKey::TintMuscat,
-        UiKey::TintMint,
-        UiKey::TintSoda,
-        UiKey::TintSkyBlue,
-        UiKey::TintBlueberry,
-        UiKey::TintGrape,
-        UiKey::TintCassis,
-        UiKey::TintPeach,
     ];
 
     /// 辞書キー文字列（= Java `language.properties` のキー。Rust 独自キーは同名新規）。
@@ -133,18 +108,6 @@ impl UiKey {
             UiKey::SpawnDefault => "SpawnDefault",
             UiKey::AllowedColors => "AllowedColors",
             UiKey::AllowThisColor => "AllowThisColor",
-            UiKey::TintStrawberry => "TintStrawberry",
-            UiKey::TintTangerine => "TintTangerine",
-            UiKey::TintLemon => "TintLemon",
-            UiKey::TintMelon => "TintMelon",
-            UiKey::TintMuscat => "TintMuscat",
-            UiKey::TintMint => "TintMint",
-            UiKey::TintSoda => "TintSoda",
-            UiKey::TintSkyBlue => "TintSkyBlue",
-            UiKey::TintBlueberry => "TintBlueberry",
-            UiKey::TintGrape => "TintGrape",
-            UiKey::TintCassis => "TintCassis",
-            UiKey::TintPeach => "TintPeach",
         }
     }
 }

@@ -1,21 +1,20 @@
-//! ルート `<Mascot>` の色づけ宣言（`Tint` / `TintSpeed` / `TintSat` / `TintLum` /
-//! `TintGlow` / `TintSweep`）のパースと、色の変換のテスト。
+//! ルート `<Mascot>` の色づけ宣言（`Tint` / `TintSpeed` / `TintStart` / `TintSat` /
+//! `TintLum` / `TintGlow` と `<TintPalette>`）のパースと、色の変換のテスト。
 //!
 //! 設計: `docs/plans/design-gaming-color.md`（ローカル専用）
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use shimeji::config::parse_actions;
-use shimeji::tint::{
-    hex_to_hue, hsl_to_rgb, hue_to_palette_index, palette_hue, ColorSet, Sweep, TintMode,
-    TintStyle, PALETTE_HUES, PALETTE_LEN,
-};
+use shimeji::tint::{hsl_to_rgb, id_allowed, Palette, PaletteColor, TintMode, TintStyle};
 
-fn temp_actions(tag: &str, root_attrs: &str) -> PathBuf {
+/// `<Mascot>` 直下に `body` を挟んだ一時 actions.xml を書く（`<TintPalette>` 用）。
+fn temp_actions_with(tag: &str, root_attrs: &str, body: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!("shimeji_tint_{}_{tag}.xml", std::process::id()));
     let content = format!(
-        "<Mascot xmlns=\"http://www.group-finity.com/Mascot\"{root_attrs}>\n\
+        "<Mascot xmlns=\"http://www.group-finity.com/Mascot\"{root_attrs}>\n{body}\
          <ActionList>\n\
          <Action Name=\"Stand\" Type=\"Stay\" BorderType=\"Floor\">\n\
          <Animation><Pose Image=\"/shime1.png\" ImageAnchor=\"64,128\" Velocity=\"0,0\" Duration=\"10\"/></Animation>\n\
@@ -27,11 +26,22 @@ fn temp_actions(tag: &str, root_attrs: &str) -> PathBuf {
     path
 }
 
+fn temp_actions(tag: &str, root_attrs: &str) -> PathBuf {
+    temp_actions_with(tag, root_attrs, "")
+}
+
 fn tint_of(tag: &str, root_attrs: &str) -> TintStyle {
     let path = temp_actions(tag, root_attrs);
     parse_actions(&path)
         .unwrap_or_else(|e| panic!("parse failed: {e}"))
         .tint
+}
+
+fn palette_of(tag: &str, root_attrs: &str, body: &str) -> Palette {
+    let path = temp_actions_with(tag, root_attrs, body);
+    parse_actions(&path)
+        .unwrap_or_else(|e| panic!("parse failed: {e}"))
+        .palette
 }
 
 // =====================================================================
@@ -52,45 +62,57 @@ fn absent_attributes_mean_off() {
 fn full_declaration_is_parsed() {
     let tint = tint_of(
         "full",
-        " Tint=\"rainbow\" TintSpeed=\"200\" TintSat=\"35\" TintLum=\"78\" TintGlow=\"0.5\" TintSweep=\"steps\"",
+        " Tint=\"cycle\" TintSpeed=\"200\" TintSat=\"35\" TintLum=\"78\" TintGlow=\"0.5\" TintStart=\"180\"",
     );
     assert_eq!(tint.mode, TintMode::Cycle);
     assert_eq!(tint.rotate, 200.0);
     assert_eq!(tint.sat, 35.0);
     assert_eq!(tint.lum, 78.0);
     assert_eq!(tint.glow, 0.5);
-    assert_eq!(tint.sweep, Sweep::Steps);
+    assert_eq!(tint.start, 180.0);
 }
 
-/// `Tint="rainbow"` で速度未指定なら既定 150°/s。
+/// `Tint="cycle"` で速度未指定なら既定 150°/s（`rainbow` は別名）。
 #[test]
 fn cycle_defaults_to_150_per_second() {
-    let tint = tint_of("cycle-default", " Tint=\"rainbow\"");
+    let tint = tint_of("cycle-default", " Tint=\"cycle\"");
     assert_eq!(tint.mode, TintMode::Cycle);
     assert_eq!(tint.rotate, 150.0);
     assert_eq!(tint.sat, 100.0);
     assert_eq!(tint.lum, 62.0);
     assert_eq!(tint.glow, 1.0);
-    assert_eq!(tint.sweep, Sweep::Within, "sweep の既定は within");
+    assert_eq!(
+        tint_of("rainbow", " Tint=\"rainbow\"").mode,
+        TintMode::Cycle
+    );
 }
 
-/// `Tint="#RRGGBB"` は固定色の色相になる。`random` は回さない。
+/// `random` は出現時に色を決めるので回さない。
 #[test]
-fn fixed_and_random_modes_do_not_rotate() {
-    let fixed = tint_of("fixed", " Tint=\"#00ff00\"");
-    assert_eq!(fixed.mode, TintMode::Fixed(120.0));
-    assert_eq!(fixed.rotate, 0.0);
-
+fn random_mode_does_not_rotate() {
     let random = tint_of("random", " Tint=\"random\"");
     assert_eq!(random.mode, TintMode::Random);
     assert_eq!(random.rotate, 0.0);
 }
 
-/// 未知の値は off へフォールバック（起動は止めない）。
+/// `off` / `none` / 未指定は色づけなし（警告なしで受ける）。
 #[test]
-fn unknown_tint_value_falls_back_to_off() {
-    let tint = tint_of("unknown", " Tint=\"glitter\"");
-    assert_eq!(tint.mode, TintMode::Off);
+fn off_and_none_mean_no_tinting() {
+    for value in ["off", "none"] {
+        let tint = tint_of(value, &format!(" Tint=\"{value}\""));
+        assert_eq!(tint.mode, TintMode::Off, "Tint={value}");
+        assert_eq!(tint.rotate, 0.0);
+    }
+}
+
+/// 旧値（`#RRGGBB` / `within` / `steps`）と未知の値は警告 + 無色（起動は止めない）。
+#[test]
+fn legacy_and_unknown_tint_values_fall_back_to_no_tinting() {
+    for value in ["#00ff00", "within", "steps", "glitter"] {
+        let tint = tint_of(value, &format!(" Tint=\"{value}\""));
+        assert_eq!(tint.mode, TintMode::Off, "Tint={value}");
+        assert_eq!(tint.rotate, 0.0);
+    }
 }
 
 /// 数値のパース失敗・非有限も既定へフォールバック。
@@ -98,45 +120,40 @@ fn unknown_tint_value_falls_back_to_off() {
 fn invalid_numbers_fall_back_to_defaults() {
     let tint = tint_of(
         "bad-numbers",
-        " Tint=\"rainbow\" TintSpeed=\"fast\" TintSat=\"NaN\"",
+        " Tint=\"cycle\" TintSpeed=\"fast\" TintSat=\"NaN\"",
     );
     assert_eq!(tint.rotate, 150.0, "不正な速度は既定");
     assert_eq!(tint.sat, 100.0, "NaN は既定");
 }
 
-/// `TintSweep` の値と既定。
+/// `TintStart` は初期色相（既定 0）。負値と 360 以上は wrap する。
 #[test]
-fn sweep_values() {
+fn tint_start_defaults_to_zero_and_wraps() {
+    assert_eq!(tint_of("start-default", " Tint=\"cycle\"").start, 0.0);
     assert_eq!(
-        tint_of("sweep-full", " Tint=\"rainbow\" TintSweep=\"full\"").sweep,
-        Sweep::Full
+        tint_of("start", " Tint=\"cycle\" TintStart=\"90\"").start,
+        90.0
     );
     assert_eq!(
-        tint_of("sweep-steps", " Tint=\"rainbow\" TintSweep=\"steps\"").sweep,
-        Sweep::Steps
+        tint_of("start-neg", " Tint=\"cycle\" TintStart=\"-30\"").start,
+        330.0,
+        "負の色相は wrap する"
     );
     assert_eq!(
-        tint_of("sweep-bad", " Tint=\"rainbow\" TintSweep=\"zigzag\"").sweep,
-        Sweep::Within
+        tint_of("start-wrap", " Tint=\"cycle\" TintStart=\"450\"").start,
+        90.0,
+        "360 以上は wrap する"
+    );
+    assert_eq!(
+        tint_of("start-bad", " Tint=\"cycle\" TintStart=\"soon\"").start,
+        0.0,
+        "不正値は既定"
     );
 }
 
 // =====================================================================
 // 色の変換
 // =====================================================================
-
-/// 16 進 → 色相。赤 0 / 緑 120 / 青 240。不正入力は None。
-#[test]
-fn hex_to_hue_known_values() {
-    assert_eq!(hex_to_hue("#ff0000"), Some(0.0));
-    assert_eq!(hex_to_hue("#00ff00"), Some(120.0));
-    assert_eq!(hex_to_hue("#0000ff"), Some(240.0));
-    assert_eq!(hex_to_hue("ff0000"), Some(0.0), "# なしも許す");
-    assert_eq!(hex_to_hue("#808080"), Some(0.0), "彩度 0 は 0");
-    for bad in ["", "#12345", "#1234567", "#gggggg", "blue", "#"] {
-        assert_eq!(hex_to_hue(bad), None, "不正: {bad}");
-    }
-}
 
 /// `hsl_to_rgb` は既知の値を返し、`hsl(0, 100%, 62%)` がプロトタイプの
 /// パレット先頭 `#ff3d3d` と一致する（canvas の hsl と同じ結果）。
@@ -193,124 +210,243 @@ fn glow_alpha_is_zero_without_color() {
 }
 
 // =====================================================================
-// パレット（出現を許可する色の単位）
+// 許可集合の判定と、出現時の確定色（R19/R20 の個体）
 // =====================================================================
 
-/// パレットは 12 色・30° 刻み・色相順（色相 = 添字 × 30）。表示名は辞書が持つ。
+/// `id_allowed` は「キー欠落 = 全色 / `Some(空)` = 1 色も許可しない」を表す。
 #[test]
-fn palette_is_twelve_hues_at_thirty_degree_steps() {
-    assert_eq!(PALETTE_LEN, 12, "コア固定の 12 色");
-    for (index, hue) in PALETTE_HUES.iter().enumerate() {
-        assert_eq!(*hue, index as u32 * 30, "色相 = 添字 × 30");
-        assert_eq!(palette_hue(index), Some(*hue));
-    }
-    assert_eq!(palette_hue(PALETTE_LEN), None, "範囲外は None");
-}
-
-/// 色相 → 最も近いパレット添字。境界 15° は上の色、負値・360 以上は wrap、NaN は 0。
-#[test]
-fn hue_to_palette_index_rounds_to_nearest_step() {
-    for (hue, expected) in [
-        (0.0, 0),
-        (14.9, 0),
-        (15.0, 1),
-        (29.9, 1),
-        (45.0, 2),
-        (344.9, 11),
-        (345.0, 0),
-        (359.9, 0),
-        (360.0, 0),
-        (390.0, 1),
-        (-30.0, 11),
-        (-1.0, 0),
-        (f32::NAN, 0),
-    ] {
-        assert_eq!(hue_to_palette_index(hue), expected, "hue = {hue}");
-    }
-}
-
-/// 既定は全 12 色（何も絞っていない状態）。`none()` は 1 色も許可しない。
-#[test]
-fn color_set_default_allows_every_palette_color() {
-    let all = ColorSet::default();
-    assert_eq!(all, ColorSet::all(), "既定 = 全色");
-    assert_eq!(all.len(), PALETTE_LEN);
-    assert_eq!(all.indices(), (0..PALETTE_LEN).collect::<Vec<usize>>());
-    assert!(!all.is_empty());
-    assert!(ColorSet::none().is_empty());
-    assert_eq!(ColorSet::none().len(), 0);
-    for index in 0..PALETTE_LEN {
-        assert!(all.contains(index), "添字 {index} は許可されている");
-    }
-}
-
-/// 色相の列は最も近い色へ丸め、重複を畳み、色相順に正規化する。
-#[test]
-fn color_set_from_hues_normalizes() {
-    // 29 は 30 へ、359 は 0 へ丸まる。240 の重複は 1 つに畳まれる。
-    let set = ColorSet::from_hues([240.0, 0.0, 150.0, 359.0, 29.0, 240.0]);
-    assert_eq!(set.indices(), [0, 1, 5, 8], "0/30/150/240 の 4 色");
-    assert_eq!(
-        set.hues().collect::<Vec<u32>>(),
-        [0, 30, 150, 240],
-        "色相順で戻る"
+fn id_allowed_distinguishes_missing_key_from_empty_list() {
+    let allowed = BTreeSet::from(["mint".to_string(), "white".to_string()]);
+    assert!(id_allowed(Some(&allowed), "mint"));
+    assert!(!id_allowed(Some(&allowed), "strawberry"));
+    assert!(id_allowed(None, "mint"), "キー欠落（None）は全色を許可");
+    let empty = BTreeSet::new();
+    assert!(
+        !id_allowed(Some(&empty), "mint"),
+        "colors = [] は 1 色も許可しない"
     );
-    assert!(set.contains(5));
-    assert!(!set.contains(2), "許可していない色は contains が false");
 }
 
-/// `set_index` は許可の on/off を切り替え、昇順・重複なしを保つ（パレット外は無視）。
+/// `with_color` はパレットの色をそのまま確定色にする（回転は止め、glow も色の値）。
 #[test]
-fn color_set_set_index_toggles_without_breaking_order() {
-    let mut set = ColorSet::none();
-    set.set_index(5, true);
-    set.set_index(0, true);
-    set.set_index(11, true);
-    assert_eq!(set.indices(), [0, 5, 11], "昇順に保たれる");
-    set.set_index(0, true);
-    assert_eq!(set.indices(), [0, 5, 11], "既に許可済みでも重複しない");
-    set.set_index(5, false);
-    assert_eq!(set.indices(), [0, 11], "off で外れる");
-    set.set_index(5, false);
-    assert_eq!(set.indices(), [0, 11], "既に不許可でも壊れない");
-
-    let mut all = ColorSet::default();
-    all.set_index(PALETTE_LEN, false);
-    all.set_index(usize::MAX, true);
-    assert_eq!(all, ColorSet::default(), "パレット外の添字は無視する");
-}
-
-/// `insert_hue` は色相を最も近い色として加える（R21 の「この色を出す」）。
-#[test]
-fn color_set_insert_hue_rounds_and_keeps_sorted() {
-    let mut set = ColorSet::from_hues([240.0]);
-    set.insert_hue(150.0);
-    set.insert_hue(29.0); // 30° へ丸まる
-    set.insert_hue(240.0); // 既にある → 重複しない
-    assert_eq!(set.indices(), [1, 5, 8], "30/150/240 の 3 色");
-}
-
-// =====================================================================
-// 出現時の色を固定する（R19/R20 の個体）
-// =====================================================================
-
-/// `fixed_at` は宣言の sat / lum / glow / sweep を引き継ぎ、色と回転だけ差し替える。
-#[test]
-fn fixed_at_pins_the_color_and_stops_rotation() {
+fn with_color_pins_the_palette_colour() {
     let declared = TintStyle {
         mode: TintMode::Cycle,
         rotate: 150.0,
         sat: 35.0,
         lum: 78.0,
         glow: 0.5,
-        sweep: Sweep::Steps,
+        start: 0.0,
     };
-    let fixed = declared.fixed_at(210.0);
+    let colour = PaletteColor {
+        id: "white".to_string(),
+        name: "白".to_string(),
+        hue: 0.0,
+        sat: 0.0,
+        lum: 100.0,
+        glow: 0.0,
+    };
+    let fixed = declared.with_color(&colour);
 
-    assert_eq!(fixed.mode, TintMode::Fixed(210.0), "指定した色になる");
+    assert_eq!(fixed.mode, TintMode::Fixed(0.0), "その色になる");
     assert_eq!(fixed.rotate, 0.0, "回してしまうと選んだ色が変わってしまう");
-    assert_eq!(fixed.sat, 35.0, "彩度は宣言を引き継ぐ");
-    assert_eq!(fixed.lum, 78.0, "明度は宣言を引き継ぐ");
-    assert_eq!(fixed.glow, 0.5, "グローは宣言を引き継ぐ");
-    assert_eq!(fixed.sweep, Sweep::Steps, "回転のしかたは宣言を引き継ぐ");
+    assert_eq!(fixed.sat, 0.0, "彩度は色の値（宣言ではない）");
+    assert_eq!(fixed.lum, 100.0, "明度は色の値");
+    assert_eq!(
+        fixed.glow, 0.0,
+        "グローも色の値（白・黒は宣言値で光らない）"
+    );
+    assert_eq!(fixed.start, 0.0, "初期位相もその色");
+}
+
+/// `index_of_values` は hue / sat / lum の完全一致だけを返す（glow は見ない）。
+#[test]
+fn index_of_values_matches_the_exact_colour() {
+    let palette = palette_of(
+        "index-of-values",
+        " Tint=\"random\"",
+        "<TintPalette>\n\
+         <Color Id=\"red\" Hue=\"0\"/>\n\
+         <Color Id=\"white\" Sat=\"0\" Lum=\"100\" Glow=\"0\"/>\n\
+         </TintPalette>\n",
+    );
+    assert_eq!(palette.index_of_values(0.0, 100.0, 62.0), Some(0));
+    assert_eq!(palette.index_of_values(0.0, 0.0, 100.0), Some(1));
+    assert_eq!(
+        palette.index_of_values(0.0, 100.0, 50.0),
+        None,
+        "明度が違えば一致しない"
+    );
+    assert_eq!(palette.index_of_values(150.0, 100.0, 62.0), None);
+}
+
+/// パレットの色は宣言順に列挙でき、`iter` がメニューの並びの正本になる。
+#[test]
+fn palette_iterates_in_declaration_order() {
+    let palette = palette_of(
+        "palette-iter",
+        " Tint=\"random\"",
+        "<TintPalette>\n\
+         <Color Id=\"b\" Hue=\"240\"/>\n\
+         <Color Id=\"a\" Hue=\"0\"/>\n\
+         </TintPalette>\n",
+    );
+    let ids: Vec<&str> = palette.iter().map(|color| color.id.as_str()).collect();
+    assert_eq!(ids, ["b", "a"], "宣言順（id 順に並べ替えない）");
+}
+
+// =====================================================================
+// パレットの宣言（<TintPalette>）
+// =====================================================================
+
+/// 宣言順を保ち、省略した属性は `<Mascot>` の宣言値を継承し、書いた属性だけ上書きする。
+#[test]
+fn palette_keeps_declaration_order_and_inherits_defaults() {
+    let palette = palette_of(
+        "palette-order",
+        " Tint=\"random\" TintSat=\"100\" TintLum=\"62\" TintGlow=\"1.0\"",
+        "<TintPalette>\n\
+         <Color Id=\"strawberry\" Name=\"いちご\" Hue=\"0\"/>\n\
+         <Color Id=\"mint\" Name=\"ミント\" Hue=\"150\" Glow=\"1.4\"/>\n\
+         <Color Id=\"white\" Name=\"白\" Sat=\"0\" Lum=\"100\" Glow=\"0\"/>\n\
+         </TintPalette>\n",
+    );
+    assert!(!palette.is_empty());
+
+    let first = palette.get(0).expect("1 色目");
+    assert_eq!(first.id, "strawberry");
+    assert_eq!(first.name, "いちご");
+    assert_eq!(first.hue, 0.0);
+    assert_eq!(first.sat, 100.0, "Sat 省略は宣言値");
+    assert_eq!(first.lum, 62.0, "Lum 省略は宣言値");
+    assert_eq!(first.glow, 1.0, "Glow 省略は宣言値");
+
+    let second = palette.get(1).expect("2 色目");
+    assert_eq!(second.id, "mint");
+    assert_eq!(second.hue, 150.0, "宣言順（id 順や色相順に並べ替えない）");
+    assert_eq!(second.glow, 1.4, "その色だけ上書きできる");
+
+    let third = palette.get(2).expect("3 色目");
+    assert_eq!(third.sat, 0.0);
+    assert_eq!(third.lum, 100.0);
+    assert_eq!(third.glow, 0.0);
+
+    assert_eq!(palette.get(3), None);
+    assert_eq!(palette.index_of_id("mint"), Some(1));
+    assert_eq!(palette.index_of_id("nope"), None);
+}
+
+/// `Name` 省略は `Id` を表示名にする。`<TintPalette>` が無い / 空なら色なし。
+#[test]
+fn palette_name_defaults_to_id_and_absent_palette_is_empty() {
+    let named = palette_of(
+        "palette-name",
+        " Tint=\"random\"",
+        "<TintPalette><Color Id=\"soda\" Hue=\"180\"/></TintPalette>\n",
+    );
+    assert_eq!(named.get(0).expect("1 色目").name, "soda");
+
+    let absent = palette_of("palette-absent", " Tint=\"random\"", "");
+    assert!(absent.is_empty(), "宣言が無ければ色なし");
+    assert_eq!(absent.get(0), None);
+
+    let empty = palette_of("palette-empty", " Tint=\"random\"", "<TintPalette/>\n");
+    assert!(empty.is_empty(), "<TintPalette> が空でも色なし");
+}
+
+/// `Id` 欠落・不正な文字・重複はその色だけ捨てる（重複は先勝ち・後続は残る）。
+#[test]
+fn palette_skips_colors_with_bad_or_duplicate_ids() {
+    let palette = palette_of(
+        "palette-id",
+        " Tint=\"random\"",
+        "<TintPalette>\n\
+         <Color Hue=\"60\"/>\n\
+         <Color Id=\"ok\" Hue=\"60\"/>\n\
+         <Color Id=\"ok\" Hue=\"240\"/>\n\
+         <Color Id=\"has space\" Hue=\"120\"/>\n\
+         <Color Id=\"sky_blue-2\" Hue=\"210\"/>\n\
+         <Color Id=\"after\" Hue=\"300\"/>\n\
+         </TintPalette>\n",
+    );
+    assert_eq!(palette.get(0).map(|c| c.id.as_str()), Some("ok"));
+    assert_eq!(palette.get(0).map(|c| c.hue), Some(60.0), "重複は先勝ち");
+    assert_eq!(
+        palette.get(1).map(|c| c.id.as_str()),
+        Some("sky_blue-2"),
+        "[A-Za-z0-9_-] は使える"
+    );
+    assert_eq!(
+        palette.get(2).map(|c| c.id.as_str()),
+        Some("after"),
+        "捨てた色の後ろは残る"
+    );
+    assert_eq!(palette.get(3), None);
+}
+
+/// 数値が不正な色は捨てる（他の色は残る）。`Hue` は 0..360 へ wrap する。
+#[test]
+fn palette_drops_colors_with_invalid_numbers_and_wraps_hue() {
+    let palette = palette_of(
+        "palette-bad-numbers",
+        " Tint=\"random\" TintSat=\"100\"",
+        "<TintPalette>\n\
+         <Color Id=\"bad-hue\" Hue=\"green\"/>\n\
+         <Color Id=\"bad-sat\" Sat=\"NaN\"/>\n\
+         <Color Id=\"wrapped\" Hue=\"-30\"/>\n\
+         <Color Id=\"later\" Hue=\"330.5\" Glow=\"0.5\"/>\n\
+         </TintPalette>\n",
+    );
+    assert_eq!(
+        palette.get(0).map(|c| c.id.as_str()),
+        Some("wrapped"),
+        "不正値の色は捨てる"
+    );
+    assert_eq!(
+        palette.get(0).map(|c| c.hue),
+        Some(330.0),
+        "負の色相は wrap"
+    );
+    assert_eq!(palette.get(1).map(|c| c.id.as_str()), Some("later"));
+    assert_eq!(palette.get(1).map(|c| c.glow), Some(0.5));
+    assert_eq!(palette.get(2), None);
+}
+
+/// `nearest_index` の候補は `sat > 0` の色だけ（無彩色へは丸まらない）。
+#[test]
+fn nearest_index_skips_achromatic_colors() {
+    let palette = palette_of(
+        "nearest",
+        " Tint=\"random\"",
+        "<TintPalette>\n\
+         <Color Id=\"red\" Hue=\"0\"/>\n\
+         <Color Id=\"white\" Sat=\"0\" Lum=\"100\" Glow=\"0\"/>\n\
+         <Color Id=\"blue\" Hue=\"240\"/>\n\
+         </TintPalette>\n",
+    );
+    assert_eq!(
+        palette.nearest_index(10.0),
+        Some(0),
+        "白（sat 0）は候補にならない"
+    );
+    assert_eq!(palette.nearest_index(250.0), Some(2));
+    assert_eq!(
+        palette.nearest_index(350.0),
+        Some(0),
+        "色相環の距離で近い方へ丸める"
+    );
+}
+
+/// 有彩色が 1 つも無ければ `nearest_index` は `None`（空も含む）。
+#[test]
+fn nearest_index_is_none_without_chromatic_candidates() {
+    let gray = palette_of(
+        "nearest-gray",
+        " Tint=\"random\"",
+        "<TintPalette><Color Id=\"gray\" Sat=\"0\" Lum=\"50\"/></TintPalette>\n",
+    );
+    assert_eq!(gray.nearest_index(0.0), None);
+
+    let empty = palette_of("nearest-empty", " Tint=\"random\"", "");
+    assert_eq!(empty.nearest_index(0.0), None);
 }

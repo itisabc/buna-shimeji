@@ -241,16 +241,15 @@ pub trait EnvironmentView {
 
     /// 色を指定した createMascot 経路の追加マスコット要求をキューへ積む（R19）。
     ///
-    /// [`EnvironmentView::queue_spawn_next`] と同じだが、出現時の色相 `hue`（度）を
-    /// 添える。drain は set 宣言の見せ方（sat / lum / glow / sweep）を保ったまま
-    /// **その色で固定した個体**を作る（[`crate::tint::TintStyle::fixed_at`]）。
+    /// [`EnvironmentView::queue_spawn_next`] と同じだが、出現時の確定色 `color` を
+    /// 添える。drain は**その色の個体**を作る（[`crate::tint::TintStyle::with_color`]）。
     /// トレイの「色を選んで呼ぶ」が使う経路（Action は使わない）。
     fn queue_spawn_next_colored(
         &self,
         image_set_name: &str,
         anchor: (i32, i32),
         look_right: bool,
-        hue: f32,
+        color: crate::tint::PaletteColor,
     ) {
         todo!("app impl at #9b")
     }
@@ -765,13 +764,24 @@ impl Mascot {
         self.needs_repaint = needs_repaint;
     }
 
-    /// set 宣言の色づけスタイルを設定する（Manager が spawn / Reload 時に注入）。
-    /// `TintMode::Fixed` は宣言色相を位相の初期値にする。
+    /// set 宣言（または出現時に確定した色）の見せ方を設定する（Manager が spawn / Reload /
+    /// Transform 時に注入）。位相は**宣言の初期値へ戻す**（確定色なら その色相 /
+    /// `cycle` なら `TintStart`）。
     pub fn set_tint_style(&mut self, tint: TintStyle) {
-        if let TintMode::Fixed(hue) = tint.mode {
-            self.tint_hue = hue;
-        }
+        self.tint_hue = match tint.mode {
+            TintMode::Fixed(hue) => hue,
+            _ => tint.start,
+        };
         self.tint = tint;
+    }
+
+    /// この個体の確定色（色相・彩度・明度）。`None` = 色づけなし
+    /// （R21 の写像で色相 0 を「赤を許可」と誤解釈しないため）。
+    pub fn tint_values(&self) -> Option<(f32, f32, f32)> {
+        match self.tint.mode {
+            TintMode::Off => None,
+            _ => Some((self.tint_hue, self.tint.sat, self.tint.lum)),
+        }
     }
 
     /// 現在の色相の位相（度・0..360）。

@@ -189,6 +189,15 @@ impl Manager {
             self.mascots[index].rebind_image_set(target_name.clone(), arc);
         }
 
+        // 2b. 変身先 set の宣言スタイルを再注入する（Reload と同じ意味論 = 個体の確定色は
+        //     失われ、宣言の初期位相に戻る）。色なし set へ変身したら色が消える。
+        let declared = self
+            .set_tints
+            .get(&target_name)
+            .copied()
+            .unwrap_or_default();
+        self.mascots[index].set_tint_style(declared);
+
         // 3. 変身先 set の table で Behavior を構築して設定
         let table = table_for(&self.set_tables, &self.table, &target_name);
         let built = table.build_behavior(

@@ -84,14 +84,14 @@
 //! temp dir + 実 XML + PNG 生成パターンを踏襲する。
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
 use shimeji::app::environment::{Environment, OsSource};
-use shimeji::app::manager::Manager;
+use shimeji::app::manager::{AllowedColorSets, Manager};
 use shimeji::app::reload::{load_materials, MaterialError, ReloadMaterial};
 use shimeji::config::script::EvalError;
 use shimeji::config::{
@@ -102,7 +102,9 @@ use shimeji::mascot::behavior::{
 };
 use shimeji::mascot::{Mascot, Rect, Rng};
 use shimeji::render::imageset::{Frame, ImageSet};
-use shimeji::tint::{ColorSet, TintMode, TintStyle};
+use shimeji::tint::{
+    hsl_to_rgb, Palette, PaletteColor, TintMode, TintStyle, DEFAULT_GLOW, DEFAULT_LUM, DEFAULT_SAT,
+};
 
 // =====================================================================
 // 合成データヘルパ（自己完結）
@@ -429,11 +431,23 @@ fn material(name: &str, image_set: Arc<ImageSet>, entries: Vec<BehaviorEntry>) -
 }
 
 /// tint 宣言付きの ReloadMaterial（スライス 3: set 別 tint の注入検証用）。
+/// パレットは空（色なし）で作る — 色を出すには [`material_with_palette`] を使う。
 fn material_with_tint(
     name: &str,
     image_set: Arc<ImageSet>,
     entries: Vec<BehaviorEntry>,
     tint: TintStyle,
+) -> ReloadMaterial {
+    material_with_palette(name, image_set, entries, tint, Palette::default())
+}
+
+/// tint 宣言 + パレット付きの ReloadMaterial（スライス 9/10: 色はパレットが持つ）。
+fn material_with_palette(
+    name: &str,
+    image_set: Arc<ImageSet>,
+    entries: Vec<BehaviorEntry>,
+    tint: TintStyle,
+    palette: Palette,
 ) -> ReloadMaterial {
     ReloadMaterial {
         name: name.to_string(),
@@ -441,10 +455,41 @@ fn material_with_tint(
         table: table(entries),
         actions: Arc::new(ActionsConfig {
             tint,
+            palette,
             ..Default::default()
         }),
         disabled_animations: Vec::new(),
     }
+}
+
+/// `<TintPalette>` 相当のパレットを組む（`(id, hue)`。sat/lum/glow は宣言の既定）。
+fn palette(colours: &[(&str, f32)]) -> Palette {
+    Palette::from_colors(
+        colours
+            .iter()
+            .map(|(id, hue)| PaletteColor {
+                id: (*id).to_string(),
+                name: (*id).to_string(),
+                hue: *hue,
+                sat: DEFAULT_SAT,
+                lum: DEFAULT_LUM,
+                glow: DEFAULT_GLOW,
+            })
+            .collect(),
+    )
+}
+
+/// 1 set ぶんの許可色（`[tint.sets.<set>] colors`）。
+fn allowed_for(set: &str, colours: &[&str]) -> AllowedColorSets {
+    AllowedColorSets::from([(
+        set.to_string(),
+        Some(colours.iter().map(|id| (*id).to_string()).collect()),
+    )])
+}
+
+/// 明示的に 1 色も許可しない（`colors = []`）。
+fn allowed_none_for(set: &str) -> AllowedColorSets {
+    AllowedColorSets::from([(set.to_string(), Some(BTreeSet::new()))])
 }
 
 /// マスコット集合の観測スナップショット（apply_all 経由の公開 API のみ）。
@@ -1456,11 +1501,11 @@ fn manager_reload_gives_behavior_to_behaviorless_mascot() {
 }
 
 // =====================================================================
-// スライス 3: set 別 tint（reload が登録 → spawn / 存続個体へ注入）
+// スライス 3 / 9 / 10: set 別 tint とパレット（reload が登録 → spawn / 存続個体へ注入）
 // =====================================================================
 
-/// reload は set 宣言の tint を Manager に登録し、spawn する個体へその set の
-/// tint を注入する。Off の set（宣言なし）は色なしのまま = 既存 set は影響を受けない。
+/// reload は set 宣言の tint とパレットを登録し、spawn する個体へその set の tint を
+/// 注入する。パレットの無い set（同梱の Shimeji など）は色なしのまま = 影響を受けない。
 #[test]
 fn manager_reload_injects_per_set_tint_into_spawned_mascots() {
     let env = single_monitor_env();
@@ -1482,11 +1527,12 @@ fn manager_reload_injects_per_set_tint_into_spawned_mascots() {
         ..Default::default()
     };
     manager.reload(vec![
-        material_with_tint(
+        material_with_palette(
             "SetA",
             image_set_with("SetA", "a.png", 8, 8),
             vec![row("Walk", 100)],
             cycle,
+            palette(&[("strawberry", 0.0)]),
         ),
         material_with_tint(
             "SetB",
@@ -1516,14 +1562,48 @@ fn manager_reload_injects_per_set_tint_into_spawned_mascots() {
     };
 
     let (a_rgb, a_hue) = tint_of(&tints, "SetA");
-    assert!(a_rgb.is_some(), "宣言のある set は色づけされる");
+    assert!(a_rgb.is_some(), "宣言とパレットのある set は色づけされる");
     assert!(
         (a_hue - 6.0).abs() < 1e-3,
         "spawn と同一 tick で 150°/s × 0.04s = 6° 進む: {a_hue}"
     );
 
     let (b_rgb, _) = tint_of(&tints, "SetB");
-    assert_eq!(b_rgb, None, "宣言の無い set は色なし = 従来とバイト同一");
+    assert_eq!(b_rgb, None, "色づけなしの set は色なし = 従来とバイト同一");
+}
+
+/// パレットが空なのに `Tint` を宣言している set は**無効（無色）**になる
+/// （設計: 「色を出すにはパレットが要る」の 1 不変条件）。
+#[test]
+fn manager_tint_without_palette_spawns_without_colour() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        _ => None,
+    });
+    manager.reload(vec![material_with_tint(
+        "SetA",
+        image_set_with("SetA", "a.png", 8, 8),
+        vec![row("Walk", 100)],
+        TintStyle {
+            mode: TintMode::Cycle,
+            rotate: 150.0,
+            ..Default::default()
+        },
+    )]);
+
+    manager.request_spawn("SetA");
+    manager.tick(Instant::now());
+
+    let mut rgb = None;
+    manager.apply_all(|m| rgb = Some(m.tint_rgb()));
+    assert_eq!(rgb.flatten(), None, "パレットが無ければ色なし");
 }
 
 /// reload は存続する個体の tint も「付け替え後 set」の宣言へ更新する
@@ -1545,7 +1625,7 @@ fn manager_reload_updates_persisting_mascot_tint() {
     manager.apply_all(|m| before = Some(m.tint_rgb()));
     assert_eq!(before.flatten(), None, "既定は色なし");
 
-    manager.reload(vec![material_with_tint(
+    manager.reload(vec![material_with_palette(
         "SetA",
         image_set_with("SetA", "a.png", 8, 8),
         vec![row("Walk", 100)],
@@ -1554,6 +1634,7 @@ fn manager_reload_updates_persisting_mascot_tint() {
             rotate: 150.0,
             ..Default::default()
         },
+        palette(&[("strawberry", 0.0)]),
     )]);
 
     let mut after = None;
@@ -1564,14 +1645,9 @@ fn manager_reload_updates_persisting_mascot_tint() {
     );
 }
 
-// =====================================================================
-// スライス 6: 出現時の色（R19 手動指定 / R20 許可色からの抽選）
-// =====================================================================
-
-/// `Tint="random"` の set は、出現のたびに許可色から 1 色抽選して**その色で固定**した
-/// 個体を出す（抽選母集団 = `[tint] colors`・R20）。
+/// Reload は位相を宣言の初期値（`TintStart`）へ戻す（確定色は失われる）。
 #[test]
-fn manager_spawn_draws_random_tint_from_allowed_colors() {
+fn manager_reload_resets_the_phase_to_the_declared_start() {
     let env = single_monitor_env();
     let mut manager = make_manager_with_rng(
         env,
@@ -1583,7 +1659,54 @@ fn manager_spawn_draws_random_tint_from_allowed_colors() {
         "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
         _ => None,
     });
-    manager.reload(vec![material_with_tint(
+    let material = || {
+        material_with_palette(
+            "SetA",
+            image_set_with("SetA", "a.png", 8, 8),
+            vec![row("Walk", 100)],
+            TintStyle {
+                mode: TintMode::Cycle,
+                rotate: 150.0,
+                start: 210.0,
+                ..Default::default()
+            },
+            palette(&[("strawberry", 0.0)]),
+        )
+    };
+    manager.reload(vec![material()]);
+    manager.request_spawn("SetA");
+    manager.tick(Instant::now());
+
+    let mut hue = None;
+    manager.apply_all(|m| hue = Some(m.tint_hue()));
+    assert_eq!(hue, Some(216.0), "TintStart 210 から 6° 進む");
+
+    manager.reload(vec![material()]);
+    let mut after = None;
+    manager.apply_all(|m| after = Some(m.tint_hue()));
+    assert_eq!(after, Some(210.0), "Reload で宣言の初期位相へ戻る");
+}
+
+// =====================================================================
+// スライス 6 / 10: 出現時の色（R19 手動指定 / R20 許可色からの抽選）
+// =====================================================================
+
+/// `Tint="random"` の set は、出現のたびにパレットの許可色から 1 色抽選して
+/// **その色に固定**した個体を出す（母集団はパレットの宣言順・R20）。
+#[test]
+fn manager_spawn_draws_random_tint_from_allowed_colours() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        _ => None,
+    });
+    manager.reload(vec![material_with_palette(
         "SetA",
         image_set_with("SetA", "a.png", 8, 8),
         vec![row("Walk", 100)],
@@ -1591,20 +1714,27 @@ fn manager_spawn_draws_random_tint_from_allowed_colors() {
             mode: TintMode::Random,
             ..Default::default()
         },
+        palette(&[("red", 0.0), ("mint", 150.0), ("blue", 240.0)]),
     )]);
-    // 0.5 x 3 色 → 色相順の 2 番目（150°）が選ばれる
-    manager.set_allowed_colors(ColorSet::from_hues([0.0, 150.0, 240.0]));
+    // 許可の指定なし = 全色。0.5 × 3 色 → 宣言順の 2 番目（mint・150°）
+    manager.set_allowed_colors(AllowedColorSets::new());
 
     manager.request_spawn("SetA");
     manager.tick(Instant::now());
     assert_eq!(manager.count(), 1);
 
-    let mut hue = None;
-    manager.apply_all(|m| hue = Some(m.tint_hue()));
-    assert_eq!(hue, Some(150.0), "許可色（色相順）から等確率で 1 色選ぶ");
+    let mut state = None;
+    manager.apply_all(|m| state = Some((m.tint_hue(), m.tint_rgb())));
+    let (hue, rgb) = state.expect("1 体居る");
+    assert_eq!(hue, 150.0, "パレットの宣言順から等確率で 1 色選ぶ");
+    assert_eq!(
+        rgb,
+        Some(hsl_to_rgb(150.0, DEFAULT_SAT, DEFAULT_LUM)),
+        "その色の確定色（宣言の sat / lum ではない）"
+    );
 }
 
-/// 抽選母集団は許可色だけ（`[tint] colors` に 1 色しか無ければ必ずその色）。
+/// 抽選母集団は許可色だけ（1 色しか許可しなければ必ずその色）。
 #[test]
 fn manager_random_tint_population_is_the_allowed_set() {
     let env = single_monitor_env();
@@ -1618,7 +1748,7 @@ fn manager_random_tint_population_is_the_allowed_set() {
         "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
         _ => None,
     });
-    manager.reload(vec![material_with_tint(
+    manager.reload(vec![material_with_palette(
         "SetA",
         image_set_with("SetA", "a.png", 8, 8),
         vec![row("Walk", 100)],
@@ -1626,8 +1756,9 @@ fn manager_random_tint_population_is_the_allowed_set() {
             mode: TintMode::Random,
             ..Default::default()
         },
+        palette(&[("red", 0.0), ("blue", 240.0)]),
     )]);
-    manager.set_allowed_colors(ColorSet::from_hues([240.0]));
+    manager.set_allowed_colors(allowed_for("SetA", &["blue"]));
 
     manager.request_spawn("SetA");
     manager.tick(Instant::now());
@@ -1637,9 +1768,10 @@ fn manager_random_tint_population_is_the_allowed_set() {
     assert_eq!(hue, Some(240.0), "許可が 1 色なら必ずその色");
 }
 
-/// 許可色が 0 のときは抽選せず set 宣言のまま（色相 0・rng も消費しない）。
+/// `random` で許可 0 色（`colors = []`）は抽選できず**無色 + 警告**になる
+/// （設計 §red-team 反映 14。現行 6a の「宣言どおり」から変更）。
 #[test]
-fn manager_random_tint_without_allowed_colors_keeps_declaration() {
+fn manager_random_tint_without_allowed_colours_is_colourless() {
     let env = single_monitor_env();
     let mut manager = make_manager_with_rng(
         env,
@@ -1651,7 +1783,7 @@ fn manager_random_tint_without_allowed_colors_keeps_declaration() {
         "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
         _ => None,
     });
-    manager.reload(vec![material_with_tint(
+    manager.reload(vec![material_with_palette(
         "SetA",
         image_set_with("SetA", "a.png", 8, 8),
         vec![row("Walk", 100)],
@@ -1659,22 +1791,22 @@ fn manager_random_tint_without_allowed_colors_keeps_declaration() {
             mode: TintMode::Random,
             ..Default::default()
         },
+        palette(&[("red", 0.0)]),
     )]);
-    manager.set_allowed_colors(ColorSet::none());
+    manager.set_allowed_colors(allowed_none_for("SetA"));
 
     manager.request_spawn("SetA");
     manager.tick(Instant::now());
     assert_eq!(manager.count(), 1, "抽選できなくても spawn は成立する");
 
-    let mut hue = None;
-    manager.apply_all(|m| hue = Some(m.tint_hue()));
-    assert_eq!(hue, Some(0.0), "宣言の位相のまま（抽選しない）");
+    let mut rgb = None;
+    manager.apply_all(|m| rgb = Some(m.tint_rgb()));
+    assert_eq!(rgb.flatten(), None, "許可 0 色は無色（抽選しない）");
 }
 
-/// 色を指定して呼ぶと、その色で固定した個体が出る
-/// （宣言が `rainbow`（150°/s）でも回らない・R19）。
+/// `cycle` + `TintSpeed="0"` は `TintStart` の色相で固定される（設計 §宣言の使い方）。
 #[test]
-fn manager_request_spawn_colored_uses_the_given_hue() {
+fn manager_cycle_with_zero_speed_pins_the_start_hue() {
     let env = single_monitor_env();
     let mut manager = make_manager_with_rng(
         env,
@@ -1686,7 +1818,46 @@ fn manager_request_spawn_colored_uses_the_given_hue() {
         "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
         _ => None,
     });
-    manager.reload(vec![material_with_tint(
+    manager.reload(vec![material_with_palette(
+        "SetA",
+        image_set_with("SetA", "a.png", 8, 8),
+        vec![row("Walk", 100)],
+        TintStyle {
+            mode: TintMode::Cycle,
+            rotate: 0.0,
+            start: 210.0,
+            ..Default::default()
+        },
+        palette(&[("strawberry", 0.0)]),
+    )]);
+
+    manager.request_spawn("SetA");
+    manager.tick(Instant::now());
+
+    let mut hue = None;
+    manager.apply_all(|m| hue = Some(m.tint_hue()));
+    assert_eq!(
+        hue,
+        Some(210.0),
+        "速度 0 なら位相が進まず色相が固定される（150°/s なら同じ tick で 6° 進む）"
+    );
+}
+
+/// 色を指定して呼ぶと、その色の確定色で個体が出る（宣言が回転していても回らない・R19）。
+#[test]
+fn manager_request_spawn_coloured_uses_the_given_colour() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        _ => None,
+    });
+    manager.reload(vec![material_with_palette(
         "SetA",
         image_set_with("SetA", "a.png", 8, 8),
         vec![row("Walk", 100)],
@@ -1695,21 +1866,54 @@ fn manager_request_spawn_colored_uses_the_given_hue() {
             rotate: 150.0,
             ..Default::default()
         },
+        palette(&[("red", 0.0), ("mint", 150.0)]),
     )]);
 
-    manager.request_spawn_colored("SetA", 210.0);
+    manager.request_spawn_colored("SetA", "mint");
     manager.tick(Instant::now());
     assert_eq!(manager.count(), 1);
 
-    let mut hue = None;
-    manager.apply_all(|m| hue = Some(m.tint_hue()));
-    assert_eq!(hue, Some(210.0), "指定した色相で出る");
+    let mut state = None;
+    manager.apply_all(|m| state = Some((m.tint_hue(), m.tint_rgb())));
+    let (hue, rgb) = state.expect("1 体居る");
+    assert_eq!(hue, 150.0, "指定した色で出る（回転しない）");
+    assert_eq!(rgb, Some(hsl_to_rgb(150.0, DEFAULT_SAT, DEFAULT_LUM)));
 }
 
-/// `color_capable_sets` は宣言 `Tint` が off 以外の set だけを返す
-/// （スライス 6c: トレイ/右クリックの色 UI を出す対象）。
+/// 未知の色 id は何も出さない（警告のみ・設計 §red-team 反映 1）。
 #[test]
-fn manager_color_capable_sets_lists_only_tinted_sets() {
+fn manager_request_spawn_coloured_ignores_unknown_colour_id() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        _ => None,
+    });
+    manager.reload(vec![material_with_palette(
+        "SetA",
+        image_set_with("SetA", "a.png", 8, 8),
+        vec![row("Walk", 100)],
+        TintStyle {
+            mode: TintMode::Cycle,
+            ..Default::default()
+        },
+        palette(&[("mint", 150.0)]),
+    )]);
+
+    manager.request_spawn_colored("SetA", "nope");
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 0, "未知の id では spawn しない");
+}
+
+/// `color_capable_sets` は**パレットが空でない** set を名前順に返す（色 UI の対象・
+/// 設計 §red-team 反映 3。`Tint` を書いていない set でもパレットがあれば対象になる）。
+#[test]
+fn manager_colour_capable_sets_follow_the_palette() {
     let env = single_monitor_env();
     let mut manager = make_manager_with_rng(
         env,
@@ -1719,18 +1923,12 @@ fn manager_color_capable_sets_lists_only_tinted_sets() {
     );
     manager.set_image_set_resolver(|name| match name {
         "Plain" => Some(image_set_with("Plain", "a.png", 8, 8)),
-        "Plain2" => Some(image_set_with("Plain2", "a.png", 8, 8)),
+        "PaletteOnly" => Some(image_set_with("PaletteOnly", "a.png", 8, 8)),
         "Tinted" => Some(image_set_with("Tinted", "a.png", 8, 8)),
         _ => None,
     });
     manager.reload(vec![
-        material_with_tint(
-            "Plain",
-            image_set_with("Plain", "a.png", 8, 8),
-            vec![row("Walk", 100)],
-            TintStyle::default(), // 宣言なし = Off
-        ),
-        material_with_tint(
+        material_with_palette(
             "Tinted",
             image_set_with("Tinted", "a.png", 8, 8),
             vec![row("Walk", 100)],
@@ -1738,21 +1936,29 @@ fn manager_color_capable_sets_lists_only_tinted_sets() {
                 mode: TintMode::Cycle,
                 ..Default::default()
             },
+            palette(&[("mint", 150.0)]),
         ),
         material_with_tint(
-            "Plain2",
-            image_set_with("Plain2", "a.png", 8, 8),
+            "Plain",
+            image_set_with("Plain", "a.png", 8, 8),
+            vec![row("Walk", 100)],
+            TintStyle::default(),
+        ),
+        material_with_palette(
+            "PaletteOnly",
+            image_set_with("PaletteOnly", "a.png", 8, 8),
             vec![row("Walk", 100)],
             TintStyle {
                 mode: TintMode::Off,
                 ..Default::default()
             },
+            palette(&[("mint", 150.0)]),
         ),
     ]);
 
     assert_eq!(
         manager.color_capable_sets(),
-        ["Tinted"],
-        "Tint を宣言した set だけが色 UI の対象"
+        ["PaletteOnly", "Tinted"],
+        "パレットが非空の set だけが色 UI の対象（名前順）"
     );
 }

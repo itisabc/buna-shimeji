@@ -28,20 +28,6 @@ SpawnDefault = "（既定）"
 AllowedColors = "出現を許可する色"
 AllowThisColor = "この色を出す"
 
-# --- 色パレットの表示名（色相 30° 刻み・tint::PALETTE_HUES の順） ---
-TintStrawberry = "いちご"
-TintTangerine = "みかん"
-TintLemon = "レモン"
-TintMelon = "メロン"
-TintMuscat = "マスカット"
-TintMint = "ミント"
-TintSoda = "ソーダ"
-TintSkyBlue = "そらいろ"
-TintBlueberry = "ブルーベリー"
-TintGrape = "ぶどう"
-TintCassis = "カシス"
-TintPeach = "もも"
-
 # --- Behavior 名（conf/behaviors.xml） ---
 ChaseMouse = "マウスを追っかける"
 ClimbAlongCeiling = "画面の天井を伝う"

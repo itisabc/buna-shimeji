@@ -222,3 +222,50 @@ A: 単一起動制限（ユーザーセッション内で 1 プロセス）で�
   - ファイルが見つからない場合はログに警告が出て無音で続行します（起動は止まりません）。
 - 停止: `Mute` アクション（`Sound` 属性でその音だけ / 省略で全停止）。
 - 有効/無効: トレイの Allowed Behaviours →「効果音」（`conf/settings.toml` の `[allowed] sounds`）。
+
+## 12. 色づけ（`<Mascot>` の `Tint*` と `<TintPalette>`）
+
+マスコットを色づけできます（**Rust 版独自**。他の実装は未知の要素・属性を無視します）。
+色は「白いしめじ」を乗算で染める方式なので、**明るい（白に近い）画像ほどよく染まります**。
+
+- **宣言**（`img/<Set>/conf/actions.xml` のルート `<Mascot>`。`<ActionList>` より前）:
+
+  ```xml
+  <Mascot xmlns="http://www.group-finity.com/Mascot"
+          Tint="random" TintSat="100" TintLum="62" TintGlow="1.4" TintStart="0">
+    <TintPalette>
+      <Color Id="strawberry" Name="いちご" Hue="0"/>
+      <Color Id="white"      Name="白"   Sat="0" Lum="100" Glow="0"/>
+      <Color Id="black"      Name="黒"   Sat="0" Lum="0"   Glow="0"/>
+    </TintPalette>
+    <ActionList>...</ActionList>
+  </Mascot>
+  ```
+
+- `Tint`（省略可）: `random` = 出現のたびに許可色から 1 色抽選して固定 / `cycle` = 全色相を
+  なめらかに回す（`rainbow` も同じ）。**省略すると色づけなし**です。
+- `TintSpeed`: 回転速度（°/秒）。既定は `cycle` のとき 150、それ以外は 0。負値で逆回転。
+  `0` にすると位相が止まり、`TintStart` の色相で固定されます。
+- `TintStart`: 出現時の色相（度・既定 0）。負値と 360 以上は wrap します。
+- `TintSat` / `TintLum` / `TintGlow`: 彩度・明度（%）と、グローの強さ（0 で光らない）。
+  `<Color>` で省略した値の既定になります。
+- `<TintPalette>`: その set が持つ色の一覧（**宣言順がメニューの並び**）。`<Color>` は
+  `Id` が必須（設定に保存される安定キー。英数字と `_` `-`）。`Name` はメニューに出る表示名で、
+  省略すると `Id` になります。`Hue`（既定 0）/ `Sat` / `Lum` / `Glow` は省略すると
+  `<Mascot>` の宣言値を継承します。
+  - **色には `Glow="0"` を検討してください**。白・黒のような無彩色は、加算グローが
+    ハロー（白）や無変化（黒）になるためです。
+- **出現を許可する色**は利用者側の設定です（`conf/settings.toml`）:
+
+  ```toml
+  [tint.sets.Shimeji]
+  colors = ["strawberry", "white"]   # 書かなければ全色、[] なら 1 色も出さない
+  ```
+
+- **トレイ**: 「呼ぶ → <set> → 色」で色を選んで出せます（許可色だけが並びます）。
+  「出現を許可する色」で set ごとの出てよい色を切り替えます。マスコットの右クリック
+  「この色を出す」は、その個体の色を許可色へ戻します。
+- **パレットを宣言していない set には色 UI が出ません**（`Tint` だけ書いてパレットが無い場合は
+  無色 + 警告になります）。
+- 制限: 色は乗算なので、**黒い部分はどの色でも黒のまま**です（`img/KuroShimeji` のような
+  反転画像は色づけできません）。色を混ぜる・濁らせない（R22/R24）は未実装です。

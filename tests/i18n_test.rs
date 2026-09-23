@@ -43,7 +43,7 @@ use shimeji::tray::{GeneralSettings, Settings};
 
 /// 設計 §3-A の UI キー数 + 色づけの追加キー（`SpawnDefault` / `AllowedColors` /
 /// `AllowThisColor` + パレット 12 色）。
-const UI_KEY_COUNT: usize = 36;
+const UI_KEY_COUNT: usize = 24;
 /// 設計 §6.2-2 の behaviors.xml の Behavior 数。
 const BEHAVIOR_NAME_COUNT: usize = 57;
 

@@ -52,7 +52,7 @@
 //!    （中で setBehavior も呼ぶ）のため、Mascot::set_behavior から set_behavior_and_init
 //!    を経由する同一構造（#8）
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -61,7 +61,7 @@ use crate::app::reload::ReloadMaterial;
 use crate::mascot::behavior::{BehaviorError, BehaviorFactory, BehaviorTable};
 use crate::mascot::{AffordanceArrival, EnvironmentView, Mascot, Rng, TransformRequest};
 use crate::render::imageset::ImageSet;
-use crate::tint::{ColorSet, TintMode, TintStyle};
+use crate::tint::{id_allowed, Palette, PaletteColor, TintMode, TintStyle};
 
 mod behavior_resolver;
 mod menu;
@@ -79,22 +79,35 @@ pub use menu::BehaviorMenu;
 /// image set resolver の型（Java `Main.getConfiguration(imageSet)` 相当の注入点）。
 type ImageSetResolver = dyn FnMut(&str) -> Option<Arc<ImageSet>>;
 
-/// 許可された色から 1 色を等確率で抽選する（R20 の抽選母集団・[`Manager::tick`] の spawn drain 用）。
+/// set 別の許可集合（`settings.toml` の `[tint.sets.<set>] colors`）。
 ///
-/// 許可色が 0 のときは `None`（= 抽選せず set 宣言のまま）で、**rng を消費しない**
-/// （[`Manager::request_spawn_random`] の空スライスと同じ扱い）。母集団の順は
-/// [`ColorSet::indices`]（色相順）で、`(unit * len) as usize` の切り捨て
+/// `None`（キー欠落）= その set の全色を許可、`Some(空)` = 1 色も許可しない。
+pub type AllowedColorSets = BTreeMap<String, Option<BTreeSet<String>>>;
+
+/// その set のパレットから 1 色を等確率で抽選する（R20 の抽選母集団・[`Manager::tick`] の
+/// spawn drain 用）。
+///
+/// 母集団はパレットの**宣言順**で許可されている色（[`id_allowed`]）。許可色が 0 のときは
+/// `None`（= 抽選しない）で、**rng を消費しない**（[`Manager::request_spawn_random`] の
+/// 空スライスと同じ扱い）。index は `(unit * len) as usize` の切り捨て
 /// （Java `createMascot` の set 選択と同じ式）。
 ///
 /// `Manager` のメソッドにしないのは、drain ループが `Environment` を借用したまま
 /// `&mut self` を取れないため（フィールド単位の借用に分ける）。
-fn draw_allowed_hue(colors: &ColorSet, rng: &mut dyn Rng) -> Option<f32> {
-    let population = colors.indices();
+fn draw_allowed_color<'a>(
+    palette: &'a Palette,
+    allowed: Option<&BTreeSet<String>>,
+    rng: &mut dyn Rng,
+) -> Option<&'a PaletteColor> {
+    let population: Vec<&PaletteColor> = palette
+        .iter()
+        .filter(|color| id_allowed(allowed, &color.id))
+        .collect();
     if population.is_empty() {
         return None;
     }
     let index = (rng.unit() * population.len() as f64) as usize;
-    crate::tint::palette_hue(population[index]).map(|hue| hue as f32)
+    Some(population[index])
 }
 
 /// マスコット集合の所有者（Java `Manager` 相当・スレッド/lock は排除）。
@@ -144,9 +157,12 @@ pub struct Manager {
     /// set 別の色づけスタイル（Reload が set 宣言から登録・[`Manager::set_tables`] と
     /// 同じ寿命）。未登録 set は [`TintStyle::default`]（= 色づけなし）。
     set_tints: HashMap<String, TintStyle>,
-    /// 出現を許可する色（R19/R20）。`settings.toml` の `[tint] colors` を main が注入する。
-    /// 既定は全 12 色、空 = 1 色も許可しない（抽選しない）。
-    allowed_colors: ColorSet,
+    /// set 別のパレット（`<TintPalette>`・Reload が登録・[`Manager::set_tables`] と
+    /// 同じ寿命）。空のパレット = その set に色は無い（色 UI も出さない）。
+    set_palettes: HashMap<String, Palette>,
+    /// set 別の出現を許可する色（R19/R20/R21）。`settings.toml` の
+    /// `[tint.sets.<set>] colors` を main が注入する。キー欠落 = 全色許可。
+    allowed_colors: AllowedColorSets,
 }
 
 impl Manager {
@@ -204,7 +220,8 @@ impl Manager {
             pin_pull_off: false,
             pin_has_clung: false,
             set_tints: HashMap::new(),
-            allowed_colors: ColorSet::default(),
+            set_palettes: HashMap::new(),
+            allowed_colors: AllowedColorSets::new(),
         }
     }
 
@@ -264,16 +281,38 @@ impl Manager {
     /// 色を指定して 1 体 spawn する（R19・トレイの「色を選んで呼ぶ」）。
     ///
     /// [`Manager::request_spawn`] と同じく向き決定で rng を 1 回消費し、要求をキューへ
-    /// 積む（反映は次 tick）。個体は set 宣言の sat / lum / glow / sweep を保ったまま
-    /// **指定色で固定**される（[`crate::tint::TintStyle::fixed_at`]）。
-    pub fn request_spawn_colored(&mut self, image_set_name: &str, hue: f32) {
+    /// 積む（反映は次 tick）。個体は**指定した色の確定色**になる（[`TintStyle::with_color`]）。
+    /// `color_id` はその set のパレットの `Id` で、**要求を積む時点で解決**する
+    /// （queued 中に Reload があっても押した瞬間の色を出す）。未知の id と
+    /// パレットが無い set は警告 + no-op。
+    pub fn request_spawn_colored(&mut self, image_set_name: &str, color_id: &str) {
+        let Some(color) = self.palette_color(image_set_name, color_id) else {
+            log::warn!(
+                "ignoring coloured spawn for `{image_set_name}`: unknown colour id `{color_id}`"
+            );
+            return;
+        };
         let look_right = self.rng.unit() < 0.5;
         self.environment_view().queue_spawn_next_colored(
             image_set_name,
             (-4000, -4000),
             look_right,
-            hue,
+            color,
         );
+    }
+
+    /// その set のパレットから id で色を引く（無い set / 未知 id は `None`）。
+    fn palette_color(&self, image_set_name: &str, color_id: &str) -> Option<PaletteColor> {
+        let palette = self.valid_palette(image_set_name)?;
+        let index = palette.index_of_id(color_id)?;
+        palette.get(index).cloned()
+    }
+
+    /// その set の空でないパレット。
+    fn valid_palette(&self, image_set_name: &str) -> Option<&Palette> {
+        self.set_palettes
+            .get(image_set_name)
+            .filter(|palette| !palette.is_empty())
     }
 
     /// Mascot を追加キューへ積む（Java `add` L252-269 逐語のうち
@@ -282,27 +321,53 @@ impl Manager {
         self.added.push(mascot);
     }
 
-    /// 出現を許可する色を差し替える（`settings.toml` の `[tint] colors` の注入経路・R19/R20）。
+    /// 出現を許可する色を差し替える（`settings.toml` の `[tint.sets.<set>] colors` の
+    /// 注入経路・R19/R20/R21）。
     ///
     /// 注入した集合がそのままランダム出現の抽選母集団になり、色を選んで呼ぶ一覧の母集団にもなる。
     /// 実行中の変更を反映するのは呼び出し側（main / トレイ）の責務。
-    pub fn set_allowed_colors(&mut self, colors: ColorSet) {
-        self.allowed_colors = colors;
+    pub fn set_allowed_colors(&mut self, allowed: AllowedColorSets) {
+        self.allowed_colors = allowed;
     }
 
-    /// 色づけ対応 set（宣言 `Tint` が `off` 以外）の名前（スライス 6c）。
+    /// set 別のパレット（トレイ/右クリックの色 UI の材料・Reload が登録）。
+    pub fn palettes(&self) -> &HashMap<String, Palette> {
+        &self.set_palettes
+    }
+
+    /// 色づけ対応 set（**パレットが空でない** set）の名前。
     ///
-    /// トレイ/右クリックで色 UI を出す対象。`Tint` を宣言していない set には色メニューを
-    /// 出さない（マスコット側 config で調整する）。順序は決定的にするため名前順。
+    /// トレイ/右クリックで色 UI を出す対象（パレットを宣言していない set には色メニューを
+    /// 出さない = 「色を出すにはパレットが要る」の 1 不変条件）。順序は決定的にするため名前順。
     pub fn color_capable_sets(&self) -> Vec<String> {
         let mut names: Vec<String> = self
-            .set_tints
+            .set_palettes
             .iter()
-            .filter(|(_, style)| style.mode != TintMode::Off)
+            .filter(|(_, palette)| !palette.is_empty())
             .map(|(name, _)| name.clone())
             .collect();
         names.sort();
         names
+    }
+
+    /// index のマスコットの色を「その set のパレットの色」へ写す（R21・右クリック
+    /// 「この色を出す」用）。
+    ///
+    /// ① 個体の確定色（hue / sat / lum）と完全一致するパレット色 → その id
+    /// （R19/R20 の個体はパレットの値をそのまま写しているので一致する）
+    /// ② 一致しなければ（`cycle` 個体）現在色相を [`Palette::nearest_index`] で写す
+    /// ③ どちらも無理なら `None`（色づけなし / パレットが無い / 有彩色が無い / index 範囲外）。
+    /// 戻り値は `(set 名, 色 id)`。
+    pub fn color_id_at(&self, index: usize) -> Option<(String, String)> {
+        let mascot = self.mascots.get(index)?;
+        let set_name = mascot.image_set_name().to_string();
+        let palette = self.valid_palette(&set_name)?;
+        let (hue, sat, lum) = mascot.tint_values()?;
+        if let Some(found) = palette.index_of_values(hue, sat, lum) {
+            return Some((set_name, palette.get(found)?.id.clone()));
+        }
+        let nearest = palette.nearest_index(hue)?;
+        Some((set_name, palette.get(nearest)?.id.clone()))
     }
 
     /// Java `tick` L201-244 逐語:
@@ -387,29 +452,48 @@ impl Manager {
             // Java Breed.java L90: setLookRight(action.getMascot().isLookRight())
             mascot.set_look_right(request.look_right);
             // 出現時の色を決める（未登録 set は既定 = 色づけなし）。
-            // - 手動指定（`SpawnRequest::tint` = R19）→ その色で固定した個体
-            // - set 宣言が `Tint="random"`（R20）→ 許可色から 1 色抽選して固定した個体
-            // - それ以外（宣言なし / rainbow / 固定色）→ 宣言どおり
+            // - 手動指定（`SpawnRequest::tint` = R19）→ その確定色の個体
+            // - set 宣言が `Tint="random"`（R20）→ パレットの許可色から 1 色抽選してその色に固定
+            // - `Tint="cycle"` → 宣言どおり（位相の初期値は宣言の `TintStart`）
+            // - パレットが空なのに `Tint` を宣言している → **無効（無色）+ 警告**
             let declared = self
                 .set_tints
                 .get(&request.image_set_name)
                 .copied()
                 .unwrap_or_default();
-            let style = match request.tint {
-                Some(hue) => declared.fixed_at(hue),
-                None if declared.mode == TintMode::Random => {
-                    match draw_allowed_hue(&self.allowed_colors, self.rng.as_mut()) {
-                        Some(hue) => declared.fixed_at(hue),
+            let palette = self
+                .set_palettes
+                .get(&request.image_set_name)
+                .filter(|palette| !palette.is_empty());
+            let allowed = self
+                .allowed_colors
+                .get(&request.image_set_name)
+                .and_then(|allowed| allowed.as_ref());
+            let style = match (request.tint, palette) {
+                (Some(color), _) => declared.with_color(&color),
+                (None, Some(palette)) if declared.mode == TintMode::Random => {
+                    match draw_allowed_color(palette, allowed, self.rng.as_mut()) {
+                        Some(color) => declared.with_color(color),
                         None => {
+                            // 許可 0 色は抽選できない（rng も消費しない）→ 無色
                             log::warn!(
-                                "no allowed color to draw for `{}`: using the declared tint",
+                                "no allowed colour to draw for `{}`: spawning without a colour",
                                 request.image_set_name
                             );
-                            declared
+                            TintStyle::default()
                         }
                     }
                 }
-                None => declared,
+                (None, Some(_)) => declared,
+                (None, None) => {
+                    if declared.mode != TintMode::Off {
+                        log::warn!(
+                            "`{}` declares tinting but has no palette: spawning without a colour",
+                            request.image_set_name
+                        );
+                    }
+                    TintStyle::default()
+                }
             };
             mascot.set_tint_style(style);
             let table = table_for(&self.set_tables, &self.table, &request.image_set_name);
@@ -758,16 +842,6 @@ impl Manager {
             .map(|mascot| mascot.image_set_name().to_string())
     }
 
-    /// index のマスコットの現在の色相（スライス 7・右クリック「この色を出す」用）。
-    ///
-    /// 色づけなし（[`TintMode::Off`]）の個体は色を持たないため `None`
-    /// （色相 0 を「いちごを許可」と誤解釈しないため。判定は [`Mascot::tint_rgb`] に委ねる）。
-    /// index 範囲外も None。
-    pub fn tint_hue_at(&self, index: usize) -> Option<f32> {
-        let mascot = self.mascots.get(index)?;
-        mascot.tint_rgb().map(|_| mascot.tint_hue())
-    }
-
     /// index のマスコットへマウスボタン押下を転送する（#10b-2c・
     /// Java `Main` の MouseListener → `Mascot.mousePressed` L430-447 相当。
     /// `point` は**スクリーン座標**契約（hotspot 記録用・Dragged の差分計算は
@@ -911,13 +985,31 @@ impl Manager {
             self.dispose_all();
             self.set_tables.clear();
             self.set_tints.clear();
+            self.set_palettes.clear();
             return;
         }
 
-        // set 別 tint も宣言から再構築する（stale エントリを残さない・set_tables と同型）。
+        // set 別 tint / パレットも宣言から再構築する（stale エントリを残さない・
+        // set_tables と同型）。
         self.set_tints.clear();
         self.set_tints
             .extend(materials.iter().map(|m| (m.name.clone(), m.actions.tint)));
+        self.set_palettes.clear();
+        self.set_palettes.extend(
+            materials
+                .iter()
+                .map(|m| (m.name.clone(), m.actions.palette.clone())),
+        );
+        // 色を出すにはパレットが要る（宣言だけあってパレットが無い set は色なしになる）。
+        // 起動は止めず、宣言とパレットの食い違いをここで 1 回だけ知らせる。
+        for material in &materials {
+            if material.actions.tint.mode != TintMode::Off && material.actions.palette.is_empty() {
+                log::warn!(
+                    "`{}` declares tinting but has no <TintPalette>: colours are disabled",
+                    material.name
+                );
+            }
+        }
 
         // rebind 用の set 名 → 新 Arc 対応（materials は table 抽出で消費するため
         // 先に作る。残存 set も新オブジェクトへ付け替える）

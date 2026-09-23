@@ -30,7 +30,7 @@
 //! - Inline 子: 既存 `build_def` 経由 = 空パラメータ（Java createActions
 //!   L445-455 `buildAction(Map.of())`）
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config::{ActionsConfig, SequenceChild, VarMap};
@@ -88,12 +88,7 @@ impl XmlBehaviorFactory {
         }
         XmlBehaviorFactory {
             sets: map,
-            default: default.unwrap_or_else(|| {
-                Arc::new(ActionsConfig {
-                    actions: BTreeMap::new(),
-                    tint: crate::tint::TintStyle::default(),
-                })
-            }),
+            default: default.unwrap_or_else(|| Arc::new(ActionsConfig::default())),
             current: None,
             scale: 1.0,
         }

@@ -52,6 +52,7 @@ use crate::config::script::EvalContext;
 use crate::mascot::env::{AreaSlot, AreaState, CursorState};
 use crate::mascot::rng::JavaRandom;
 use crate::mascot::{AffordanceScanEntry, EnvironmentView, Rect, Rng};
+use crate::tint::PaletteColor;
 
 /// spawn キューの 1 件（Breed 出生要求・Java Breed.java L73-101 相当）。
 /// `behavior_name`:
@@ -64,9 +65,9 @@ pub struct SpawnRequest {
     pub anchor: (i32, i32),
     pub look_right: bool,
     pub behavior_name: Option<String>,
-    /// 出現時の色相（度）。`Some` = その色で固定した個体を作る（R19 の手動指定・
-    /// トレイの「色を選んで呼ぶ」）。`None` = set 宣言に従う（R20 の抽選も drain 側で行う）。
-    pub tint: Option<f32>,
+    /// 出現時に確定した色。`Some` = その色の個体を作る（R19 の手動指定。要求を積む時点で
+    /// set のパレットから解決済み）。`None` = set 宣言に従う（R20 の抽選も drain 側で行う）。
+    pub tint: Option<PaletteColor>,
 }
 
 /// 効果音の再生バックエンド（Java `sound.Sounds` + `javax.sound.sampled.Clip` の面）。
@@ -973,20 +974,22 @@ impl EnvironmentView for Environment {
         });
     }
 
-    /// 色を指定した createMascot 経路の spawn 要求（R19・`tint = Some(hue)`）。
+    /// 色を指定した createMascot 経路の spawn 要求（R19・`tint = Some(color)`）。
+    /// `color` は呼び出し側（[`Manager::request_spawn_colored`]）が set のパレットから
+    /// 解決済みの確定色を渡す（queued 中の Reload で色が変わらないようにする）。
     fn queue_spawn_next_colored(
         &self,
         image_set_name: &str,
         anchor: (i32, i32),
         look_right: bool,
-        hue: f32,
+        color: PaletteColor,
     ) {
         self.spawns.borrow_mut().push(SpawnRequest {
             image_set_name: image_set_name.to_string(),
             anchor,
             look_right,
             behavior_name: None,
-            tint: Some(hue),
+            tint: Some(color),
         });
     }
 

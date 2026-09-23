@@ -114,6 +114,9 @@ Java 版と同じ挙動で動作します。
 | Dismiss All | 全消去して終了 | ✅ |
 | Reload | `conf/` 再読込 | ✅ |
 | マスコット右クリック | 呼ぶ / 個別行動指定 / 一時停止 / 消す | ✅ |
+| 色を選んで呼ぶ | 「呼ぶ → <set> → 色」で許可色の個体を出す（R19。ラベルは宣言の `Name`） | ✅ |
+| 出現を許可する色 | set ごとの出てよい色のトグル（設定に永続化・R21） | ✅ |
+| この色を出す | 右クリックでその個体の色を許可色へ戻す（R21） | ✅ |
 
 ## 4. 設定・データ・スクリプト
 
@@ -128,6 +131,7 @@ Java 版と同じ挙動で動作します。
 | 多言語 UI | 埋め込み英語 + `conf/lang/en.toml` / `ja.toml`。`[general] language` で選択。Behavior 名（個別行動指定メニュー）も同じ辞書で解決 | ✅ |
 | 効果音 | Pose の `Sound` / `Volume` 属性（鳴らしたい Pose にだけ書く）。`img/<Set>/sound/` → `sound/<Set>/` → `sound/` の探索順で WAV を Win32 `PlaySound` で再生し、再生終了ごとに鳴り直す（`Sounds` トグルで有効/無効） | ✅ |
 | 画像セット作成ガイド | [`doc/imageset-guide.md`](imageset-guide.md) | ✅ |
+| 色づけ（tint） | `<Mascot>` の `Tint` / `TintSpeed` / `TintStart` / `TintSat` / `TintLum` / `TintGlow` と `<TintPalette>`。`random` = 出現のたびに許可色から抽選 / `cycle` = 色相を回す。許可色は `[tint.sets.<set>] colors`（Rust 版独自・R18〜R21） | ✅ |
 
 ## 5. 対応環境・既知の制限
 

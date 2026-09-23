@@ -31,7 +31,8 @@
 //!
 //! pub struct ImagesetsSettings { pub scale: BTreeMap<String, f64> }
 //!
-//! pub struct TintSettings { pub colors: ColorSet }   // [tint] colors = [色相 度, ...]
+//! pub struct TintSettings { pub sets: BTreeMap<String, TintSetSettings> }   // [tint.sets.<set>] colors = ["色 id", ...]
+//! pub struct TintSetSettings { pub colors: Option<BTreeSet<String>> }       // 欠落 = 全色 / [] = 0 色
 //!
 //! pub struct Settings {
 //!     pub allowed: AllowedSettings,
@@ -50,23 +51,25 @@
 //! pub enum SettingsError { /* ... */ }
 //!
 //! pub enum TrayCommand {
-//!     Spawn(Option<String>), SpawnColored(String, f32), FollowCursor, ReduceToOne, RestoreWindows,
-//!     SetAllowed(AllowedKind, bool), SetColorAllowed(usize, bool), AllowColorOf(usize),
+//!     Spawn(Option<String>), SpawnColored(String, String), FollowCursor, ReduceToOne, RestoreWindows,
+//!     SetAllowed(AllowedKind, bool), SetColorAllowed(String, String, bool), AllowColorOf(usize),
 //!     TogglePauseAll, DismissAll, Reload,
 //!     SetBehaviorFor(usize, String), TogglePauseFor(usize), DismissFor(usize),
 //! }
 //!
 //! pub struct TrayContext { pub conf_dir: PathBuf, pub img_dir: PathBuf, pub image_sets: Vec<String> }
 //!
-//! // メニュー構築の入力（6c: 色 UI は color_capable の set だけに出す）
+//! // メニュー構築の入力（色 UI はパレットが非空の set だけに出す）
 //! pub struct MenuInputs<'a> {
 //!     pub image_sets: &'a [String],
-//!     pub color_capable: &'a [String],
-//!     pub allowed_colors: &'a ColorSet,
+//!     pub palettes: &'a HashMap<String, Palette>,
+//!     pub allowed: &'a SetColors,
 //! }
 //! impl MenuInputs<'_> {
-//!     pub fn new(image_sets: &[String], color_capable: &[String], allowed_colors: &ColorSet) -> Self
-//!     pub fn is_color_capable(&self, set: &str) -> bool
+//!     pub fn new(image_sets: &[String], palettes: &HashMap<String, Palette>, allowed: &SetColors) -> Self
+//!     pub fn palette_of(&self, set: &str) -> Option<&Palette>   // パレットが非空のときだけ
+//!     pub fn has_colours(&self) -> bool
+//!     pub fn is_allowed(&self, set: &str, id: &str) -> bool
 //! }
 //!
 //! pub struct TrayMenuModel { /* 非公開フィールド */ }
@@ -76,7 +79,7 @@
 //!     pub fn menu(&self) -> &tray_icon::menu::Menu
 //!     pub fn command_of(&self, id: &MenuId) -> Option<TrayCommand>
 //!     pub fn sync_allowed(&self, allowed: &AllowedSettings)   // 全 CheckMenuItem へ set_checked
-//!     pub fn sync_colors(&self, colors: &ColorSet)            // 12 色の CheckMenuItem へ set_checked
+//!     pub fn sync_colors(&self, allowed: &SetColors)          // set ごとの色チェックへ set_checked
 //! }
 //!
 //! pub fn apply_tray_command(manager: &mut Manager, settings: &mut Settings, command: TrayCommand, context: &TrayContext)
@@ -102,14 +105,16 @@
 //!     // Java popup Dismiss L562 相当（dispose・remove_pending・削除は次 tick）・
 //!     // 範囲外 → warn no-op
 //!     pub fn dismiss_at(&mut self, index: usize)
-//!     // 出現を許可する色の差し替え（R19/R20 の抽選母集団・settings.toml から注入）
-//!     pub fn set_allowed_colors(&mut self, colors: ColorSet)
-//!     // 色を指定して 1 体 spawn（R19・次 tick で宣言の sat/lum/glow/sweep のまま固定色）
-//!     pub fn request_spawn_colored(&mut self, image_set_name: &str, hue: f32)
-//!     // 宣言 Tint が off 以外の set 名（名前順）。トレイ/右クリックの色 UI の対象（6c）
+//!     // 出現を許可する色の差し替え（R19/R20/R21 の抽選母集団・settings.toml から注入）
+//!     pub fn set_allowed_colors(&mut self, allowed: AllowedColorSets)
+//!     // set 別パレット（トレイ/右クリックの色 UI の材料・reload が登録）
+//!     pub fn palettes(&self) -> &HashMap<String, Palette>
+//!     // 色を指定して 1 体 spawn（R19・次 tick でその色の確定色）
+//!     pub fn request_spawn_colored(&mut self, image_set_name: &str, color_id: &str)
+//!     // パレットが非空の set 名（名前順）。トレイ/右クリックの色 UI の対象
 //!     pub fn color_capable_sets(&self) -> Vec<String>
-//!     // index の個体の現在色相。色づけなし（Off）と範囲外は None（R21「この色を出す」用）
-//!     pub fn tint_hue_at(&self, index: usize) -> Option<f32>
+//!     // index の個体の色を set のパレットへ写す（R21「この色を出す」用）。無理なら None
+//!     pub fn color_id_at(&self, index: usize) -> Option<(String, String)>
 //! }
 //!
 //! // ---- src/app/environment.rs 追加 ----
@@ -136,18 +141,21 @@ use std::time::Instant;
 
 use shimeji::app::environment::{Environment, OsSource};
 use shimeji::app::manager::{BehaviorMenu, Manager};
-use shimeji::config::{BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap};
+use shimeji::app::reload::ReloadMaterial;
+use shimeji::config::{
+    ActionsConfig, BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap,
+};
 use shimeji::i18n::Lang;
 use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
 };
 use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
 use shimeji::render::imageset::{Frame, ImageSet};
-use shimeji::tint::{ColorSet, PALETTE_LEN};
+use shimeji::tint::{Palette, PaletteColor, DEFAULT_GLOW, DEFAULT_LUM, DEFAULT_SAT};
 use shimeji::tray::{
     apply_tray_command, AllowedKind, AllowedSettings, GeneralSettings, ImagesetsSettings,
-    InteractiveWindowsSettings, MenuInputs, Settings, SettingsError, TintSettings, TrayCommand,
-    TrayContext, TrayMenuModel,
+    InteractiveWindowsSettings, MenuInputs, SetColors, Settings, SettingsError, TintSetSettings,
+    TintSettings, TrayCommand, TrayContext, TrayMenuModel,
 };
 use tray_icon::menu::{CheckMenuItem, MenuId, MenuItemKind, Submenu};
 
@@ -165,9 +173,97 @@ fn ja_lang() -> Lang {
     )
 }
 
-/// 全 set を色づけ対応として扱う `MenuInputs`（色 UI の有無だけを見ないテストの既定）。
-fn inputs_all<'a>(sets: &'a [String], colors: &'a ColorSet) -> MenuInputs<'a> {
-    MenuInputs::new(sets, sets, colors)
+/// テスト用パレット（`(id, 表示名, 色相)`・宣言順。sat / lum / glow は既定値）。
+fn palette_of(colours: &[(&str, &str, f32)]) -> Palette {
+    Palette::from_colors(
+        colours
+            .iter()
+            .map(|(id, name, hue)| PaletteColor {
+                id: (*id).to_string(),
+                name: (*name).to_string(),
+                hue: *hue,
+                sat: DEFAULT_SAT,
+                lum: DEFAULT_LUM,
+                glow: DEFAULT_GLOW,
+            })
+            .collect(),
+    )
+}
+
+/// 明示リストの `[tint.sets.<set>] colors`。
+fn set_colors(set: &str, ids: &[&str]) -> SetColors {
+    SetColors::from([(
+        set.to_string(),
+        TintSetSettings {
+            colors: Some(ids.iter().map(|id| (*id).to_string()).collect()),
+        },
+    )])
+}
+
+/// トレイ/ポップアップの構築材料（`MenuInputs` は借用を返すため、材料を所有する型を挟む）。
+struct MenuFixture {
+    sets: Vec<String>,
+    palettes: HashMap<String, Palette>,
+    allowed: SetColors,
+}
+
+impl MenuFixture {
+    /// 全 set に同じパレットを与える（許可は未指定 = 全色）。
+    fn new(sets: &[&str], colours: &[(&str, &str, f32)]) -> MenuFixture {
+        let sets: Vec<String> = sets.iter().map(|set| (*set).to_string()).collect();
+        let palettes = sets
+            .iter()
+            .map(|set| (set.clone(), palette_of(colours)))
+            .collect();
+        MenuFixture {
+            sets,
+            palettes,
+            allowed: SetColors::new(),
+        }
+    }
+
+    /// 1 set の許可色を明示リストにする。
+    fn allowed_for(mut self, set: &str, ids: &[&str]) -> MenuFixture {
+        self.allowed.extend(set_colors(set, ids));
+        self
+    }
+
+    fn inputs(&self) -> MenuInputs<'_> {
+        MenuInputs::new(&self.sets, &self.palettes, &self.allowed)
+    }
+}
+
+/// テスト用の 3 色パレット（宣言順 = メニューの並び）。
+const TEST_COLOURS: &[(&str, &str, f32)] = &[
+    ("strawberry", "いちご", 0.0),
+    ("mint", "ミント", 150.0),
+    ("blueberry", "ブルーベリー", 240.0),
+];
+
+/// 全 set に [`TEST_COLOURS`] を与えた材料（許可は未指定 = 全色）。
+fn fixture_all(sets: &[String]) -> MenuFixture {
+    let names: Vec<&str> = sets.iter().map(|set| set.as_str()).collect();
+    MenuFixture::new(&names, TEST_COLOURS)
+}
+
+/// 全 set の許可色を「1 色も許可しない」にした材料（`colors = []`）。
+fn fixture_none(sets: &[String]) -> MenuFixture {
+    let names: Vec<&str> = sets.iter().map(|set| set.as_str()).collect();
+    let mut fixture = MenuFixture::new(&names, TEST_COLOURS);
+    for set in sets {
+        fixture.allowed.extend(set_colors(set, &[]));
+    }
+    fixture
+}
+
+/// 一部の set だけパレットを持つ材料（色づけ対応 set の切り分け用）。
+fn fixture_partial(sets: &[String], capable: &[String]) -> MenuFixture {
+    let names: Vec<&str> = sets.iter().map(|set| set.as_str()).collect();
+    let mut fixture = MenuFixture::new(&names, TEST_COLOURS);
+    fixture
+        .palettes
+        .retain(|set, _| capable.iter().any(|name| name == set));
+    fixture
 }
 
 /// 矩形ヘルパ。
@@ -460,6 +556,21 @@ fn make_manager(env: Environment, tbl: BehaviorTable, factory: ScriptedFactory) 
     make_manager_with_rng(env, tbl, factory, unit_rng())
 }
 
+/// set 宣言（tint + `<TintPalette>` 相当）を Manager へ登録する（apply 系テストの前準備）。
+/// パレットを持たない set は色 UI の対象にならないため、色を扱うテストは必ずこれを通す。
+fn reload_with_palette(manager: &mut Manager, set: &str, colours: &[(&str, &str, f32)]) {
+    manager.reload(vec![ReloadMaterial {
+        name: set.to_string(),
+        image_set: empty_image_set(set),
+        table: table(vec![row("Walk", 100)]),
+        actions: Arc::new(ActionsConfig {
+            palette: palette_of(colours),
+            ..Default::default()
+        }),
+        disabled_animations: Vec::new(),
+    }]);
+}
+
 /// 指定 set の新規 Mascot（fresh・behavior 無し・空 ImageSet）。
 fn mascot_of_set(image_set: &str, anchor: (i32, i32)) -> Mascot {
     Mascot::new(image_set, empty_image_set(image_set), anchor)
@@ -745,8 +856,8 @@ fn assert_settings_eq(expected: &Settings, actual: &Settings) {
         "general.language"
     );
     assert_eq!(
-        actual.tint.colors, expected.tint.colors,
-        "tint.colors（許可する色の集合）"
+        actual.tint.sets, expected.tint.sets,
+        "tint.sets（set ごとの許可色）"
     );
     assert_eq!(
         actual.interactive_windows.whitelist, expected.interactive_windows.whitelist,
@@ -1192,7 +1303,7 @@ fn settings_save_keeps_help_comments() {
         "pin_dropped_window",
         "disabled_behaviors",
         "imagesets.scale",
-        "colors",
+        "tint.sets",
         "whitelist",
         "blacklist",
     ] {
@@ -1620,7 +1731,7 @@ fn expect_separator(kind: &MenuItemKind, what: &str) {
 fn tray_menu_structure_and_commands_match_design_3_11() {
     let sets = vec!["Shimeji".to_string(), "Kuro".to_string()];
     let model = TrayMenuModel::build_tray(
-        &inputs_all(&sets, &ColorSet::default()),
+        &fixture_all(&sets).inputs(),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
@@ -1674,7 +1785,7 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
     let shimeji_items = shimeji.items();
     assert_eq!(
         shimeji_items.len(),
-        PALETTE_LEN + 2,
+        TEST_COLOURS.len() + 2,
         "「（既定）」+ separator + 許可色 12"
     );
     assert_eq!(expect_item_text(&shimeji_items[0], "既定"), "（既定）");
@@ -1690,14 +1801,14 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
     assert!(
         matches!(
             model.command_of(shimeji_items[2].id()),
-            Some(TrayCommand::SpawnColored(ref s, hue)) if s == "Shimeji" && hue == 0.0
+            Some(TrayCommand::SpawnColored(ref s, ref id)) if s == "Shimeji" && id == "strawberry"
         ),
-        "色 → SpawnColored(set, 色相)"
+        "色 → SpawnColored(set, 色 id)"
     );
     assert_eq!(
-        expect_item_text(&shimeji_items[PALETTE_LEN + 1], "色 12"),
-        "もも",
-        "色は色相順（330° が最後）"
+        expect_item_text(&shimeji_items[TEST_COLOURS.len() + 1], "色 3"),
+        "ブルーベリー",
+        "色はパレットの宣言順（240° が最後）"
     );
 
     // set の並びは image_sets 順
@@ -1706,7 +1817,7 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
     assert!(
         matches!(
             model.command_of(kuro.items()[2].id()),
-            Some(TrayCommand::SpawnColored(ref s, hue)) if s == "Kuro" && hue == 0.0
+            Some(TrayCommand::SpawnColored(ref s, ref id)) if s == "Kuro" && id == "strawberry"
         ),
         "image_sets 順に set サブメニューが並ぶ"
     );
@@ -1767,28 +1878,36 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
         );
     }
 
-    // 6. 出現を許可する色 Submenu: CheckMenuItem 12 種（checked = 許可色の含有）
+    // 6. 出現を許可する色 Submenu: set ごとのサブメニュー（CheckMenuItem = パレットの色）
     let colors_sub = expect_submenu(&items[5], "出現を許可する色");
     assert_eq!(colors_sub.text(), "出現を許可する色");
-    let color_checks = colors_sub.items();
-    assert_eq!(color_checks.len(), PALETTE_LEN, "色トグルは 12 種");
-    assert_eq!(expect_item_text(&color_checks[0], "色 1"), "いちご");
+    let set_menus = colors_sub.items();
+    assert_eq!(set_menus.len(), 2, "パレットを持つ set ごとに 1 つ");
+    let shimeji_checks = expect_submenu(&set_menus[0], "Shimeji").items();
     assert_eq!(
-        expect_item_text(&color_checks[PALETTE_LEN - 1], "色 12"),
-        "もも"
+        shimeji_checks.len(),
+        TEST_COLOURS.len(),
+        "パレットの色数ぶんの CheckMenuItem"
     );
-    for (index, item) in color_checks.iter().enumerate() {
+    assert_eq!(expect_item_text(&shimeji_checks[0], "色 1"), "いちご");
+    assert_eq!(
+        expect_item_text(&shimeji_checks[TEST_COLOURS.len() - 1], "色 3"),
+        "ブルーベリー",
+        "ラベルは宣言の Name（辞書を通さない）"
+    );
+    for (index, item) in shimeji_checks.iter().enumerate() {
         let check = expect_check(item, "色トグル項目");
-        assert!(check.is_checked(), "既定（全許可）は 12 色とも checked");
+        assert!(check.is_checked(), "既定（全許可）は全色 checked");
         let applied = check.is_checked();
+        let expected_id = TEST_COLOURS[index].0;
         assert!(
             matches!(
                 model.command_of(check.id()),
-                Some(TrayCommand::SetColorAllowed(got, value))
-                    if got == index && value == applied
+                Some(TrayCommand::SetColorAllowed(ref set, ref id, value))
+                    if set == "Shimeji" && id == expected_id && value == applied
             ),
-            "色 {} → SetColorAllowed(パレット添字, 現在の checked = 適用値)",
-            index
+            "{} → SetColorAllowed(set, 色 id, 現在の checked = 適用値)",
+            expected_id
         );
     }
 
@@ -1818,14 +1937,15 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
     ));
 }
 
-/// 呼ぶ → set → 色は**許可色だけ**を色相順に並べる（`[tint] colors` が一覧の母集団・R19）。
+/// 呼ぶ → set → 色は**許可色だけ**をパレットの宣言順に並べる（`[tint.sets.<set>] colors` が
+/// 一覧の母集団・R19）。
 #[test]
-fn spawn_submenu_lists_only_allowed_colours_in_palette_order() {
+fn spawn_submenu_lists_only_allowed_colours() {
     let sets = vec!["Shimeji".to_string()];
-    // 順不同・重複混じりで与える（正規化は ColorSet の責務）
-    let colors = ColorSet::from_hues([240.0, 0.0, 150.0, 150.0]);
+    // 真ん中だけ外す（許可 = いちご + ブルーベリー）
+    let fixture = fixture_all(&sets).allowed_for("Shimeji", &["strawberry", "blueberry"]);
     let model = TrayMenuModel::build_tray(
-        &inputs_all(&sets, &colors),
+        &fixture.inputs(),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
@@ -1835,23 +1955,23 @@ fn spawn_submenu_lists_only_allowed_colours_in_palette_order() {
     let spawn_items = spawn.items();
     let shimeji = expect_submenu(&spawn_items[1], "Shimeji");
     let rows = shimeji.items();
-    assert_eq!(rows.len(), 3 + 2, "「（既定）」+ separator + 許可色 3");
+    assert_eq!(rows.len(), 2 + 2, "「（既定）」+ separator + 許可色 2");
     let labels: Vec<String> = rows[2..]
         .iter()
         .map(|row| expect_item_text(row, "色"))
         .collect();
     assert_eq!(
         labels,
-        ["いちご", "ミント", "ブルーベリー"],
-        "許可色のみ・色相順・辞書の色名"
+        ["いちご", "ブルーベリー"],
+        "許可色のみ・宣言順・ラベルは宣言の Name"
     );
-    for (position, hue) in [0.0f32, 150.0, 240.0].into_iter().enumerate() {
+    for (position, id) in ["strawberry", "blueberry"].into_iter().enumerate() {
         assert!(
             matches!(
                 model.command_of(rows[position + 2].id()),
-                Some(TrayCommand::SpawnColored(ref s, got)) if s == "Shimeji" && got == hue
+                Some(TrayCommand::SpawnColored(ref s, ref got)) if s == "Shimeji" && got == id
             ),
-            "許可色 {hue} → SpawnColored(set, hue)"
+            "許可色 {id} → SpawnColored(set, 色 id)"
         );
     }
 }
@@ -1861,7 +1981,7 @@ fn spawn_submenu_lists_only_allowed_colours_in_palette_order() {
 fn spawn_submenu_with_no_allowed_colours_has_only_default_item() {
     let sets = vec!["Shimeji".to_string()];
     let model = TrayMenuModel::build_tray(
-        &inputs_all(&sets, &ColorSet::none()),
+        &fixture_none(&sets).inputs(),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
@@ -1891,7 +2011,7 @@ fn spawn_submenu_hides_colours_for_sets_without_tint() {
     let sets = vec!["Shimeji".to_string(), "Gaming".to_string()];
     let capable = vec!["Gaming".to_string()];
     let model = TrayMenuModel::build_tray(
-        &MenuInputs::new(&sets, &capable, &ColorSet::default()),
+        &fixture_partial(&sets, &capable).inputs(),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
@@ -1908,7 +2028,7 @@ fn spawn_submenu_hides_colours_for_sets_without_tint() {
     let gaming = expect_submenu(&children[2], "Gaming");
     assert_eq!(
         gaming.items().len(),
-        PALETTE_LEN + 2,
+        TEST_COLOURS.len() + 2,
         "色づけ対応の set だけ色一覧が出る"
     );
     assert_eq!(expect_item_text(&gaming.items()[2], "色 1"), "いちご");
@@ -1920,7 +2040,7 @@ fn tray_hides_allowed_colours_submenu_without_capable_sets() {
     let sets = vec!["Shimeji".to_string(), "Kuro".to_string()];
     let capable: Vec<String> = vec![];
     let model = TrayMenuModel::build_tray(
-        &MenuInputs::new(&sets, &capable, &ColorSet::default()),
+        &fixture_partial(&sets, &capable).inputs(),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
@@ -1943,60 +2063,58 @@ fn tray_hides_allowed_colours_submenu_without_capable_sets() {
     }
 }
 
-/// 出現を許可する色の CheckMenuItem は `[tint] colors` の含有を初期 checked に反映する。
+/// 出現を許可する色の CheckMenuItem は set ごとの `colors` を初期 checked に反映する。
 #[test]
 fn tray_colour_checks_reflect_allowed_colours() {
     let sets = vec!["Shimeji".to_string()];
-    let colors = ColorSet::from_hues([150.0]);
+    let fixture = fixture_all(&sets).allowed_for("Shimeji", &["mint"]);
     let model = TrayMenuModel::build_tray(
-        &inputs_all(&sets, &colors),
+        &fixture.inputs(),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
 
     let menu_items = model.menu().items();
     let colors_sub = expect_submenu(&menu_items[5], "出現を許可する色");
-    let checks = colors_sub.items();
-    assert_eq!(checks.len(), PALETTE_LEN, "パレット 12 色ぶん");
+    let checks = expect_submenu(&colors_sub.items()[0], "Shimeji").items();
+    assert_eq!(checks.len(), TEST_COLOURS.len(), "パレットの色数ぶん");
     for (index, item) in checks.iter().enumerate() {
         let check = expect_check(item, "色トグル");
-        assert_eq!(
-            check.is_checked(),
-            index == 5,
-            "150°（ミント）だけが許可されている"
-        );
+        assert_eq!(check.is_checked(), index == 1, "ミントだけが許可されている");
     }
 }
 
-/// sync_colors は全色 CheckMenuItem へ set_checked を反映し、command_of は
+/// sync_colors は set ごとの許可色を全 CheckMenuItem へ反映し、command_of は
 /// sync 後も有効（SetColorAllowed の値は反映後の現在の checked = 適用値に更新される）。
 #[test]
 fn tray_sync_colors_updates_all_colour_checks() {
     let sets = vec!["Shimeji".to_string()];
     let model = TrayMenuModel::build_tray(
-        &inputs_all(&sets, &ColorSet::none()),
+        &fixture_none(&sets).inputs(),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
     let menu_items = model.menu().items();
     let colors_sub = expect_submenu(&menu_items[5], "出現を許可する色");
-    for item in colors_sub.items() {
+    let checks = expect_submenu(&colors_sub.items()[0], "Shimeji").items();
+    for item in checks.iter() {
         assert!(
-            !expect_check(&item, "色トグル").is_checked(),
-            "初期は全 off"
+            !expect_check(item, "色トグル").is_checked(),
+            "初期は全 off（colors = []）"
         );
     }
 
-    model.sync_colors(&ColorSet::default());
-    for (index, item) in colors_sub.items().iter().enumerate() {
+    model.sync_colors(&SetColors::new());
+    for (index, item) in checks.iter().enumerate() {
         let check = expect_check(item, "色トグル");
-        assert!(check.is_checked(), "sync 後は全 on");
+        assert!(check.is_checked(), "sync 後は全 on（キー欠落 = 全色）");
         assert!(
             matches!(
                 model.command_of(check.id()),
-                Some(TrayCommand::SetColorAllowed(got, true)) if got == index
+                Some(TrayCommand::SetColorAllowed(ref set, ref id, true))
+                    if set == "Shimeji" && id == TEST_COLOURS[index].0
             ),
-            "sync 後も SetColorAllowed(添字, 適用値) を返す"
+            "sync 後も SetColorAllowed(set, 色 id, 適用値) を返す"
         );
     }
 }
@@ -2007,11 +2125,7 @@ fn tray_sync_colors_updates_all_colour_checks() {
 fn tray_menu_allowed_check_items_reflect_initial_allowed_values() {
     let empty: Vec<String> = vec![];
     let initial = allowed(false, true, false, true, true, false, false);
-    let model = TrayMenuModel::build_tray(
-        &inputs_all(&empty, &ColorSet::default()),
-        &initial,
-        &ja_lang(),
-    );
+    let model = TrayMenuModel::build_tray(&fixture_all(&empty).inputs(), &initial, &ja_lang());
     let items = model.menu().items();
 
     let checks = expect_submenu(&items[4], "許可する行為").items();
@@ -2042,7 +2156,7 @@ fn tray_menu_allowed_check_items_reflect_initial_allowed_values() {
 fn tray_menu_sync_allowed_updates_all_check_items() {
     let sets = vec!["Shimeji".to_string()];
     let model = TrayMenuModel::build_tray(
-        &inputs_all(&sets, &ColorSet::default()),
+        &fixture_all(&sets).inputs(),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
@@ -2097,7 +2211,7 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
     let index = 2usize;
     let model = TrayMenuModel::build_popup(
         index,
-        &inputs_all(&sets, &ColorSet::default()),
+        &fixture_all(&sets).inputs(),
         &menu_items,
         true,
         false,
@@ -2181,7 +2295,7 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
     // pause 中は「再開」ラベル（command は同一）
     let paused_model = TrayMenuModel::build_popup(
         index,
-        &inputs_all(&sets, &ColorSet::default()),
+        &fixture_all(&sets).inputs(),
         &menu_items,
         true,
         true,
@@ -2212,7 +2326,7 @@ fn popup_hides_allow_this_colour_without_colour() {
     };
     let model = TrayMenuModel::build_popup(
         0,
-        &MenuInputs::new(&sets, &[], &ColorSet::default()),
+        &fixture_partial(&sets, &[]).inputs(),
         &menu_items,
         false,
         false,
@@ -2229,7 +2343,7 @@ fn popup_hides_allow_this_colour_without_colour() {
 fn command_of_unknown_id_returns_none() {
     let empty: Vec<String> = vec![];
     let model = TrayMenuModel::build_tray(
-        &inputs_all(&empty, &ColorSet::default()),
+        &fixture_all(&empty).inputs(),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
@@ -2320,20 +2434,21 @@ fn apply_spawn_none_with_empty_sets_is_noop_without_rng() {
     assert!(manager.is_empty(), "set 0 件 → no-op");
 }
 
-/// SpawnColored(set, hue) → manager.request_spawn_colored（次 tick で指定色に固定・R19）。
+/// SpawnColored(set, 色 id) → manager.request_spawn_colored（次 tick でその色に固定・R19）。
 #[test]
-fn apply_spawn_colored_spawns_the_set_with_the_given_hue() {
+fn apply_spawn_colored_spawns_the_set_with_the_given_colour() {
     let home = TempHome::new("apply_spawn_colored");
     let (env, _) = single_monitor_env();
     let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
     manager.set_image_set_resolver(resolver_for(&["Alpha", "Beta"]));
+    reload_with_palette(&mut manager, "Beta", TEST_COLOURS);
     let mut settings = Settings::default();
     let context = make_apply_context(&home, &["Alpha", "Beta"]);
 
     apply_tray_command(
         &mut manager,
         &mut settings,
-        TrayCommand::SpawnColored("Beta".to_string(), 150.0),
+        TrayCommand::SpawnColored("Beta".to_string(), "mint".to_string()),
         &context,
     );
     manager.tick(Instant::now());
@@ -2345,49 +2460,89 @@ fn apply_spawn_colored_spawns_the_set_with_the_given_hue() {
     assert_eq!(
         state,
         Some(("Beta".to_string(), 150.0)),
-        "指定色の固定色で出る（宣言が rainbow でも回らない・6a）"
+        "指定色の確定色で出る（宣言が cycle でも回らない・R19）"
     );
 }
 
-/// SetColorAllowed(添字, false) → `[tint] colors` から外れて settings.toml へ永続化される（R21）。
+/// SetColorAllowed(set, 色 id, false) → その set の許可色から外れて settings.toml へ
+/// 永続化される（R21。キー欠落 = 全色のときは全色を明示リストへ展開する）。
 #[test]
 fn apply_set_color_allowed_updates_settings_and_persists() {
     let home = TempHome::new("apply_set_color_allowed");
     let (env, _) = single_monitor_env();
     let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
-    let mut settings = Settings::default(); // colors = 全 12 色
+    reload_with_palette(&mut manager, "Alpha", TEST_COLOURS);
+    let mut settings = Settings::default(); // キー欠落 = 全色許可
     let context = make_apply_context(&home, &["Alpha"]);
 
     apply_tray_command(
         &mut manager,
         &mut settings,
-        TrayCommand::SetColorAllowed(5, false), // 150°（ミント）を外す
+        TrayCommand::SetColorAllowed("Alpha".to_string(), "mint".to_string(), false),
         &context,
     );
 
-    assert!(!settings.tint.colors.contains(5), "集合から外れる");
-    assert!(settings.tint.colors.contains(0), "他の色は残る");
+    let colours = settings.tint.sets["Alpha"]
+        .colors
+        .as_ref()
+        .expect("明示リスト");
+    assert!(!colours.contains("mint"), "集合から外れる");
+    assert!(colours.contains("strawberry"), "他の色は残る");
+    assert_eq!(colours.len(), TEST_COLOURS.len() - 1);
     let saved = Settings::load(&home.root.join("settings.toml"))
         .expect("保存された settings.toml を読める");
     assert!(
-        !saved.tint.colors.contains(5),
+        !saved.tint.sets["Alpha"]
+            .colors
+            .as_ref()
+            .expect("明示リスト")
+            .contains("mint"),
         "settings.toml へ永続化される"
     );
-    assert_eq!(saved.tint.colors.len(), PALETTE_LEN - 1);
 }
 
-/// AllowColorOf(index) → その個体の現在色を許可集合へ加えて永続化する（R21）。
+/// 許可 0 色（`colors = []`）から 1 色を許可すると、その 1 色だけの集合になる（R21）。
 #[test]
-fn apply_allow_color_of_adds_the_mascot_hue() {
+fn apply_set_color_allowed_re_allows_a_single_colour() {
+    let home = TempHome::new("apply_set_color_allowed_on");
+    let (env, _) = single_monitor_env();
+    let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
+    reload_with_palette(&mut manager, "Alpha", TEST_COLOURS);
+    let mut settings = Settings::default();
+    settings.tint.sets = set_colors("Alpha", &[]);
+    let context = make_apply_context(&home, &["Alpha"]);
+
+    apply_tray_command(
+        &mut manager,
+        &mut settings,
+        TrayCommand::SetColorAllowed("Alpha".to_string(), "blueberry".to_string(), true),
+        &context,
+    );
+
+    let colours = settings.tint.sets["Alpha"]
+        .colors
+        .as_ref()
+        .expect("明示リスト");
+    assert_eq!(
+        colours.iter().collect::<Vec<_>>(),
+        ["blueberry"],
+        "1 色だけ許可した状態は 1 色だけ"
+    );
+}
+
+/// AllowColorOf(index) → その個体の色を許可集合へ加えて永続化する（R21）。
+#[test]
+fn apply_allow_color_of_adds_the_mascot_colour() {
     let home = TempHome::new("apply_allow_color_of");
     let (env, _) = single_monitor_env();
     let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
     manager.set_image_set_resolver(resolver_for(&["Alpha"]));
+    reload_with_palette(&mut manager, "Alpha", TEST_COLOURS);
     let mut settings = Settings::default();
-    settings.tint.colors = ColorSet::none(); // 1 色も許可していない状態から
+    settings.tint.sets = set_colors("Alpha", &[]);
     let context = make_apply_context(&home, &["Alpha"]);
 
-    manager.request_spawn_colored("Alpha", 240.0);
+    manager.request_spawn_colored("Alpha", "blueberry");
     manager.tick(Instant::now());
     assert_eq!(manager.count(), 1);
 
@@ -2398,28 +2553,37 @@ fn apply_allow_color_of_adds_the_mascot_hue() {
         &context,
     );
 
-    assert!(
-        settings.tint.colors.contains(8),
-        "240°（ブルーベリー）が加わる"
+    let colours = settings.tint.sets["Alpha"]
+        .colors
+        .as_ref()
+        .expect("明示リスト");
+    assert_eq!(
+        colours.iter().collect::<Vec<_>>(),
+        ["blueberry"],
+        "その個体の色が許可集合へ戻る"
     );
-    assert_eq!(settings.tint.colors.len(), 1, "絞った集合に戻す操作");
     let saved = Settings::load(&home.root.join("settings.toml"))
         .expect("保存された settings.toml を読める");
     assert!(
-        saved.tint.colors.contains(8),
+        saved.tint.sets["Alpha"]
+            .colors
+            .as_ref()
+            .expect("明示リスト")
+            .contains("blueberry"),
         "settings.toml へ永続化される"
     );
 }
 
-/// 色づけなし（TintMode::Off）の個体は色相 0 を「いちご」と誤解釈しない（何も加えない）。
+/// 色づけなし（`TintMode::Off`）の個体は何も加えない（色相 0 を「いちご」と誤解釈しない）。
 #[test]
 fn apply_allow_color_of_ignores_mascot_without_tint() {
     let home = TempHome::new("apply_allow_color_of_off");
     let (env, _) = single_monitor_env();
     let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
     manager.set_image_set_resolver(resolver_for(&["Alpha"]));
+    reload_with_palette(&mut manager, "Alpha", TEST_COLOURS);
     let mut settings = Settings::default();
-    settings.tint.colors = ColorSet::none();
+    settings.tint.sets = set_colors("Alpha", &[]);
     let context = make_apply_context(&home, &["Alpha"]);
 
     manager.request_spawn("Alpha"); // 宣言 tint なし（既定 Off）
@@ -2434,7 +2598,11 @@ fn apply_allow_color_of_ignores_mascot_without_tint() {
     );
 
     assert!(
-        settings.tint.colors.is_empty(),
+        settings.tint.sets["Alpha"]
+            .colors
+            .as_ref()
+            .expect("明示リスト")
+            .is_empty(),
         "色を持たない個体は許可集合を変えない"
     );
 }
@@ -2446,8 +2614,9 @@ fn apply_allow_color_of_out_of_range_index_is_noop() {
     let (env, _) = single_monitor_env();
     let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
     manager.set_image_set_resolver(resolver_for(&["Alpha"]));
+    reload_with_palette(&mut manager, "Alpha", TEST_COLOURS);
     let mut settings = Settings::default();
-    let expected = settings.tint.colors.clone();
+    let expected = settings.tint.sets.clone();
     let context = make_apply_context(&home, &["Alpha"]);
 
     apply_tray_command(
@@ -2458,7 +2627,7 @@ fn apply_allow_color_of_out_of_range_index_is_noop() {
     );
 
     assert_eq!(
-        settings.tint.colors, expected,
+        settings.tint.sets, expected,
         "個体が居なければ許可集合を変えない"
     );
 }
@@ -3247,128 +3416,169 @@ fn settings_load_preserves_interactive_windows_entries_verbatim() {
 }
 
 // =====================================================================
-// [tint] colors: 出現を許可する色（スライス 5）
+// [tint.sets.<set>] colors: set ごとの許可色（スライス 10）
 // =====================================================================
 
-/// 後方互換: `[tint]` セクションが無い settings.toml は全 12 色を許可する
+/// `[tint]` セクションが無い settings.toml は「キー欠落 = 全色許可」になる
 ///（既存利用者の挙動を変えない・何も絞っていない状態）。
 #[test]
-fn settings_load_without_tint_section_allows_all_palette_colors() {
+fn settings_load_without_tint_section_allows_every_colour() {
     let home = TempHome::new("tint_absent");
     std::fs::write(home.settings_path(), "[allowed]\nbreeding = false\n")
         .expect("settings.toml を書ける");
 
     let settings = Settings::load(&home.settings_path()).expect("旧形式 TOML を読める");
-    assert_eq!(
-        settings.tint.colors.len(),
-        PALETTE_LEN,
-        "[tint] 欠落は全 12 色を許可"
+    assert!(
+        settings.tint.sets.is_empty(),
+        "キー欠落は全色許可（何も書かなければ絞らない）"
     );
-    for index in 0..PALETTE_LEN {
-        assert!(
-            settings.tint.colors.contains(index),
-            "パレット添字 {index} が許可されている"
-        );
-    }
     assert!(!settings.allowed.breeding, "他セクションは従来どおり");
 }
 
-/// 明示した許可色は色相（度）で往復し、並びは色相順に正規化される。
+/// set 別の許可色は id で往復し、保存は決定的（BTreeSet = 辞書順）になる。
 #[test]
-fn settings_tint_colors_round_trip_as_hues() {
+fn settings_tint_sets_round_trip_as_ids() {
     let home = TempHome::new("tint_roundtrip");
-    let original = Settings {
-        tint: TintSettings {
-            colors: ColorSet::from_hues([240.0, 0.0, 150.0]),
-        },
-        ..Settings::default()
-    };
+    let mut original = Settings::default();
+    original.tint.sets = set_colors("Shimeji", &["strawberry", "mint"]);
 
     let path = home.settings_path();
     Settings::save(&path, &original).expect("save できる");
     let text = std::fs::read_to_string(&path).expect("保存結果を読める");
     assert!(
-        text.contains("colors = [0, 150, 240]"),
-        "色相の整数・色相順で出る:\n{text}"
+        text.contains("[tint.sets.Shimeji]")
+            && text.contains("colors = [\"mint\", \"strawberry\"]"),
+        "set ごとの見出しと id の配列で出る:\n{text}"
     );
 
     let loaded = Settings::load(&path).expect("load できる");
     assert_settings_eq(&original, &loaded);
-    assert_eq!(
-        loaded.tint.colors.indices(),
-        [0, 5, 8],
-        "パレット添字は色相順"
-    );
 }
 
-/// 30° 刻みから外れた値は最も近い色へ丸め、重複は 1 つに畳む（起動は止めない）。
+/// set 名に空白があっても TOML の見出しはクォートされて往復する。
 #[test]
-fn settings_tint_colors_snap_and_dedupe() {
-    let home = TempHome::new("tint_snap");
-    std::fs::write(
-        home.settings_path(),
-        "[tint]\ncolors = [1, 359, 15, 29, 0]\n",
-    )
-    .expect("settings.toml を書ける");
+fn settings_tint_sets_quote_set_names_with_spaces() {
+    let home = TempHome::new("tint_quote");
+    let mut original = Settings::default();
+    original.tint.sets = set_colors("Gaming Shimeji", &["mint"]);
 
-    let settings = Settings::load(&home.settings_path()).expect("設定を読める");
-    let indices = settings.tint.colors.indices();
-    assert_eq!(
-        indices,
-        [0, 1],
-        "1/359/0 は 0° へ、15/29 は 30° へ丸まり、重複は畳まれる"
-    );
-    assert_eq!(
-        settings.tint.colors.hues().collect::<Vec<u32>>(),
-        [0, 30],
-        "丸めた結果は色相でも色相順"
-    );
-}
-
-/// `colors = []` は「1 色も許可しない」として往復する（キー欠落の全許可と区別する）。
-#[test]
-fn settings_tint_colors_empty_list_allows_none() {
-    let home = TempHome::new("tint_empty");
-    std::fs::write(home.settings_path(), "[tint]\ncolors = []\n").expect("settings.toml を書ける");
-
-    let settings = Settings::load(&home.settings_path()).expect("設定を読める");
+    let path = home.settings_path();
+    Settings::save(&path, &original).expect("save できる");
+    let text = std::fs::read_to_string(&path).expect("保存結果を読める");
     assert!(
-        settings.tint.colors.is_empty(),
+        text.contains("[tint.sets.\"Gaming Shimeji\"]"),
+        "空白を含む set 名はクォートされる:\n{text}"
+    );
+
+    let loaded = Settings::load(&path).expect("load できる");
+    assert_settings_eq(&original, &loaded);
+}
+
+/// キー欠落（`colors` を書かない）と `colors = []` を区別して往復する。
+#[test]
+fn settings_tint_sets_distinguish_missing_key_from_empty_list() {
+    let home = TempHome::new("tint_empty");
+    std::fs::write(home.settings_path(), "[tint.sets.Shimeji]\ncolors = []\n")
+        .expect("settings.toml を書ける");
+    let settings = Settings::load(&home.settings_path()).expect("設定を読める");
+    assert_eq!(
+        settings.tint.sets["Shimeji"]
+            .colors
+            .as_ref()
+            .map(|colours| colours.len()),
+        Some(0),
         "空リストは 1 色も許可しない"
+    );
+
+    let home2 = TempHome::new("tint_missing");
+    std::fs::write(home2.settings_path(), "[tint.sets.Shimeji]\n").expect("settings.toml を書ける");
+    let settings = Settings::load(&home2.settings_path()).expect("設定を読める");
+    assert_eq!(
+        settings.tint.sets["Shimeji"].colors, None,
+        "キー欠落は全色（`colors = []` と区別する）"
+    );
+
+    let path = home2.settings_path();
+    Settings::save(&path, &settings).expect("save できる");
+    let text = std::fs::read_to_string(&path).expect("保存結果を読める");
+    // 説明コメント（TINT_HELP）にも "colors" は現れるため、値の行だけを見る
+    let values: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect();
+    assert!(
+        values
+            .iter()
+            .any(|line| line.contains("[tint.sets.Shimeji]")),
+        "キー欠落の set は見出しだけ残る:\n{text}"
+    );
+    assert!(
+        !values.iter().any(|line| line.contains("colors")),
+        "全色（None）は colors を書かない:\n{text}"
+    );
+}
+
+/// 旧形式 `[tint] colors = [色相, ...]` は読めるが**無視して警告する**（全色許可）。
+/// 保存し直すと旧キーは消える。
+#[test]
+fn settings_ignores_legacy_tint_colours() {
+    let home = TempHome::new("tint_legacy");
+    std::fs::write(home.settings_path(), "[tint]\ncolors = [0, 150, 240]\n")
+        .expect("settings.toml を書ける");
+
+    let settings = Settings::load(&home.settings_path()).expect("旧形式を読める");
+    assert!(
+        settings.tint.sets.is_empty(),
+        "旧 colors は使わない（全色許可）"
     );
 
     let path = home.settings_path();
     Settings::save(&path, &settings).expect("save できる");
     let text = std::fs::read_to_string(&path).expect("保存結果を読める");
     assert!(
-        text.contains("colors = []"),
-        "空も空のまま保存される:\n{text}"
+        !text.contains("colors = [0"),
+        "旧形式は書き戻さない:\n{text}"
     );
 }
 
-/// 小数（30.0）でも整数（30）と同じ色として読む（TOML の数値型に依存しない）。
+/// 未知の id は**読める**（保存時も消さない = 作者が id を戻したときに設定が残る）。
 #[test]
-fn settings_tint_colors_accept_float_hues() {
-    let home = TempHome::new("tint_float");
-    std::fs::write(home.settings_path(), "[tint]\ncolors = [30.0, 210.5]\n")
-        .expect("settings.toml を書ける");
+fn settings_keeps_unknown_colour_ids() {
+    let home = TempHome::new("tint_unknown_id");
+    std::fs::write(
+        home.settings_path(),
+        "[tint.sets.Shimeji]\ncolors = [\"retired\"]\n",
+    )
+    .expect("settings.toml を書ける");
 
     let settings = Settings::load(&home.settings_path()).expect("設定を読める");
+    let loaded = &settings.tint.sets["Shimeji"];
     assert_eq!(
-        settings.tint.colors.indices(),
-        [1, 7],
-        "小数も同じ丸めで読む（210.5 は 210 の枠）"
+        loaded.colors.as_ref().map(|c| c.len()),
+        Some(1),
+        "未知 id もそのまま保持する（自己修復しない）"
     );
+
+    let path = home.settings_path();
+    Settings::save(&path, &settings).expect("save できる");
+    let text = std::fs::read_to_string(&path).expect("保存結果を読める");
+    assert!(text.contains("retired"), "保存しても消えない:\n{text}");
 }
 
-/// 色の指定が壊れている（文字列・配列以外）→ パースエラーとして拒否する
+/// 型が違う（文字列）`colors` はパースエラーとして拒否する
 ///（起動時にファイルパス付きで表示して終了する既存方針に合わせる）。
 #[test]
-fn settings_tint_colors_rejects_non_numeric_entries() {
+fn settings_tint_sets_reject_non_list_colours() {
     let home = TempHome::new("tint_bad_type");
-    std::fs::write(home.settings_path(), "[tint]\ncolors = [\"strawberry\"]\n")
-        .expect("settings.toml を書ける");
+    std::fs::write(
+        home.settings_path(),
+        "[tint.sets.Shimeji]\ncolors = \"strawberry\"\n",
+    )
+    .expect("settings.toml を書ける");
 
     let result = Settings::load(&home.settings_path());
-    assert!(result.is_err(), "文字列の色指定はパースエラー: {result:?}");
+    assert!(
+        result.is_err(),
+        "配列以外の色指定はパースエラー: {result:?}"
+    );
 }

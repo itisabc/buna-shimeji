@@ -18,7 +18,7 @@ use thiserror::Error;
 
 pub mod script;
 
-use crate::tint::{Sweep, TintMode, TintStyle};
+use crate::tint::{Palette, PaletteColor, TintMode, TintStyle};
 
 use script::Variable;
 
@@ -44,9 +44,11 @@ pub struct ConfigError {
 #[derive(Debug, Clone, Default)]
 pub struct ActionsConfig {
     pub actions: BTreeMap<String, ActionDef>,
-    /// ルート `<Mascot>` の色づけ宣言（`Tint` / `TintSpeed` / `TintSat` / `TintLum` /
-    /// `TintGlow` / `TintSweep`）。未指定・不正値は既定（色づけなし）。
+    /// ルート `<Mascot>` の色づけ宣言（`Tint` / `TintSpeed` / `TintStart` / `TintSat` /
+    /// `TintLum` / `TintGlow`）。未指定・不正値は既定（色づけなし）。
     pub tint: TintStyle,
+    /// ルート `<Mascot>` の `<TintPalette>`（この set が持つ色）。空 = 色なし。
+    pub palette: Palette,
 }
 
 impl ActionsConfig {
@@ -258,14 +260,21 @@ pub fn parse_actions(path: &Path) -> Result<ActionsConfig, ConfigError> {
         }
     }
     let tint = parse_tint_decl(&cx, root);
-    Ok(ActionsConfig { actions, tint })
+    // `<Color>` の省略値は宣言値に依存するため、宣言 → パレットの順に読む
+    let palette = parse_tint_palette(&cx, root, &tint);
+    Ok(ActionsConfig {
+        actions,
+        tint,
+        palette,
+    })
 }
 
 /// ルート `<Mascot>` の色づけ宣言を読む（設計: `docs/plans/design-gaming-color.md`）。
 ///
-/// `Tint` の値は `off` / `rainbow` / `random` / `#RRGGBB`。未知の値と数値のパース失敗は
-/// **警告ログ + 既定値**へフォールバックする（未対応の script 式と同じ方針で、
-/// 起動は止めない）。
+/// `Tint` の値は `random`（出現のたびにパレットの許可色から抽選）/ `cycle`（全色相を回す。
+/// 別名 `rainbow`）。**省略・`off`・`none` = 色づけなし**で、それ以外の値（旧 `within` /
+/// `steps` / `#RRGGBB` など）は**警告 + 無色**（起動は止めない＝未対応の script 式と同じ方針）。
+/// `TintStart` は初期色相（既定 0・wrap）。
 fn parse_tint_decl(cx: &Cx, root: Node) -> TintStyle {
     let mut style = TintStyle::default();
     let Some(text) = root.attribute("Tint") else {
@@ -275,19 +284,16 @@ fn parse_tint_decl(cx: &Cx, root: Node) -> TintStyle {
         "off" | "none" => TintMode::Off,
         "rainbow" | "cycle" => TintMode::Cycle,
         "random" => TintMode::Random,
-        other => match crate::tint::hex_to_hue(other) {
-            Some(hue) => TintMode::Fixed(hue),
-            None => {
-                log::warn!(
-                    "{}:{}: unknown Tint value `{other}`: treating as off",
-                    cx.file,
-                    cx.line_of(root)
-                );
-                TintMode::Off
-            }
-        },
+        other => {
+            log::warn!(
+                "{}:{}: unknown Tint value `{other}`: treating as no tinting",
+                cx.file,
+                cx.line_of(root)
+            );
+            TintMode::Off
+        }
     };
-    // 回転速度の既定は「回す宣言のときだけ 150」。固定色・抽選では 0（回さない）
+    // 回転速度の既定は「回す宣言のときだけ 150」。抽選（random）では 0（出現時に固定される）
     let default_rotate = if style.mode == TintMode::Cycle {
         crate::tint::DEFAULT_ROTATE
     } else {
@@ -297,20 +303,7 @@ fn parse_tint_decl(cx: &Cx, root: Node) -> TintStyle {
     style.sat = tint_num_attr(cx, root, "TintSat", crate::tint::DEFAULT_SAT);
     style.lum = tint_num_attr(cx, root, "TintLum", crate::tint::DEFAULT_LUM);
     style.glow = tint_num_attr(cx, root, "TintGlow", crate::tint::DEFAULT_GLOW);
-    style.sweep = match root.attribute("TintSweep") {
-        None => Sweep::Within,
-        Some("within") => Sweep::Within,
-        Some("full") => Sweep::Full,
-        Some("steps") => Sweep::Steps,
-        Some(other) => {
-            log::warn!(
-                "{}:{}: unknown TintSweep value `{other}`: using within",
-                cx.file,
-                cx.line_of(root)
-            );
-            Sweep::Within
-        }
-    };
+    style.start = tint_angle_attr(cx, root, "TintStart", 0.0);
     style
 }
 
@@ -328,6 +321,91 @@ fn tint_num_attr(cx: &Cx, node: Node, name: &str, default: f32) -> f32 {
                 cx.line_of(node)
             );
             default
+        }
+    }
+}
+
+/// ルート属性の色相（度）。[`tint_num_attr`] と同じ扱いで、値を 0 以上 360 未満へ wrap する
+/// （`TintStart` は負値と 360 以上を許す）。
+fn tint_angle_attr(cx: &Cx, node: Node, name: &str, default: f32) -> f32 {
+    tint_num_attr(cx, node, name, default).rem_euclid(360.0)
+}
+
+/// ルート `<Mascot>` の `<TintPalette>` を読む（設計 §再設計）。無ければ空（= 色なし）。
+///
+/// `<Color>` は `Id` が必須。`Id` 欠落・不正な文字・重複は**その色だけ**捨てて警告する
+/// （重複は先勝ち = 最初に書いた色が残る）。数値の不正も同じ扱い（起動は止めない）。
+fn parse_tint_palette(cx: &Cx, root: Node, decl: &TintStyle) -> Palette {
+    let Some(node) = element_children(root, "TintPalette").next() else {
+        return Palette::default();
+    };
+    let mut colors: Vec<PaletteColor> = Vec::new();
+    for color in element_children(node, "Color") {
+        let Some(parsed) = parse_palette_color(cx, color, decl) else {
+            continue;
+        };
+        if colors.iter().any(|kept| kept.id == parsed.id) {
+            log::warn!(
+                "{}:{}: duplicate colour Id `{}`: keeping the first",
+                cx.file,
+                cx.line_of(color),
+                parsed.id
+            );
+            continue;
+        }
+        colors.push(parsed);
+    }
+    Palette::from_colors(colors)
+}
+
+/// `<Color>` 1 色。`Id` 欠落・不正な `Id` と不正な数値は警告 + `None`（その色を捨てる）。
+fn parse_palette_color(cx: &Cx, node: Node, decl: &TintStyle) -> Option<PaletteColor> {
+    let line = cx.line_of(node);
+    let Some(id) = node
+        .attribute("Id")
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        log::warn!("{}:{line}: <Color> without Id: skipped", cx.file);
+        return None;
+    };
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        log::warn!("{}:{line}: invalid colour Id `{id}`: skipped", cx.file);
+        return None;
+    }
+    Some(PaletteColor {
+        id: id.to_string(),
+        // `Name` 省略時は `Id` を表示名にする（辞書は通さない = 作者データ）
+        name: node
+            .attribute("Name")
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(id)
+            .to_string(),
+        hue: palette_num_attr(cx, node, "Hue", 0.0)?.rem_euclid(360.0),
+        sat: palette_num_attr(cx, node, "Sat", decl.sat)?,
+        lum: palette_num_attr(cx, node, "Lum", decl.lum)?,
+        glow: palette_num_attr(cx, node, "Glow", decl.glow)?,
+    })
+}
+
+/// `<Color>` の数値属性。未指定は `default`、パース失敗・非有限は警告 + `None`（その色を捨てる）。
+fn palette_num_attr(cx: &Cx, node: Node, name: &str, default: f32) -> Option<f32> {
+    let Some(text) = node.attribute(name) else {
+        return Some(default);
+    };
+    match text.trim().parse::<f32>() {
+        Ok(value) if value.is_finite() => Some(value),
+        _ => {
+            log::warn!(
+                "{}:{}: invalid {name} `{text}`: dropping this colour",
+                cx.file,
+                cx.line_of(node)
+            );
+            None
         }
     }
 }

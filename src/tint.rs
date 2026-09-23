@@ -4,37 +4,36 @@
 //! ルート `<Mascot>` 属性で与える:
 //!
 //! ```xml
-//! <Mascot Tint="rainbow" TintSpeed="150" TintSat="100" TintLum="62" TintGlow="1.4" TintSweep="within">
+//! <Mascot Tint="cycle" TintSpeed="150" TintStart="0" TintSat="100" TintLum="62" TintGlow="1.4">
+//! ```
+//!
+//! 存在する色は同じ set の `<TintPalette>` が持つ（本体は色を知らない）:
+//!
+//! ```xml
+//! <TintPalette>
+//!   <Color Id="strawberry" Name="いちご" Hue="0"/>
+//!   <Color Id="white" Sat="0" Lum="100" Glow="0"/>
+//! </TintPalette>
 //! ```
 //!
 //! 色は「基準色相 + 回転速度」で表し、ゲーミング / パステル の違いは [`TintStyle`] の
 //! 数値の組でしかない（設計: `docs/plans/design-gaming-color.md`）。
-//! 個体が持つのは位相だけ（[`crate::mascot::Mascot`] 側）で、速度・彩度・明度・グロー・
-//! 回転のしかたは set 単位のこの型が持つ。
+//! 個体が持つのは確定色（色相・彩度・明度・グロー）と位相だけで（[`crate::mascot::Mascot`] 側）、
+//! 宣言の規則（選び方・速度・初期位相）と省略値は set 単位のこの型が持つ。
 
-/// 回転のしかた。既定は [`Sweep::Within`]。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Sweep {
-    /// 全色相をなめらかに回る（許可色の絞り込みはランダムにだけ効く）。
-    Full,
-    /// 許可された色の範囲だけをなめらかに回る。
-    #[default]
-    Within,
-    /// 許可された色を順に切り替える（補間なし）。
-    Steps,
-}
+use std::collections::BTreeSet;
 
 /// 色の出し方（`Tint` 属性の値）。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum TintMode {
-    /// 色づけなし（既定）。
+    /// 色づけなし（既定・`Tint` を書かない）。
     #[default]
     Off,
-    /// 色相を回し続ける（`rainbow`）。
+    /// 色相を回し続ける（`cycle` / `rainbow`）。パレットを参照しない。
     Cycle,
     /// 出現のたびに許可色から抽選する（`random`）。
     Random,
-    /// 固定色（`#RRGGBB` の色相・度）。
+    /// 確定色（出現時に決まった色相・度）。宣言では使わず、解決済みの個体だけが持つ。
     Fixed(f32),
 }
 
@@ -43,7 +42,7 @@ pub enum TintMode {
 pub struct TintStyle {
     /// 色の出し方。
     pub mode: TintMode,
-    /// 回転速度（°/秒）。0 なら固定色。
+    /// 回転速度（°/秒）。0 なら位相を進めない（`start` の色相で固定）。
     pub rotate: f32,
     /// 彩度（%）。
     pub sat: f32,
@@ -51,8 +50,8 @@ pub struct TintStyle {
     pub lum: f32,
     /// グロー強度（0 で光らない）。
     pub glow: f32,
-    /// 回転のしかた。
-    pub sweep: Sweep,
+    /// 出現時の位相の初期値（色相・度・0 以上 360 未満）。`TintSpeed="0"` と組めば固定色。
+    pub start: f32,
 }
 
 /// 既定の彩度（%）。ゲーミングの値。
@@ -67,140 +66,99 @@ pub const DEFAULT_GLOW: f32 = 1.0;
 /// 加算すると面積ぶん白飛びする（プロトタイプの `gain` と同じ値）。
 pub const GLOW_GAIN: f32 = 0.4;
 
-/// 出現を許可する色の単位（コア固定の 12 色・色相 30° 刻み）。
+/// パレットの 1 色。色（hue / sat / lum）と、その色でいるときのグロー（glow）を持つ。
 ///
-/// 添字は色相順で、色相 = 添字 × 30。**表示名は辞書**（`conf/lang/<code>.toml`）が持ち、
-/// ここには色相値だけを置く（設計: 「12 色の表示名は辞書に置く」）。
-/// 既定の日本語名は いちご / みかん / レモン / メロン / マスカット / ミント / ソーダ /
-/// そらいろ / ブルーベリー / ぶどう / カシス / もも、英語名は Strawberry / Tangerine /
-/// Lemon / Melon / Muscat / Mint / Soda / Sky blue / Blueberry / Grape / Cassis / Peach。
-pub const PALETTE_HUES: [u32; 12] = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330];
-
-/// パレットの色数（[`PALETTE_HUES`] の長さ）。
-pub const PALETTE_LEN: usize = PALETTE_HUES.len();
-
-/// パレット添字の色相（度）。範囲外は `None`。
-pub fn palette_hue(index: usize) -> Option<u32> {
-    PALETTE_HUES.get(index).copied()
+/// 省略した属性は `<Mascot>` の宣言値（`TintSat` / `TintLum` / `TintGlow`。`Hue` は 0）を
+/// 既定として**パース時に埋める**ので、利用側は解決済みの値だけを見る。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaletteColor {
+    /// 設定へ保存する安定キー（`[A-Za-z0-9_-]`・set 内で一意）。表示名ではない。
+    pub id: String,
+    /// 表示名（`Name` 省略時は `id`）。**辞書を通さない**（作者データ。AGENTS.md §6 の適用外）。
+    pub name: String,
+    /// 色相（度・0 以上 360 未満）。
+    pub hue: f32,
+    /// 彩度（%）。`0` = 無彩色で、R21 の写像先の候補から外れる。
+    pub sat: f32,
+    /// 明度（%）。
+    pub lum: f32,
+    /// この色でいるときのグロー強度（0 で光らない）。
+    pub glow: f32,
 }
 
-/// 色相（度）を最も近いパレット色の添字へ丸める。
-///
-/// 丸めは 30° 刻みで、境界の 15° は上の色（`f32::round` の half away from zero）。
-/// 負値と 360 以上は wrap し、NaN は 0 になる。宣言の `#RRGGBB` から得た色相も
-/// この関数を通して「どの名前付き色か」を決める（設計: 最も近い名前付き色に丸める）。
-pub fn hue_to_palette_index(hue: f32) -> usize {
-    // NaN は `as usize` で 0 になる（丸めた値をそのまま使う。位相を進める関数ではない）
-    ((hue.rem_euclid(360.0) / 30.0).round() as usize) % PALETTE_LEN
+/// set ごとのパレット（`<TintPalette>` の宣言順）。空 = 色なし。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Palette {
+    /// 宣言順の色（メニューの並びが作者の意図になるので、色相順へ並べ替えない）。
+    colors: Vec<PaletteColor>,
 }
 
-/// 出現を許可する色の集合（パレット添字・色相順・重複なし）。
-///
-/// この集合が「お気に入り」であり、同時にランダム出現（[`TintMode::Random`]）の
-/// 抽選母集団、[`Sweep::Within`] / [`Sweep::Steps`] の回転範囲になる（別々に持たない）。
-/// 空 = 1 色も許可しない。**オン/オフの切り替え UI は持たない**（トレイ・右クリックは別スライス）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ColorSet {
-    /// 許可するパレット添字（昇順・重複なし）。
-    slots: Vec<usize>,
-}
-
-impl Default for ColorSet {
-    /// 既定は全 12 色（何も絞っていない状態。絞るのは利用者の操作）。
-    fn default() -> Self {
-        ColorSet {
-            slots: (0..PALETTE_LEN).collect(),
-        }
-    }
-}
-
-impl ColorSet {
-    /// 全 12 色を許可する集合。
-    pub fn all() -> Self {
-        Self::default()
+impl Palette {
+    /// 宣言順の色から作る（[`crate::config::parse_actions`] のパース結果）。
+    pub fn from_colors(colors: Vec<PaletteColor>) -> Self {
+        Palette { colors }
     }
 
-    /// 許可色なしの集合（`settings.toml` の `colors = []`）。
-    pub fn none() -> Self {
-        ColorSet { slots: Vec::new() }
-    }
-
-    /// 色相の列から作る（`settings.toml` の `[tint] colors`）。
-    ///
-    /// 各値は最も近いパレット色へ丸める。30° 刻みから外れた値は `log::warn` で
-    /// 知らせる（起動は止めない＝宣言の不正値と同じ方針）。重複は 1 つに畳み、
-    /// 並びは色相順に正規化する（抽選と回転が色相順を前提にするため）。
-    pub fn from_hues(hues: impl IntoIterator<Item = f32>) -> Self {
-        let mut slots: Vec<usize> = Vec::new();
-        for hue in hues {
-            let index = hue_to_palette_index(hue);
-            let snapped = PALETTE_HUES[index] as f32;
-            let wrapped = hue.rem_euclid(360.0);
-            // 円環距離（359.9 は 0 へ丸まるので、差は 0.1 として見る）
-            let delta = (wrapped - snapped)
-                .abs()
-                .min(360.0 - (wrapped - snapped).abs());
-            if hue.is_finite() && delta > 0.5 {
-                log::warn!("[tint] colors: {hue} is not a 30-degree palette hue; using {snapped}");
-            }
-            if !slots.contains(&index) {
-                slots.push(index);
-            }
-        }
-        slots.sort_unstable();
-        ColorSet { slots }
-    }
-
-    /// その色を許可しているか（パレット添字）。
-    pub fn contains(&self, index: usize) -> bool {
-        self.slots.binary_search(&index).is_ok()
-    }
-
-    /// パレット添字の許可を切り替える（集合は昇順・重複なしを保つ）。
-    /// パレット外の添字は無視する（呼び出し側の値が壊れていても集合を壊さない）。
-    pub fn set_index(&mut self, index: usize, allowed: bool) {
-        if index >= PALETTE_LEN {
-            return;
-        }
-        match self.slots.binary_search(&index) {
-            Ok(position) => {
-                if !allowed {
-                    self.slots.remove(position);
-                }
-            }
-            Err(position) => {
-                if allowed {
-                    self.slots.insert(position, index);
-                }
-            }
-        }
-    }
-
-    /// 色相を許可集合へ加える（最も近いパレット色へ丸める）。
-    /// 右クリック「この色を出す」（R21）が、個体の現在色で呼ぶ。
-    pub fn insert_hue(&mut self, hue: f32) {
-        self.set_index(hue_to_palette_index(hue), true);
-    }
-
-    /// 許可色のパレット添字（色相順）。抽選母集団と回転範囲の正本。
-    pub fn indices(&self) -> &[usize] {
-        &self.slots
-    }
-
-    /// 許可色の色相（度・色相順）。`settings.toml` への書き出しに使う。
-    pub fn hues(&self) -> impl Iterator<Item = u32> + '_ {
-        self.slots.iter().map(|&index| PALETTE_HUES[index])
-    }
-
-    /// 許可色数。
-    pub fn len(&self) -> usize {
-        self.slots.len()
-    }
-
-    /// 許可色が 1 つも無いか。
+    /// 色が 1 つも無いか（`<TintPalette>` 未宣言も空）。
     pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
+        self.colors.is_empty()
     }
+
+    /// 宣言順の位置で 1 色を取り出す。
+    pub fn get(&self, index: usize) -> Option<&PaletteColor> {
+        self.colors.get(index)
+    }
+
+    /// 宣言順の色を順に返す（トレイの一覧とセット別サブメニューの並びの正本）。
+    pub fn iter(&self) -> impl Iterator<Item = &PaletteColor> {
+        self.colors.iter()
+    }
+
+    /// `Id` から位置を引く（許可集合は id で保存される）。
+    pub fn index_of_id(&self, id: &str) -> Option<usize> {
+        self.colors.iter().position(|color| color.id == id)
+    }
+
+    /// その色（hue / sat / lum）と完全一致する位置を引く（R21 の写像の第 1 段）。
+    ///
+    /// R19（一覧から選ぶ）/ R20（抽選）の個体はパレットの値をそのまま写しているので一致する。
+    /// `glow` は見ない（`cycle` の個体は宣言値を持ち、パレットのグローと一致しないため）。
+    pub fn index_of_values(&self, hue: f32, sat: f32, lum: f32) -> Option<usize> {
+        self.colors
+            .iter()
+            .position(|color| color.hue == hue && color.sat == sat && color.lum == lum)
+    }
+
+    /// 色相が最も近い色の位置（R21 の「この色を出す」の写像先）。
+    ///
+    /// 候補は**有彩色（`sat > 0`）だけ**にする（無彩色は色相を持たず、hue 0 の白と
+    /// hue 0 の赤を区別できない）。距離は色相環の最短弧で見る。候補が無ければ `None`。
+    pub fn nearest_index(&self, hue: f32) -> Option<usize> {
+        let mut nearest: Option<(usize, f32)> = None;
+        for (index, color) in self.colors.iter().enumerate() {
+            if color.sat <= 0.0 {
+                continue;
+            }
+            let distance = hue_distance(color.hue, hue);
+            if nearest.is_none_or(|(_, best)| distance < best) {
+                nearest = Some((index, distance));
+            }
+        }
+        nearest.map(|(index, _)| index)
+    }
+}
+
+/// 色相環の最短弧（度）。
+fn hue_distance(a: f32, b: f32) -> f32 {
+    let d = (a - b).rem_euclid(360.0);
+    d.min(360.0 - d)
+}
+
+/// その色 id が許可されているか（`settings.toml` の set 別 `colors` の判定）。
+///
+/// `None`（キー欠落）= その set の全色を許可、`Some(空)` = 1 色も許可しない。
+pub fn id_allowed(allowed: Option<&BTreeSet<String>>, id: &str) -> bool {
+    allowed.is_none_or(|colors| colors.contains(id))
 }
 
 impl Default for TintStyle {
@@ -211,7 +169,7 @@ impl Default for TintStyle {
             sat: DEFAULT_SAT,
             lum: DEFAULT_LUM,
             glow: DEFAULT_GLOW,
-            sweep: Sweep::Within,
+            start: 0.0,
         }
     }
 }
@@ -230,44 +188,21 @@ impl TintStyle {
         (self.glow * GLOW_GAIN * 255.0).round().clamp(0.0, 255.0) as u8
     }
 
-    /// 出現時の色を固定した見せ方（宣言の sat / lum / glow / sweep は引き継ぎ、回転は止める）。
+    /// 出現時に決まった色を与えた見せ方（R19 の手動指定 / R20 の抽選 / パレットの色）。
     ///
-    /// 手動で選んだ色（R19）とランダム抽選（R20）の個体に使う。回転を残すと選んだ色が
-    /// 数秒で変わってしまい「その色の個体を出す」にならないため `rotate = 0` にする。
-    /// 宣言で回している set（`Tint="rainbow"`）でも、色を指定して出した個体は固定色になる。
-    pub fn fixed_at(self, hue: f32) -> Self {
+    /// 個体の色は**確定色**（hue / sat / lum / glow をパレットの色からそのまま写す）になり、
+    /// 回転は止める（[`TintStyle::rotate`] = 0）。回転を残すと選んだ色が数秒で変わってしまい
+    /// 「その色の個体を出す」にならないため。`start` もその色に合わせる。
+    pub fn with_color(self, color: &PaletteColor) -> Self {
         TintStyle {
-            mode: TintMode::Fixed(hue),
+            mode: TintMode::Fixed(color.hue),
             rotate: 0.0,
-            ..self
+            sat: color.sat,
+            lum: color.lum,
+            glow: color.glow,
+            start: color.hue,
         }
     }
-}
-
-/// `#RRGGBB` / `RRGGBB` を HSL の色相（度・0 以上 360 未満）へ変換する。
-/// 桁数違い・非 16 進は `None`。彩度 0 相当（R=G=B）は 0 を返す。
-pub fn hex_to_hue(text: &str) -> Option<f32> {
-    let hex = text.strip_prefix('#').unwrap_or(text);
-    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let d = max - min;
-    if d == 0.0 {
-        return Some(0.0);
-    }
-    let h = if max == r {
-        60.0 * (((g - b) / d) % 6.0)
-    } else if max == g {
-        60.0 * ((b - r) / d + 2.0)
-    } else {
-        60.0 * ((r - g) / d + 4.0)
-    };
-    Some(if h < 0.0 { h + 360.0 } else { h })
 }
 
 /// `hsl(hue, sat%, lum%)` を sRGB の RGB へ変換する。
