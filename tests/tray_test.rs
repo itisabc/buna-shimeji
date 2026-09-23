@@ -74,6 +74,8 @@
 //!
 //! pub struct TrayMenuModel { /* 非公開フィールド */ }
 //! impl TrayMenuModel {
+//!     // 「呼ぶ」: （ランダム）+ set ごと。色を選べる set（パレット非空 && 許可色 1 つ以上）だけが
+//!     // サブメニュー（「（既定）」+ separator + 許可色）。それ以外の set は set 名の項目で直接呼ぶ
 //!     pub fn build_tray(inputs: &MenuInputs, allowed: &AllowedSettings, lang: &Lang) -> TrayMenuModel
 //!     pub fn build_popup(index: usize, inputs: &MenuInputs, menu_items: &BehaviorMenu, can_allow_color: bool, is_paused: bool, lang: &Lang) -> TrayMenuModel
 //!     pub fn menu(&self) -> &tray_icon::menu::Menu
@@ -1989,23 +1991,19 @@ fn spawn_submenu_with_no_allowed_colours_has_only_default_item() {
     let menu_items = model.menu().items();
     let spawn = expect_submenu(&menu_items[0], "呼ぶ");
     let children = spawn.items();
-    assert_eq!(
-        children.len(),
-        2,
-        "（ランダム）+ set サブメニュー（set 名は残る）"
-    );
-    let shimeji = expect_submenu(&children[1], "Shimeji");
-    assert_eq!(shimeji.items().len(), 1, "「（既定）」だけ");
+    assert_eq!(children.len(), 2, "（ランダム）+ set の項目");
+    // 許可色 0 の set はサブメニューにせず、set 名の項目そのものになる
+    assert_eq!(expect_item_text(&children[1], "Shimeji"), "Shimeji");
     assert!(
         matches!(
-            model.command_of(shimeji.items()[0].id()),
+            model.command_of(children[1].id()),
             Some(TrayCommand::Spawn(Some(ref s))) if s == "Shimeji"
         ),
-        "「（既定）」だけが残り、従来の「set を呼ぶ」は維持される"
+        "set 名の項目が従来の「set を呼ぶ」になる"
     );
 }
 
-/// `Tint` を宣言していない set（色づけ非対応）には色一覧を出さない（スライス 6c）。
+/// `Tint` を宣言していない set（色づけ非対応）はサブメニューを作らず、set 名の項目で呼ぶ。
 #[test]
 fn spawn_submenu_hides_colours_for_sets_without_tint() {
     let sets = vec!["Shimeji".to_string(), "Gaming".to_string()];
@@ -2019,17 +2017,19 @@ fn spawn_submenu_hides_colours_for_sets_without_tint() {
     let menu_items = model.menu().items();
     let spawn = expect_submenu(&menu_items[0], "呼ぶ");
     let children = spawn.items();
-    let plain = expect_submenu(&children[1], "Shimeji");
-    assert_eq!(
-        plain.items().len(),
-        1,
-        "色づけ非対応の set は「（既定）」だけ"
+    assert_eq!(expect_item_text(&children[1], "Shimeji"), "Shimeji");
+    assert!(
+        matches!(
+            model.command_of(children[1].id()),
+            Some(TrayCommand::Spawn(Some(ref s))) if s == "Shimeji"
+        ),
+        "色づけ非対応の set は set 名の項目で直接呼ぶ"
     );
     let gaming = expect_submenu(&children[2], "Gaming");
     assert_eq!(
         gaming.items().len(),
         TEST_COLOURS.len() + 2,
-        "色づけ対応の set だけ色一覧が出る"
+        "色づけ対応の set だけサブメニューになり色一覧が出る"
     );
     assert_eq!(expect_item_text(&gaming.items()[2], "色 1"), "いちご");
 }
@@ -2054,11 +2054,13 @@ fn tray_hides_allowed_colours_submenu_without_capable_sets() {
     expect_separator(&items[5], "許可する行為 の後");
     let spawn = expect_submenu(&items[0], "呼ぶ");
     for child in spawn.items()[1..].iter() {
-        let set_menu = expect_submenu(child, "set");
-        assert_eq!(
-            set_menu.items().len(),
-            1,
-            "色づけ非対応の set は「（既定）」だけ"
+        let name = expect_item_text(child, "set");
+        assert!(
+            matches!(
+                model.command_of(child.id()),
+                Some(TrayCommand::Spawn(Some(ref s))) if s == &name
+            ),
+            "色づけ非対応の set は set 名の項目で直接呼ぶ"
         );
     }
 }

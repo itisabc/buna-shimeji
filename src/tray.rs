@@ -627,12 +627,13 @@ impl<'a> MenuInputs<'a> {
 
 /// 「呼ぶ」サブメニュー（tray / popup 共通構成・案 1）:
 /// 先頭 [`UiKey::SpawnRandom`] = [`TrayCommand::Spawn`]`(None)` + 各 set のサブメニュー。
-/// set のサブメニューは [`UiKey::SpawnDefault`]（宣言の tint のまま =
-/// [`TrayCommand::Spawn`]`(Some(set))`）に続けて、**許可されている色**をパレットの
-/// 宣言順に並べる（[`TrayCommand::SpawnColored`]。ラベルは宣言の `Name`）。
+/// **色を選べる set だけサブメニューにする**: サブメニューの中身は
+/// [`UiKey::SpawnDefault`]（宣言の tint のまま = [`TrayCommand::Spawn`]`(Some(set))`）に続けて、
+/// **許可されている色**をパレットの宣言順に並べる（[`TrayCommand::SpawnColored`]。ラベルは宣言の `Name`）。
 ///
-/// **色一覧はその set のパレットが非空で、許可色が 1 つ以上あるときだけ出す**
-/// （パレットを宣言していない set は「（既定）」のみ・許可 0 色のときも同じ）。
+/// **パレットが無い set（tint 非対応）と許可色 0 色の set は、サブメニューを作らず
+/// set 名そのものを項目にする**（中身が「（既定）」1 つだけのサブメニューは階層を増やすだけなので）。
+/// 動作は同じ `Spawn(Some(set))`（宣言どおりの tint で出る）。
 /// サブメニュー名は `label`（tray = `CallShimeji` / popup = `CallAnother`）を辞書で解決する。
 fn build_spawn_submenu(
     inputs: &MenuInputs,
@@ -647,6 +648,22 @@ fn build_spawn_submenu(
         .append(&random)
         .expect("failed to append the (random) menu item");
     for image_set in inputs.image_sets {
+        let colours: Vec<&PaletteColor> = match inputs.palette_of(image_set) {
+            Some(palette) => inputs.allowed_colours(image_set, palette).collect(),
+            None => Vec::new(),
+        };
+        if colours.is_empty() {
+            // 色を選べない set はサブメニューにせず、set 名の項目そのもので呼ぶ
+            let item = MenuItem::new(image_set, true, None);
+            commands.insert(
+                item.id().clone(),
+                TrayCommand::Spawn(Some(image_set.clone())),
+            );
+            submenu
+                .append(&item)
+                .expect("failed to append a call set item");
+            continue;
+        }
         let set_menu = Submenu::new(image_set, true);
         let default = MenuItem::new(lang.text(UiKey::SpawnDefault), true, None);
         commands.insert(
@@ -656,25 +673,19 @@ fn build_spawn_submenu(
         set_menu
             .append(&default)
             .expect("failed to append the (default) menu item");
-        let colours: Vec<&PaletteColor> = match inputs.palette_of(image_set) {
-            Some(palette) => inputs.allowed_colours(image_set, palette).collect(),
-            None => Vec::new(),
-        };
-        if !colours.is_empty() {
+        set_menu
+            .append(&PredefinedMenuItem::separator())
+            .expect("failed to append the colour separator");
+        for color in colours {
+            // 色名は作者データ（辞書を通さない・設計 §red-team 反映 10）
+            let item = MenuItem::new(color.name.clone(), true, None);
+            commands.insert(
+                item.id().clone(),
+                TrayCommand::SpawnColored(image_set.clone(), color.id.clone()),
+            );
             set_menu
-                .append(&PredefinedMenuItem::separator())
-                .expect("failed to append the colour separator");
-            for color in colours {
-                // 色名は作者データ（辞書を通さない・設計 §red-team 反映 10）
-                let item = MenuItem::new(color.name.clone(), true, None);
-                commands.insert(
-                    item.id().clone(),
-                    TrayCommand::SpawnColored(image_set.clone(), color.id.clone()),
-                );
-                set_menu
-                    .append(&item)
-                    .expect("failed to append a colour menu item");
-            }
+                .append(&item)
+                .expect("failed to append a colour menu item");
         }
         submenu
             .append(&set_menu)
