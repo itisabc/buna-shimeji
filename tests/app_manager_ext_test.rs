@@ -102,6 +102,7 @@ use shimeji::mascot::behavior::{
 };
 use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
 use shimeji::render::imageset::ImageSet;
+use shimeji::tint::{TintMode, TintStyle};
 
 // =====================================================================
 // 合成データヘルパ（自己完結）
@@ -1156,6 +1157,57 @@ fn manager_applies_transform_switching_image_set_and_behavior() {
         Some("Arrived"),
         "変身先 set の TransformBehavior が構築される"
     );
+}
+
+/// 変身は Reload と同じ再解決を行う: **パレットを持たない set へ変身したら色が消える**
+/// （設計: スライス 9〜10 の §red-team 反映 4。旧宣言・旧確定色を残さない）。
+#[test]
+fn manager_transform_clears_the_colour_when_the_target_set_has_no_palette() {
+    let (env, _) = single_monitor_env();
+    let mut rng = fixed_rng(vec![0.0; 16]);
+    let mut factory = TransformFactory;
+    let base = table(vec![transform_row()]);
+    let mut mascot = mascot_of_set("SourceSet", (500, 500));
+    let runner = base
+        .build_behavior_direct("TransformMe", &mut factory, &mascot)
+        .expect("TransformMe を構築できる");
+    mascot
+        .set_behavior(Some(runner), &env, &base, &mut factory, &mut *rng)
+        .unwrap();
+    // 色づけした個体を用意する（spawn / Reload が注入するのと同じ経路）
+    mascot.set_tint_style(TintStyle {
+        mode: TintMode::Cycle,
+        rotate: 150.0,
+        start: 210.0,
+        ..Default::default()
+    });
+
+    let mut manager = Manager::new(env, base, Box::new(factory), rng);
+    manager.set_exit_on_last_removed(false);
+    manager.set_image_set_resolver(resolver_for(&["SourceSet", "TargetSet"]));
+    manager.set_behavior_table("TargetSet", table(vec![row("Arrived", 100)]));
+    manager.add(mascot);
+
+    manager.tick(Instant::now()); // time 0
+    let mut before = None;
+    manager.apply_all(|m| before = Some(m.tint_rgb()));
+    assert!(before.flatten().is_some(), "変身前は色づけされている");
+
+    manager.tick(Instant::now()); // time 1 == duration - 1 → 変身要求 → ループ後適用
+    let mut after = (None, None, None);
+    manager.apply_all(|m| {
+        after = (
+            Some(m.image_set_name().to_string()),
+            m.tint_rgb(),
+            Some(m.tint_hue()),
+        );
+    });
+    assert_eq!(after.0.as_deref(), Some("TargetSet"), "変身先へ差し替わる");
+    assert_eq!(
+        after.1, None,
+        "パレットを持たない set へ変身したら色が消える"
+    );
+    assert_eq!(after.2, Some(0.0), "位相も宣言の初期値（Off は 0）へ戻る");
 }
 
 /// TransformMascot 未解決（resolver に無い set）は自分の set のまま変身先 Behavior を

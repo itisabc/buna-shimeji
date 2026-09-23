@@ -21,7 +21,7 @@ Java 版（Shimeji-ee / Shimeji-Desktop 系）を参考に、主要なマスコ�
   トレイ「Allowed Behaviours」で ON/OFF（既定 OFF）
 - 追加機能（Rust 版独自）: **色づけ（tint）**。`img/<Set>/conf/actions.xml` に `<TintPalette>` を
   書くと色つきの個体を出せます（色相を回し続ける / 出現のたびに抽選する）。出てよい色は
-  `conf/settings.toml` の `[tint.sets.<set>]` で絞り、トレイの「呼ぶ → 色」から選べます。
+  `conf/settings.toml` の `[tint.sets.<set>]` で絞り、トレイの「呼ぶ → 画像セット → 色」から選べます。
   詳しくは [画像セット差し替えガイド](doc/imageset-guide.md) §12
 - 軽量化: メモリ 5〜20MB / アイドル CPU ほぼ 0（tick 駆動・変化時のみ描画。実測値は「[性能](#性能)」を参照）
 - 画像差し替え容易: `img/<SetName>/` にフォルダを置くだけで新しい画像セットを利用可能
@@ -133,7 +133,7 @@ cargo run --release     # 実行（exe と同じ場所に conf/ と img/ が必�
 cargo test              # 単体テスト
 ```
 
-現状: 主要挙動の実装は完了（`cargo test` 571/571 PASS、2026-09-20）。
+現状: 主要挙動の実装は完了（`cargo test` 642/642 PASS、2026-09-23）。
 実装済み機能の一覧は [`doc/feature-status.md`](doc/feature-status.md) を参照してください。
 
 ## 対応環境・既知の制限

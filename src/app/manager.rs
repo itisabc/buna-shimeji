@@ -455,7 +455,7 @@ impl Manager {
             // - 手動指定（`SpawnRequest::tint` = R19）→ その確定色の個体
             // - set 宣言が `Tint="random"`（R20）→ パレットの許可色から 1 色抽選してその色に固定
             // - `Tint="cycle"` → 宣言どおり（位相の初期値は宣言の `TintStart`）
-            // - パレットが空なのに `Tint` を宣言している → **無効（無色）+ 警告**
+            // - パレットが空なのに `Tint` を宣言している → **無効（無色）**（警告は reload が 1 回出す）
             let declared = self
                 .set_tints
                 .get(&request.image_set_name)
@@ -486,12 +486,7 @@ impl Manager {
                 }
                 (None, Some(_)) => declared,
                 (None, None) => {
-                    if declared.mode != TintMode::Off {
-                        log::warn!(
-                            "`{}` declares tinting but has no palette: spawning without a colour",
-                            request.image_set_name
-                        );
-                    }
+                    // パレットが無い set は色を出せない（理由は reload が 1 回だけ警告する）
                     TintStyle::default()
                 }
             };
