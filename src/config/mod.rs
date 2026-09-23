@@ -1,4 +1,4 @@
-//! conf XML（actions.xml / behaviors.xml）の強型パース — Java `config` パッケージ相当。
+//! conf XML（actions.xml / behaviors.xml / tint.xml）の強型パース — Java `config` パッケージ相当。
 //!
 //! Java の Builder（ActionBuilder / AnimationBuilder / BehaviorBuilder）を介さず、
 //! XML を強型データへ直接変換する（design.md §1.6: 構造は設計の最適形、
@@ -44,10 +44,17 @@ pub struct ConfigError {
 #[derive(Debug, Clone, Default)]
 pub struct ActionsConfig {
     pub actions: BTreeMap<String, ActionDef>,
-    /// ルート `<Mascot>` の色づけ宣言（`Tint` / `TintSpeed` / `TintStart` / `TintSat` /
-    /// `TintLum` / `TintGlow`）。未指定・不正値は既定（色づけなし）。
-    pub tint: TintStyle,
-    /// ルート `<Mascot>` の `<TintPalette>`（この set が持つ色）。空 = 色なし。
+}
+
+/// tint.xml のパース結果（set の色の宣言）。
+///
+/// ファイルが無い / 読めない / 壊れている / ルート要素が違う場合は**既定（無色）**を返す
+/// （起動は止めない。設計: `docs/plans/design-gaming-color.md` §色の宣言と許可色）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TintConfig {
+    /// モードと既定値（`Mode` / `Speed` / `Start` / `Sat` / `Lum` / `Glow`）。
+    pub style: TintStyle,
+    /// 宣言順の色（`<Color>`）。空 = 色なし。
     pub palette: Palette,
 }
 
@@ -259,25 +266,78 @@ pub fn parse_actions(path: &Path) -> Result<ActionsConfig, ConfigError> {
             actions.insert(name, def);
         }
     }
-    let tint = parse_tint_decl(&cx, root);
-    // `<Color>` の省略値は宣言値に依存するため、宣言 → パレットの順に読む
-    let palette = parse_tint_palette(&cx, root, &tint);
-    Ok(ActionsConfig {
-        actions,
-        tint,
-        palette,
-    })
+    warn_legacy_tint(&cx, root);
+    Ok(ActionsConfig { actions })
 }
 
-/// ルート `<Mascot>` の色づけ宣言を読む（設計: `docs/plans/design-gaming-color.md`）。
+/// 旧形式（`<Mascot>` の `Tint` 属性と、その子の `<TintPalette>`）を 1 回だけ知らせる。
 ///
-/// `Tint` の値は `random`（出現のたびにパレットの許可色から抽選）/ `cycle`（全色相を回す。
-/// 別名 `rainbow`）。**省略・`off`・`none` = 色づけなし**で、それ以外の値（旧 `within` /
-/// `steps` / `#RRGGBB` など）は**警告 + 無色**（起動は止めない＝未対応の script 式と同じ方針）。
-/// `TintStart` は初期色相（既定 0・wrap）。
-fn parse_tint_decl(cx: &Cx, root: Node) -> TintStyle {
+/// 色の宣言は `conf/<set>/tint.xml` へ移った（2026-09-23・スライス 11）。旧形式は
+/// **読めるが無視する**（無色になる）ので、黙って色が消えないように警告する。
+fn warn_legacy_tint(cx: &Cx, root: Node) {
+    let has_tint_attribute = root.attribute("Tint").is_some();
+    let has_palette = element_children(root, "TintPalette").next().is_some();
+    if has_tint_attribute || has_palette {
+        log::warn!(
+            "{}:{}: the colour declaration moved to conf/<set>/tint.xml: ignoring `Tint` / <TintPalette> here",
+            cx.file,
+            cx.line_of(root)
+        );
+    }
+}
+
+/// `tint.xml`（set の色の宣言）を読む（設計: `docs/plans/design-gaming-color.md` §色の宣言と許可色）。
+///
+/// ルート `<TintPalette>` の属性がモードと既定値、子 `<Color>` が色（と出現の許可）。
+/// ファイル不在 / 読み込み失敗 / パース失敗 / ルート要素違いは**警告 + 無色**で、
+/// 起動は止めない（未対応の script 式と同じ方針）。ファイル不在は警告もしない
+/// （探索側が「無ければ既定」を決める）。
+pub fn parse_tint(path: &Path) -> TintConfig {
+    if !path.is_file() {
+        return TintConfig::default();
+    }
+    let text = match read_file(path) {
+        Ok(text) => text,
+        Err(err) => {
+            log::warn!("{err}: treating as no colouring");
+            return TintConfig::default();
+        }
+    };
+    let doc = match parse_document(&text, path) {
+        Ok(doc) => doc,
+        Err(err) => {
+            log::warn!("{err}: treating as no colouring");
+            return TintConfig::default();
+        }
+    };
+    let cx = Cx::new(&doc, path);
+    let root = doc.root_element();
+    if root.tag_name().name() != "TintPalette" {
+        log::warn!(
+            "{}:{}: unknown root tag `{}`: treating as no colouring",
+            cx.file,
+            cx.line_of(root),
+            root.tag_name().name()
+        );
+        return TintConfig::default();
+    }
+
+    let style = parse_tint_style(&cx, root);
+    // `<Color>` の省略値は宣言値に依存するため、宣言 → 色の順に読む
+    let palette = parse_tint_colours(&cx, root, &style);
+    TintConfig { style, palette }
+}
+
+/// ルート `<TintPalette>` の宣言（モードと既定値）を読む。
+///
+/// `Mode` の値は `random`（出現のたびに許可色から抽選）/ `cycle`（全色相を回す。別名 `rainbow`）。
+/// **省略・`off`・`none` = 色づけなし**で、それ以外の値（`within` / `steps` / `#RRGGBB` など）は
+/// **警告 + 無色**（起動は止めない）。`Start` / `Speed` / `Sat` / `Lum` / `Glow` は
+/// 移行前に `<Mascot>` の `TintStart` / `TintSpeed` / `TintSat` / `TintLum` / `TintGlow` が
+/// 持っていたのと同じ意味（接頭辞 `Tint` を落としただけ）。
+fn parse_tint_style(cx: &Cx, root: Node) -> TintStyle {
     let mut style = TintStyle::default();
-    let Some(text) = root.attribute("Tint") else {
+    let Some(text) = root.attribute("Mode") else {
         return style;
     };
     style.mode = match text {
@@ -286,7 +346,7 @@ fn parse_tint_decl(cx: &Cx, root: Node) -> TintStyle {
         "random" => TintMode::Random,
         other => {
             log::warn!(
-                "{}:{}: unknown Tint value `{other}`: treating as no tinting",
+                "{}:{}: unknown Mode value `{other}`: treating as no tinting",
                 cx.file,
                 cx.line_of(root)
             );
@@ -299,11 +359,11 @@ fn parse_tint_decl(cx: &Cx, root: Node) -> TintStyle {
     } else {
         0.0
     };
-    style.rotate = tint_num_attr(cx, root, "TintSpeed", default_rotate);
-    style.sat = tint_num_attr(cx, root, "TintSat", crate::tint::DEFAULT_SAT);
-    style.lum = tint_num_attr(cx, root, "TintLum", crate::tint::DEFAULT_LUM);
-    style.glow = tint_num_attr(cx, root, "TintGlow", crate::tint::DEFAULT_GLOW);
-    style.start = tint_angle_attr(cx, root, "TintStart", 0.0);
+    style.rotate = tint_num_attr(cx, root, "Speed", default_rotate);
+    style.sat = tint_num_attr(cx, root, "Sat", crate::tint::DEFAULT_SAT);
+    style.lum = tint_num_attr(cx, root, "Lum", crate::tint::DEFAULT_LUM);
+    style.glow = tint_num_attr(cx, root, "Glow", crate::tint::DEFAULT_GLOW);
+    style.start = tint_angle_attr(cx, root, "Start", 0.0);
     style
 }
 
@@ -326,21 +386,18 @@ fn tint_num_attr(cx: &Cx, node: Node, name: &str, default: f32) -> f32 {
 }
 
 /// ルート属性の色相（度）。[`tint_num_attr`] と同じ扱いで、値を 0 以上 360 未満へ wrap する
-/// （`TintStart` は負値と 360 以上を許す）。
+/// （`Start` は負値と 360 以上を許す）。
 fn tint_angle_attr(cx: &Cx, node: Node, name: &str, default: f32) -> f32 {
     tint_num_attr(cx, node, name, default).rem_euclid(360.0)
 }
 
-/// ルート `<Mascot>` の `<TintPalette>` を読む（設計 §再設計）。無ければ空（= 色なし）。
+/// ルート `<TintPalette>` の `<Color>` を読む。無ければ空（= 色なし）。
 ///
 /// `<Color>` は `Id` が必須。`Id` 欠落・不正な文字・重複は**その色だけ**捨てて警告する
 /// （重複は先勝ち = 最初に書いた色が残る）。数値の不正も同じ扱い（起動は止めない）。
-fn parse_tint_palette(cx: &Cx, root: Node, decl: &TintStyle) -> Palette {
-    let Some(node) = element_children(root, "TintPalette").next() else {
-        return Palette::default();
-    };
+fn parse_tint_colours(cx: &Cx, root: Node, decl: &TintStyle) -> Palette {
     let mut colors: Vec<PaletteColor> = Vec::new();
-    for color in element_children(node, "Color") {
+    for color in element_children(root, "Color") {
         let Some(parsed) = parse_palette_color(cx, color, decl) else {
             continue;
         };
@@ -389,7 +446,31 @@ fn parse_palette_color(cx: &Cx, node: Node, decl: &TintStyle) -> Option<PaletteC
         sat: palette_num_attr(cx, node, "Sat", decl.sat)?,
         lum: palette_num_attr(cx, node, "Lum", decl.lum)?,
         glow: palette_num_attr(cx, node, "Glow", decl.glow)?,
+        allowed: palette_bool_attr(cx, node, "Allowed", true),
     })
+}
+
+/// `<Color>` の真偽属性（`Allowed`）。未指定は `default`、`true` / `false` 以外は警告 + `default`。
+///
+/// 出現を許可するかの判定は `false` だけが「出さない」（省略 = 許可）なので、
+/// タイポを黙って「出さない」に倒さないよう既定へ戻して知らせる。
+fn palette_bool_attr(cx: &Cx, node: Node, name: &str, default: bool) -> bool {
+    let Some(text) = node.attribute(name) else {
+        return default;
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "true" => true,
+        "false" => false,
+        _ => {
+            log::warn!(
+                "{}:{}: invalid {name} `{text}`: using {}",
+                cx.file,
+                cx.line_of(node),
+                if default { "true" } else { "false" }
+            );
+            default
+        }
+    }
 }
 
 /// `<Color>` の数値属性。未指定は `default`、パース失敗・非有限は警告 + `None`（その色を捨てる）。

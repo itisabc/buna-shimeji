@@ -1,32 +1,33 @@
 //! 色づけ（tint）の宣言と型。
 //!
-//! 宣言は per-set conf（`conf/<set>/actions.xml` または `img/<set>/conf/actions.xml`）の
-//! ルート `<Mascot>` 属性で与える:
+//! 宣言は per-set conf（`conf/<set>/tint.xml` または `img/<set>/conf/tint.xml`）の
+//! ルート `<TintPalette>` 属性で与える:
 //!
 //! ```xml
-//! <Mascot Tint="cycle" TintSpeed="150" TintStart="0" TintSat="100" TintLum="62" TintGlow="1.4">
+//! <TintPalette Mode="cycle" Speed="150" Start="0" Sat="100" Lum="62" Glow="1.4">
 //! ```
 //!
-//! 存在する色は同じ set の `<TintPalette>` が持つ（本体は色を知らない）:
+//! 存在する色は同じファイルの `<Color>` が持つ（本体は色を知らない）:
 //!
 //! ```xml
 //! <TintPalette>
 //!   <Color Id="strawberry" Name="いちご" Hue="0"/>
-//!   <Color Id="white" Sat="0" Lum="100" Glow="0"/>
+//!   <Color Id="white" Sat="0" Lum="100" Glow="0" Allowed="false"/>
 //! </TintPalette>
 //! ```
+//!
+//! **出現を許可する色は [`PaletteColor::allowed`]**（省略 = 許可）が持つ。アプリは
+//! 読むだけで書き戻さない（利用者がファイルに手書きする）。
 //!
 //! 色は「基準色相 + 回転速度」で表し、ゲーミング / パステル の違いは [`TintStyle`] の
 //! 数値の組でしかない（設計: `docs/plans/design-gaming-color.md`）。
 //! 個体が持つのは確定色（色相・彩度・明度・グロー）と位相だけで（[`crate::mascot::Mascot`] 側）、
 //! 宣言の規則（選び方・速度・初期位相）と省略値は set 単位のこの型が持つ。
 
-use std::collections::BTreeSet;
-
-/// 色の出し方（`Tint` 属性の値）。
+/// 色の出し方（`Mode` 属性の値）。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum TintMode {
-    /// 色づけなし（既定・`Tint` を書かない）。
+    /// 色づけなし（既定・`Mode` を書かない）。
     #[default]
     Off,
     /// 色相を回し続ける（`cycle` / `rainbow`）。パレットを参照しない。
@@ -50,7 +51,7 @@ pub struct TintStyle {
     pub lum: f32,
     /// グロー強度（0 で光らない）。
     pub glow: f32,
-    /// 出現時の位相の初期値（色相・度・0 以上 360 未満）。`TintSpeed="0"` と組めば固定色。
+    /// 出現時の位相の初期値（色相・度・0 以上 360 未満）。`Speed="0"` と組めば固定色。
     pub start: f32,
 }
 
@@ -66,9 +67,10 @@ pub const DEFAULT_GLOW: f32 = 1.0;
 /// 加算すると面積ぶん白飛びする（プロトタイプの `gain` と同じ値）。
 pub const GLOW_GAIN: f32 = 0.4;
 
-/// パレットの 1 色。色（hue / sat / lum）と、その色でいるときのグロー（glow）を持つ。
+/// パレットの 1 色。色（hue / sat / lum）と、その色でいるときのグロー（glow）、
+/// 出現を許可するか（allowed）を持つ。
 ///
-/// 省略した属性は `<Mascot>` の宣言値（`TintSat` / `TintLum` / `TintGlow`。`Hue` は 0）を
+/// 省略した属性はルート `<TintPalette>` の宣言値（`Sat` / `Lum` / `Glow`。`Hue` は 0）を
 /// 既定として**パース時に埋める**ので、利用側は解決済みの値だけを見る。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaletteColor {
@@ -78,15 +80,18 @@ pub struct PaletteColor {
     pub name: String,
     /// 色相（度・0 以上 360 未満）。
     pub hue: f32,
-    /// 彩度（%）。`0` = 無彩色で、R21 の写像先の候補から外れる。
+    /// 彩度（%）。`0` = 無彩色。
     pub sat: f32,
     /// 明度（%）。
     pub lum: f32,
     /// この色でいるときのグロー強度（0 で光らない）。
     pub glow: f32,
+    /// 出現を許可するか（`Allowed="false"` で false。省略 = true）。
+    /// 「許可色の一覧（R19）」と「ランダム出現の抽選母集団（R20）」の両方を決める。
+    pub allowed: bool,
 }
 
-/// set ごとのパレット（`<TintPalette>` の宣言順）。空 = 色なし。
+/// set ごとのパレット（`tint.xml` の `<Color>` の宣言順）。空 = 色なし。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Palette {
     /// 宣言順の色（メニューの並びが作者の意図になるので、色相順へ並べ替えない）。
@@ -94,12 +99,12 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// 宣言順の色から作る（[`crate::config::parse_actions`] のパース結果）。
+    /// 宣言順の色から作る（[`crate::config::parse_tint`] のパース結果）。
     pub fn from_colors(colors: Vec<PaletteColor>) -> Self {
         Palette { colors }
     }
 
-    /// 色が 1 つも無いか（`<TintPalette>` 未宣言も空）。
+    /// 色が 1 つも無いか（`tint.xml` が無い set も空）。
     pub fn is_empty(&self) -> bool {
         self.colors.is_empty()
     }
@@ -114,51 +119,15 @@ impl Palette {
         self.colors.iter()
     }
 
-    /// `Id` から位置を引く（許可集合は id で保存される）。
+    /// `Id` から位置を引く。
     pub fn index_of_id(&self, id: &str) -> Option<usize> {
         self.colors.iter().position(|color| color.id == id)
     }
 
-    /// その色（hue / sat / lum）と完全一致する位置を引く（R21 の写像の第 1 段）。
-    ///
-    /// R19（一覧から選ぶ）/ R20（抽選）の個体はパレットの値をそのまま写しているので一致する。
-    /// `glow` は見ない（`cycle` の個体は宣言値を持ち、パレットのグローと一致しないため）。
-    pub fn index_of_values(&self, hue: f32, sat: f32, lum: f32) -> Option<usize> {
-        self.colors
-            .iter()
-            .position(|color| color.hue == hue && color.sat == sat && color.lum == lum)
+    /// **出現を許可されている色**を宣言順に返す（R19 の一覧と R20 の抽選母集団）。
+    pub fn allowed_colors(&self) -> impl Iterator<Item = &PaletteColor> {
+        self.colors.iter().filter(|color| color.allowed)
     }
-
-    /// 色相が最も近い色の位置（R21 の「この色を出す」の写像先）。
-    ///
-    /// 候補は**有彩色（`sat > 0`）だけ**にする（無彩色は色相を持たず、hue 0 の白と
-    /// hue 0 の赤を区別できない）。距離は色相環の最短弧で見る。候補が無ければ `None`。
-    pub fn nearest_index(&self, hue: f32) -> Option<usize> {
-        let mut nearest: Option<(usize, f32)> = None;
-        for (index, color) in self.colors.iter().enumerate() {
-            if color.sat <= 0.0 {
-                continue;
-            }
-            let distance = hue_distance(color.hue, hue);
-            if nearest.is_none_or(|(_, best)| distance < best) {
-                nearest = Some((index, distance));
-            }
-        }
-        nearest.map(|(index, _)| index)
-    }
-}
-
-/// 色相環の最短弧（度）。
-fn hue_distance(a: f32, b: f32) -> f32 {
-    let d = (a - b).rem_euclid(360.0);
-    d.min(360.0 - d)
-}
-
-/// その色 id が許可されているか（`settings.toml` の set 別 `colors` の判定）。
-///
-/// `None`（キー欠落）= その set の全色を許可、`Some(空)` = 1 色も許可しない。
-pub fn id_allowed(allowed: Option<&BTreeSet<String>>, id: &str) -> bool {
-    allowed.is_none_or(|colors| colors.contains(id))
 }
 
 impl Default for TintStyle {

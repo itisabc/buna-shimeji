@@ -16,9 +16,10 @@
 │   ├─ actions.xml        アクション定義（画像の参照はここ）
 │   ├─ behaviors.xml      行動と頻度
 │   ├─ Mascot.xsd         XML スキーマ（実行時には参照されない・ドキュメント用）
+│   ├─ TintPalette.xsd    色づけ宣言の XML スキーマ（同・§12）
 │   ├─ settings.toml      トグル操作時に自動生成（無くても動く・§5）
 │   ├─ lang/              言語辞書（en.toml / ja.toml・§10）
-│   └─ <Set>/             セット固有の actions.xml / behaviors.xml（任意）
+│   └─ <Set>/             セット固有の actions.xml / behaviors.xml / tint.xml（任意）
 ├─ sound/                 効果音の共通置き場（任意・§11）
 └─ img/
     ├─ KuroShimeji/       1 フォルダ = 1 画像セット（フォルダ名 = セット名）
@@ -35,6 +36,7 @@
   - 先頭（辞書順最小）のセットが **既定セット** になります。既定セットは「欠落参照アニメの無効化」と「構築時 scale（§5・§8）」の対象であり、Reload 時に消滅したセットのマスコットの付け替え先にもなります。同梱資産では `KuroShimeji` が既定セットです。
   - トレイ「呼ぶ」サブメニュー（トレイ・マスコット右クリック共通）の並び順と、「（ランダム）」spawn の選択元の順序も同じ列挙順です。
 - `actions.xml` / `behaviors.xml` は既定では **`conf/` 直下の 1 つ** が全セット共通で使われます。セット固有に変えたい場合は `img/<Set>/conf/` または `conf/<Set>/` に同じファイル名で置くと、そのセットだけ別定義を使えます（探索順は `img/<Set>/conf/` → `conf/<Set>/` → `conf/`。ファイル名の候補は Java 版準拠で `actions.xml` / `動作.xml` / `one.xml` / `1.xml`、`behaviors.xml` / `behavior.xml` / `行動.xml` / `two.xml` / `2.xml`）。
+- 色づけの宣言 `tint.xml` は set 固有のファイルです（§12）。探索は `img/<Set>/conf/` → `conf/<Set>/` の 2 つだけで、**共通 `conf/` へはフォールバックしません**（色はそのセットの持ち物で、置かなければ色なし）。
 
 ## 3. PNG 命名規則
 
@@ -176,7 +178,7 @@ A: そのアニメーションが参照する画像がセットに無く無効�
 A: クリックした場所が α=0（完全透明）領域です。画像の不透明部分をクリックしてください。
 
 **Q: 編集したのに反映されない**
-A: 反映タイミングは対象によります。画像 / `behaviors.xml` = トレイ Reload（または再起動）、`actions.xml`（`Sound` 属性の追記など）/ `settings.toml` / 言語辞書（`conf/lang/`）= 再起動。効果音の WAV ファイル自体は再生時に解決されるため、置くだけ（または差し替えるだけ）で次の再生から反映されます。
+A: 反映タイミングは対象によります。画像 / `behaviors.xml` / 色づけ（`conf/<Set>/tint.xml`）= トレイ Reload（または再起動）、`actions.xml`（`Sound` 属性の追記など）/ `settings.toml` / 言語辞書（`conf/lang/`）= 再起動。効果音の WAV ファイル自体は再生時に解決されるため、置くだけ（または差し替えるだけ）で次の再生から反映されます。
 
 **Q: 二重起動できない**
 A: 単一起動制限（ユーザーセッション内で 1 プロセス）です。「既に起動しています」で終了します。
@@ -223,51 +225,48 @@ A: 単一起動制限（ユーザーセッション内で 1 プロセス）で�
 - 停止: `Mute` アクション（`Sound` 属性でその音だけ / 省略で全停止）。
 - 有効/無効: トレイの Allowed Behaviours →「効果音」（`conf/settings.toml` の `[allowed] sounds`）。
 
-## 12. 色づけ（`<Mascot>` の `Tint*` と `<TintPalette>`）
+## 12. 色づけ（`conf/<Set>/tint.xml`）
 
 マスコットを色づけできます（**Rust 版独自**。他の実装は未知の要素・属性を無視します）。
 色は「白いしめじ」を乗算で染める方式なので、**明るい（白に近い）画像ほどよく染まります**。
 
-- **宣言**（`img/<Set>/conf/actions.xml` のルート `<Mascot>`。`<ActionList>` より前）:
+- **宣言**: set 専用の色ファイル `conf/<Set>/tint.xml`（または `img/<Set>/conf/tint.xml`）に
+  書きます（`actions.xml` には書きません）。置かなければ色なしです（警告も出ません）。
 
   ```xml
-  <Mascot xmlns="http://www.group-finity.com/Mascot"
-          Tint="random" TintSat="100" TintLum="62" TintGlow="1.4" TintStart="0">
-    <TintPalette>
-      <Color Id="strawberry" Name="いちご" Hue="0"/>
-      <Color Id="white"      Name="白"   Sat="0" Lum="100" Glow="0"/>
-      <Color Id="black"      Name="黒"   Sat="0" Lum="0"   Glow="0"/>
-    </TintPalette>
-    <ActionList>...</ActionList>
-  </Mascot>
+  <TintPalette xmlns="http://www.group-finity.com/Mascot"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="http://www.group-finity.com/Mascot TintPalette.xsd"
+               Mode="random" Sat="100" Lum="62" Glow="1.4" Start="0">
+    <Color Id="strawberry" Name="いちご" Hue="0"/>
+    <Color Id="white"      Name="白"   Sat="0" Lum="100" Glow="0"/>
+    <Color Id="black"      Name="黒"   Sat="0" Lum="0"   Glow="0" Allowed="false"/>
+  </TintPalette>
   ```
 
-- `Tint`（省略可）: `random` = 出現のたびに許可色から 1 色抽選して固定 / `cycle` = 全色相を
-  なめらかに回す（`rainbow` も同じ）。**省略すると色づけなし**です。
-- `TintSpeed`: 回転速度（°/秒）。既定は `cycle` のとき 150、それ以外は 0。負値で逆回転。
-  `0` にすると位相が止まり、`TintStart` の色相で固定されます。
-- `TintStart`: 出現時の色相（度・既定 0）。負値と 360 以上は wrap します。
-- `TintSat` / `TintLum` / `TintGlow`: 彩度・明度（%）と、グローの強さ（0 で光らない）。
+- ファイルの書式は [`conf/TintPalette.xsd`](../conf/TintPalette.xsd) にあります（エディタの
+  補完・検証用。**実行時の検証には使いません**）。`xsi:schemaLocation` は同じ `conf/` に
+  置いたときだけ解決します（set 側の `img/<Set>/conf/` からは相対参照が届きません。
+  VS Code の `xml.fileAssociations` などで紐付けると補完が効きます）。
+- `Mode`（省略可）: `random` = 出現のたびに許可色から 1 色抽選して固定 / `cycle` = 全色相を
+  なめらかに回す（`rainbow` も同じ）。**省略（または `off` / `none`）は色づけなし**です。
+- `Speed`: 回転速度（°/秒）。既定は `cycle` のとき 150、それ以外は 0。負値で逆回転。
+  `0` にすると位相が止まり、`Start` の色相で固定されます。
+- `Start`: 出現時の色相（度・既定 0）。負値と 360 以上は wrap します。
+- `Sat` / `Lum` / `Glow`: 彩度・明度（%）と、グローの強さ（0 で光らない）。
   `<Color>` で省略した値の既定になります。
-- `<TintPalette>`: その set が持つ色の一覧（**宣言順がメニューの並び**）。`<Color>` は
-  `Id` が必須（設定に保存される安定キー。英数字と `_` `-`）。`Name` はメニューに出る表示名で、
-  省略すると `Id` になります。`Hue`（既定 0）/ `Sat` / `Lum` / `Glow` は省略すると
-  `<Mascot>` の宣言値を継承します。
+- `<Color>`: その set が持つ色（**宣言順がメニューの並び**）。`Id` が必須（英数字と `_` `-`。
+  重複したら先に書いた色が残ります）。`Name` はメニューに出る表示名で、省略すると `Id` に
+  なります。`Hue`（既定 0）/ `Sat` / `Lum` / `Glow` は省略するとルートの宣言値を継承します。
   - **色には `Glow="0"` を検討してください**。白・黒のような無彩色は、加算グローが
     ハロー（白）や無変化（黒）になるためです。
-- **出現を許可する色**は利用者側の設定です（`conf/settings.toml`）:
-
-  ```toml
-  [tint.sets.Shimeji]
-  colors = ["strawberry", "white"]   # 書かなければ全色、[] なら 1 色も出さない
-  ```
-
+- **出さない色**: `<Color Allowed="false">` で「パレットには残すが出現させない」にできます
+  （省略 = 出す）。**ランダム出現の抽選と「呼ぶ → <set> → 色」の一覧の両方が、この許可色
+  だけを使います**。色を止めたいときは、この属性か `Mode` を消すか `tint.xml` を外します。
 - **トレイ**: 「呼ぶ → <set> → 色」で色を選んで出せます（許可色だけが並びます）。
-  「出現を許可する色」で set ごとの出てよい色を切り替えます。マスコットの右クリック
-  「この色を出す」は、その個体の色を許可色へ戻します。
-- **パレットを宣言していない set には色 UI が出ません**。その場合「呼ぶ」の一覧では
-  サブメニューを作らず、**set 名そのものが項目**になります（色を選べる set だけが
-  「（既定）+ 色一覧」のサブメニューになります）。`Tint` だけ書いてパレットが無い場合は
-  無色 + 警告になります。
+- **色を持たない set には色の一覧が出ません**。その場合「呼ぶ」の一覧ではサブメニューを
+  作らず、**set 名そのものが項目**になります（色を選べる set だけが「（既定）+ 色一覧」の
+  サブメニューになります）。`Mode` だけ書いて色が無い場合は無色 + 警告になります。
+- **反映**: ファイルを編集したら、トレイの「Reload」で読み直します（画像や行動表と同じ）。
 - 制限: 色は乗算なので、**黒い部分はどの色でも黒のまま**です（`img/KuroShimeji` のような
   反転画像は色づけできません）。色を混ぜる・濁らせない（R22/R24）は未実装です。

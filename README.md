@@ -19,9 +19,9 @@ Java 版（Shimeji-ee / Shimeji-Desktop 系）を参考に、主要なマスコ�
   そのウィンドウが最前面に固定され、しめじがぶら下がって窓の移動に追従します。
   最大化中のウィンドウは固定対象外で、固定中にその窓が最大化されたら自動で解除します。
   トレイ「Allowed Behaviours」で ON/OFF（既定 OFF）
-- 追加機能（Rust 版独自）: **色づけ（tint）**。`img/<Set>/conf/actions.xml` に `<TintPalette>` を
-  書くと色つきの個体を出せます（色相を回し続ける / 出現のたびに抽選する）。出てよい色は
-  `conf/settings.toml` の `[tint.sets.<set>]` で絞り、トレイの「呼ぶ → 画像セット → 色」から選べます。
+- 追加機能（Rust 版独自）: **色づけ（tint）**。`conf/<Set>/tint.xml`（または `img/<Set>/conf/tint.xml`）に
+  色を書くと色つきの個体を出せます（色相を回し続ける / 出現のたびに抽選する）。出てよい色は同じファイルの
+  `<Color Allowed="false">` で外し、トレイの「呼ぶ → 画像セット → 色」から選べます。
   詳しくは [画像セット差し替えガイド](doc/imageset-guide.md) §12
 - 軽量化: メモリ 5〜20MB / アイドル CPU ほぼ 0（tick 駆動・変化時のみ描画。実測値は「[性能](#性能)」を参照）
 - 画像差し替え容易: `img/<SetName>/` にフォルダを置くだけで新しい画像セットを利用可能
@@ -111,9 +111,6 @@ pin_dropped_window = false  # ドロップしたウィンドウを最前面に�
 [imagesets.scale]           # 画像セットごとの拡大率（任意・既定 1.0）
 # Shimeji = 0.5
 
-[tint.sets.Shimeji]         # 出現を許可する色（任意・set ごと。書かなければ全色）
-# colors = ["strawberry", "white"]   # 色 id は set の actions.xml の <TintPalette> が定義する
-
 [interactive_windows]       # 反応するウィンドウ（タイトル部分一致。両方空 = どのウィンドウにも反応しない）
 whitelist = []
 blacklist = []
@@ -121,9 +118,9 @@ blacklist = []
 
 - 初回起動時に生成される `conf/settings.toml` には、上の説明がコメントとして入っています
   （トレイでトグルを切り替えて保存されても説明は残ります）。
-- 反映タイミング: `[allowed]` と `[tint.sets]` はトレイ操作なら即時（ファイルを編集した場合は次回起動時）、
+- 反映タイミング: `[allowed]` はトレイ操作なら即時（ファイルを編集した場合は次回起動時）、
   それ以外（`language` / `[disabled_behaviors]` / `[imagesets.scale]` / `[interactive_windows]`）は
-  次回起動時です。
+  次回起動時です。色の宣言（`conf/<Set>/tint.xml`）はトレイの「Reload」で読み直します。
 
 ## ビルド・実行
 
@@ -133,7 +130,7 @@ cargo run --release     # 実行（exe と同じ場所に conf/ と img/ が必�
 cargo test              # 単体テスト
 ```
 
-現状: 主要挙動の実装は完了（`cargo test` 642/642 PASS、2026-09-23）。
+現状: 主要挙動の実装は完了（`cargo test` 632/632 PASS、2026-09-23）。
 実装済み機能の一覧は [`doc/feature-status.md`](doc/feature-status.md) を参照してください。
 
 ## 対応環境・既知の制限

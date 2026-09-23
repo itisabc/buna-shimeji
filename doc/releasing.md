@@ -11,6 +11,7 @@ buna-shimeji-v0.1.2-win64/
 │   ├─ actions.xml
 │   ├─ behaviors.xml
 │   ├─ Mascot.xsd
+│   ├─ TintPalette.xsd
 │   ├─ lang/            (en.toml, ja.toml)
 │   └─ settings.toml    ← conf/settings.default.toml をリネームして同封
 ├─ img/

@@ -10,6 +10,8 @@
 //! `Main.getActionsFilePath` / `getBehaviorsFilePath` と同一）。set 専用ファイルが
 //! 無い set は `conf/` 直下の共通ファイルへフォールバックし、どちらも無ければ
 //! warn + その set をスキップする（Java failedConfigurations 相当）。
+//! 色の宣言（`tint.xml`）も set ごとに解決するが、共通 `conf/` へは
+//! フォールバックせず、無ければ無色（警告なし）にする。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,7 +20,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::config::{
-    parse_actions, parse_behaviors, validate_required_behaviors, ActionsConfig, ConfigError,
+    parse_actions, parse_behaviors, parse_tint, validate_required_behaviors, ActionsConfig,
+    ConfigError, TintConfig,
 };
 use crate::mascot::behavior::BehaviorTable;
 use crate::render::imageset::{
@@ -38,6 +41,9 @@ const BEHAVIORS_FILENAMES: [&str; 5] = [
     "2.xml",
 ];
 
+/// tint.xml のファイル名（色の宣言。2026-09-23 のスライス 11 で actions.xml から分離した）。
+const TINT_FILENAME: &str = "tint.xml";
+
 /// マスコット 1 set 分の conf ファイルを Java と同じ探索順で解決する
 /// （Java `Main.getActionsFilePath` / `getBehaviorsFilePath` L391-427 逐語）:
 /// `img/<set>/conf/` → `conf/<set>/` → `conf/` の順に、候補ファイル名を順に試し、
@@ -53,6 +59,20 @@ fn resolve_config_file(
         conf_dir.join(set),
         conf_dir.to_path_buf(),
     ];
+    first_existing(&dirs, names)
+}
+
+/// tint.xml を解決する（`img/<set>/conf/` → `conf/<set>/` の 2 つだけ）。
+///
+/// **共通 `conf/` は含めない**: 色はその set の持ち物で、画像だけ置いた set が
+/// 既定 set のパレットを継承するのは驚きになる（設計 §色の宣言と許可色）。
+fn resolve_tint_file(conf_dir: &Path, img_dir: &Path, set: &str) -> Option<PathBuf> {
+    let dirs = [img_dir.join(set).join("conf"), conf_dir.join(set)];
+    first_existing(&dirs, &[TINT_FILENAME])
+}
+
+/// 候補ディレクトリ × 候補ファイル名を順に試し、最初に見つかったファイルを返す。
+fn first_existing(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
     for dir in dirs {
         for name in names {
             let path = dir.join(name);
@@ -77,6 +97,8 @@ pub struct ReloadMaterial {
     /// 当該 set の action 定義集合（欠落参照アニメを除去済み・#32）。
     /// [`crate::mascot::action::factory::XmlBehaviorFactory::from_sets`] が構築に使う。
     pub actions: Arc<ActionsConfig>,
+    /// 当該 set の色の宣言（`tint.xml`。無ければ既定 = 無色）。
+    pub tint: TintConfig,
     /// 当該 set で欠落参照により無効化されたアニメ（check_references 結果・
     /// #10b-1。消費先は構築経由の
     /// [`XmlBehaviorFactory`](crate::mascot::action::factory::XmlBehaviorFactory)）。
@@ -104,7 +126,9 @@ pub enum MaterialError {
 ///    どちらか見つからない set は warn ログ + スキップ（Java の failedConfigurations
 ///    相当・画像だけ置かれた set を許容する）。見つかったファイルのパース失敗は
 ///    Err 伝播（素材全体の中止）
-/// 3. 当該 set の behaviors に [`validate_required_behaviors`]（必須 4 種）→ Err 伝播
+/// 3. 当該 set の behaviors に [`validate_required_behaviors`]（必須 4 種）→ Err 伝播。
+///    色は [`resolve_tint_file`]（`img/<set>/conf/` → `conf/<set>/`）で解決し、
+///    無ければ無色（[`TintConfig::default`]）。パース失敗は警告 + 無色で続行する
 /// 4. set 毎に [`ImageSet::load`]（`scales` に無い set は `None` = 等倍）→
 ///    失敗 set は warn ログ + スキップ（他は続行）
 /// 5. set 毎に [`available_refs`] + [`check_references`] で conf↔set 整合を検査し
@@ -137,6 +161,12 @@ pub fn load_materials(
         let actions = parse_actions(&actions_path)?;
         let behaviors = parse_behaviors(&behaviors_path)?;
         validate_required_behaviors(&behaviors)?;
+
+        // 色の宣言（tint.xml）は任意。無ければ無色・警告なし、壊れていれば警告 + 無色
+        let tint = match resolve_tint_file(conf_dir, img_dir, &set) {
+            Some(path) => parse_tint(&path),
+            None => TintConfig::default(),
+        };
 
         // 4. 画像セット読み込み（失敗 set はスキップ・他は続行）
         let image_set = match ImageSet::load(img_dir, &set, scales.get(&set).copied()) {
@@ -173,6 +203,7 @@ pub fn load_materials(
             image_set,
             table: BehaviorTable::new(&behaviors),
             actions: Arc::new(actions),
+            tint,
             disabled_animations: report.disabled,
         });
     }

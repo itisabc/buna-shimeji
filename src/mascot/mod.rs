@@ -764,24 +764,15 @@ impl Mascot {
         self.needs_repaint = needs_repaint;
     }
 
-    /// set 宣言（または出現時に確定した色）の見せ方を設定する（Manager が spawn / Reload /
+    /// set の宣言（または出現時に確定した色）の見せ方を設定する（Manager が spawn / Reload /
     /// Transform 時に注入）。位相は**宣言の初期値へ戻す**（確定色なら その色相 /
-    /// `cycle` なら `TintStart`）。
+    /// `cycle` なら `Start`）。
     pub fn set_tint_style(&mut self, tint: TintStyle) {
         self.tint_hue = match tint.mode {
             TintMode::Fixed(hue) => hue,
             _ => tint.start,
         };
         self.tint = tint;
-    }
-
-    /// この個体の確定色（色相・彩度・明度）。`None` = 色づけなし
-    /// （R21 の写像で色相 0 を「赤を許可」と誤解釈しないため）。
-    pub fn tint_values(&self) -> Option<(f32, f32, f32)> {
-        match self.tint.mode {
-            TintMode::Off => None,
-            _ => Some((self.tint_hue, self.tint.sat, self.tint.lum)),
-        }
     }
 
     /// 現在の色相の位相（度・0..360）。

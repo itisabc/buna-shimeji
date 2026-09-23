@@ -34,16 +34,6 @@ pin_dropped_window = false
 # 形式は `set 名 = 倍率`。既定は 1.0（等倍）。0 より大きい有限値のみ有効。
 # 記入例: Shimeji = 0.5   # 解像度 2 倍の画像セットを 128px 相当で使う
 
-[tint]
-# --- [tint] 色づけ（Gaming Shimeji）---
-# 出現を許可する色を set ごとに書く。形式は `[tint.sets.<set>] colors = ["色 id", ...]`。
-# 色 id はその set の actions.xml の <TintPalette> が定義する（例: strawberry / mint）。
-# この集合が「お気に入り」であり、同時にランダム出現（Tint="random"）の抽選母集団になる。
-# キーを書かない（既定）とその set の全色を許可する。colors = [] は 1 色も許可しない。
-# 記入例:
-# [tint.sets.Shimeji]
-# colors = ["strawberry", "mint"]   # いちごとミントだけ出す
-
 [interactive_windows]
 whitelist = []
 blacklist = []

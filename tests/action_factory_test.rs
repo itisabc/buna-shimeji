@@ -356,10 +356,7 @@ fn config_from(entries: Vec<(&str, ActionDef)>) -> ActionsConfig {
     for (name, def) in entries {
         map.insert(name.to_string(), def);
     }
-    ActionsConfig {
-        actions: map,
-        ..Default::default()
-    }
+    ActionsConfig { actions: map }
 }
 
 /// app_test.rs の fixture 踏襲: "Walk" = velocity (1,0)・"Stare" = velocity (3,0)。

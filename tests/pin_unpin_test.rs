@@ -35,7 +35,7 @@ use shimeji::app::environment::{Environment, OsSource};
 use shimeji::app::manager::Manager;
 use shimeji::app::reload::ReloadMaterial;
 use shimeji::config::{
-    ActionsConfig, BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, VarMap,
+    ActionsConfig, BehaviorDef, BehaviorEntry, BehaviorsConfig, SequenceChild, TintConfig, VarMap,
 };
 use shimeji::mascot::behavior::{
     Action, ActionError, BehaviorError, BehaviorFactory, BehaviorTable,
@@ -490,6 +490,7 @@ fn reload_unpins_and_clears_mirror() {
         image_set: empty_image_set("TestSet"),
         table: table(vec![row("Idle", 100)]),
         actions: Arc::new(ActionsConfig::default()),
+        tint: TintConfig::default(),
         disabled_animations: Vec::new(),
     }];
     manager.reload(materials);

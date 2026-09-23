@@ -52,7 +52,7 @@
 //!    （中で setBehavior も呼ぶ）のため、Mascot::set_behavior から set_behavior_and_init
 //!    を経由する同一構造（#8）
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -61,7 +61,7 @@ use crate::app::reload::ReloadMaterial;
 use crate::mascot::behavior::{BehaviorError, BehaviorFactory, BehaviorTable};
 use crate::mascot::{AffordanceArrival, EnvironmentView, Mascot, Rng, TransformRequest};
 use crate::render::imageset::ImageSet;
-use crate::tint::{id_allowed, Palette, PaletteColor, TintMode, TintStyle};
+use crate::tint::{Palette, PaletteColor, TintMode, TintStyle};
 
 mod behavior_resolver;
 mod menu;
@@ -79,30 +79,18 @@ pub use menu::BehaviorMenu;
 /// image set resolver の型（Java `Main.getConfiguration(imageSet)` 相当の注入点）。
 type ImageSetResolver = dyn FnMut(&str) -> Option<Arc<ImageSet>>;
 
-/// set 別の許可集合（`settings.toml` の `[tint.sets.<set>] colors`）。
-///
-/// `None`（キー欠落）= その set の全色を許可、`Some(空)` = 1 色も許可しない。
-pub type AllowedColorSets = BTreeMap<String, Option<BTreeSet<String>>>;
-
 /// その set のパレットから 1 色を等確率で抽選する（R20 の抽選母集団・[`Manager::tick`] の
 /// spawn drain 用）。
 ///
-/// 母集団はパレットの**宣言順**で許可されている色（[`id_allowed`]）。許可色が 0 のときは
-/// `None`（= 抽選しない）で、**rng を消費しない**（[`Manager::request_spawn_random`] の
-/// 空スライスと同じ扱い）。index は `(unit * len) as usize` の切り捨て
-/// （Java `createMascot` の set 選択と同じ式）。
+/// 母集団はパレットの**宣言順**で `Allowed != false` の色（[`Palette::allowed_colors`]）。
+/// 許可色が 0 のときは `None`（= 抽選しない）で、**rng を消費しない**
+/// （[`Manager::request_spawn_random`] の空スライスと同じ扱い）。index は
+/// `(unit * len) as usize` の切り捨て（Java `createMascot` の set 選択と同じ式）。
 ///
 /// `Manager` のメソッドにしないのは、drain ループが `Environment` を借用したまま
 /// `&mut self` を取れないため（フィールド単位の借用に分ける）。
-fn draw_allowed_color<'a>(
-    palette: &'a Palette,
-    allowed: Option<&BTreeSet<String>>,
-    rng: &mut dyn Rng,
-) -> Option<&'a PaletteColor> {
-    let population: Vec<&PaletteColor> = palette
-        .iter()
-        .filter(|color| id_allowed(allowed, &color.id))
-        .collect();
+fn draw_allowed_color<'a>(palette: &'a Palette, rng: &mut dyn Rng) -> Option<&'a PaletteColor> {
+    let population: Vec<&PaletteColor> = palette.allowed_colors().collect();
     if population.is_empty() {
         return None;
     }
@@ -154,15 +142,12 @@ pub struct Manager {
     /// true のとき保持者が Fall / Thrown へ遷移したら unpin する。
     /// pin 成立時・unpin 時に false へリセットする。
     pin_has_clung: bool,
-    /// set 別の色づけスタイル（Reload が set 宣言から登録・[`Manager::set_tables`] と
+    /// set 別の色づけスタイル（Reload が `tint.xml` から登録・[`Manager::set_tables`] と
     /// 同じ寿命）。未登録 set は [`TintStyle::default`]（= 色づけなし）。
     set_tints: HashMap<String, TintStyle>,
-    /// set 別のパレット（`<TintPalette>`・Reload が登録・[`Manager::set_tables`] と
-    /// 同じ寿命）。空のパレット = その set に色は無い（色 UI も出さない）。
+    /// set 別のパレット（`tint.xml` の `<Color>`・Reload が登録・[`Manager::set_tables`] と
+    /// 同じ寿命）。空のパレット = その set に色は無い（「呼ぶ」の色の一覧も出さない）。
     set_palettes: HashMap<String, Palette>,
-    /// set 別の出現を許可する色（R19/R20/R21）。`settings.toml` の
-    /// `[tint.sets.<set>] colors` を main が注入する。キー欠落 = 全色許可。
-    allowed_colors: AllowedColorSets,
 }
 
 impl Manager {
@@ -221,7 +206,6 @@ impl Manager {
             pin_has_clung: false,
             set_tints: HashMap::new(),
             set_palettes: HashMap::new(),
-            allowed_colors: AllowedColorSets::new(),
         }
     }
 
@@ -321,24 +305,15 @@ impl Manager {
         self.added.push(mascot);
     }
 
-    /// 出現を許可する色を差し替える（`settings.toml` の `[tint.sets.<set>] colors` の
-    /// 注入経路・R19/R20/R21）。
-    ///
-    /// 注入した集合がそのままランダム出現の抽選母集団になり、色を選んで呼ぶ一覧の母集団にもなる。
-    /// 実行中の変更を反映するのは呼び出し側（main / トレイ）の責務。
-    pub fn set_allowed_colors(&mut self, allowed: AllowedColorSets) {
-        self.allowed_colors = allowed;
-    }
-
-    /// set 別のパレット（トレイ/右クリックの色 UI の材料・Reload が登録）。
+    /// set 別のパレット（「呼ぶ」の色一覧の材料・Reload が登録）。
     pub fn palettes(&self) -> &HashMap<String, Palette> {
         &self.set_palettes
     }
 
-    /// 色づけ対応 set（**パレットが空でない** set）の名前。
+    /// 色づけ対応 set（**色の宣言（`tint.xml`）が空でない** set）の名前。
     ///
-    /// トレイ/右クリックで色 UI を出す対象（パレットを宣言していない set には色メニューを
-    /// 出さない = 「色を出すにはパレットが要る」の 1 不変条件）。順序は決定的にするため名前順。
+    /// トレイの「呼ぶ」で色を選ばせる対象（色を宣言していない set には色の一覧を出さない
+    /// = 「色を出すには色の宣言が要る」の 1 不変条件）。順序は決定的にするため名前順。
     pub fn color_capable_sets(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .set_palettes
@@ -348,26 +323,6 @@ impl Manager {
             .collect();
         names.sort();
         names
-    }
-
-    /// index のマスコットの色を「その set のパレットの色」へ写す（R21・右クリック
-    /// 「この色を出す」用）。
-    ///
-    /// ① 個体の確定色（hue / sat / lum）と完全一致するパレット色 → その id
-    /// （R19/R20 の個体はパレットの値をそのまま写しているので一致する）
-    /// ② 一致しなければ（`cycle` 個体）現在色相を [`Palette::nearest_index`] で写す
-    /// ③ どちらも無理なら `None`（色づけなし / パレットが無い / 有彩色が無い / index 範囲外）。
-    /// 戻り値は `(set 名, 色 id)`。
-    pub fn color_id_at(&self, index: usize) -> Option<(String, String)> {
-        let mascot = self.mascots.get(index)?;
-        let set_name = mascot.image_set_name().to_string();
-        let palette = self.valid_palette(&set_name)?;
-        let (hue, sat, lum) = mascot.tint_values()?;
-        if let Some(found) = palette.index_of_values(hue, sat, lum) {
-            return Some((set_name, palette.get(found)?.id.clone()));
-        }
-        let nearest = palette.nearest_index(hue)?;
-        Some((set_name, palette.get(nearest)?.id.clone()))
     }
 
     /// Java `tick` L201-244 逐語:
@@ -453,9 +408,9 @@ impl Manager {
             mascot.set_look_right(request.look_right);
             // 出現時の色を決める（未登録 set は既定 = 色づけなし）。
             // - 手動指定（`SpawnRequest::tint` = R19）→ その確定色の個体
-            // - set 宣言が `Tint="random"`（R20）→ パレットの許可色から 1 色抽選してその色に固定
-            // - `Tint="cycle"` → 宣言どおり（位相の初期値は宣言の `TintStart`）
-            // - パレットが空なのに `Tint` を宣言している → **無効（無色）**（警告は reload が 1 回出す）
+            // - set 宣言が `Mode="random"`（R20）→ パレットの許可色から 1 色抽選してその色に固定
+            // - `Mode="cycle"` → 宣言どおり（位相の初期値は宣言の `Start`）
+            // - パレットが空なのに `Mode` を宣言している → **無効（無色）**（警告は reload が 1 回出す）
             let declared = self
                 .set_tints
                 .get(&request.image_set_name)
@@ -465,14 +420,10 @@ impl Manager {
                 .set_palettes
                 .get(&request.image_set_name)
                 .filter(|palette| !palette.is_empty());
-            let allowed = self
-                .allowed_colors
-                .get(&request.image_set_name)
-                .and_then(|allowed| allowed.as_ref());
             let style = match (request.tint, palette) {
                 (Some(color), _) => declared.with_color(&color),
                 (None, Some(palette)) if declared.mode == TintMode::Random => {
-                    match draw_allowed_color(palette, allowed, self.rng.as_mut()) {
+                    match draw_allowed_color(palette, self.rng.as_mut()) {
                         Some(color) => declared.with_color(color),
                         None => {
                             // 許可 0 色は抽選できない（rng も消費しない）→ 無色
@@ -984,23 +935,23 @@ impl Manager {
             return;
         }
 
-        // set 別 tint / パレットも宣言から再構築する（stale エントリを残さない・
+        // set 別 tint / パレットも宣言（tint.xml）から再構築する（stale エントリを残さない・
         // set_tables と同型）。
         self.set_tints.clear();
         self.set_tints
-            .extend(materials.iter().map(|m| (m.name.clone(), m.actions.tint)));
+            .extend(materials.iter().map(|m| (m.name.clone(), m.tint.style)));
         self.set_palettes.clear();
         self.set_palettes.extend(
             materials
                 .iter()
-                .map(|m| (m.name.clone(), m.actions.palette.clone())),
+                .map(|m| (m.name.clone(), m.tint.palette.clone())),
         );
-        // 色を出すにはパレットが要る（宣言だけあってパレットが無い set は色なしになる）。
-        // 起動は止めず、宣言とパレットの食い違いをここで 1 回だけ知らせる。
+        // 色を出すには色の宣言（`<Color>`）が要る（モードだけあって色が無い set は無色になる）。
+        // 起動は止めず、モードと色の食い違いをここで 1 回だけ知らせる。
         for material in &materials {
-            if material.actions.tint.mode != TintMode::Off && material.actions.palette.is_empty() {
+            if material.tint.style.mode != TintMode::Off && material.tint.palette.is_empty() {
                 log::warn!(
-                    "`{}` declares tinting but has no <TintPalette>: colours are disabled",
+                    "`{}` declares colouring but has no <Color>: colours are disabled",
                     material.name
                 );
             }

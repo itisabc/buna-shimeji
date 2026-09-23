@@ -105,8 +105,8 @@ use shimeji::mascot::rng::JavaRandom;
 use shimeji::render::imageset::ImageSet;
 use shimeji::render::{MascotView, SpriteDraw};
 use shimeji::tray::{
-    allowed_color_sets, apply_tray_command, load_tray_icon_rgba, MenuInputs, Settings, TrayCommand,
-    TrayContext, TrayMenuModel,
+    apply_tray_command, load_tray_icon_rgba, MenuInputs, Settings, TrayCommand, TrayContext,
+    TrayMenuModel,
 };
 use shimeji::win::os_source::{ensure_window_above, restore_topmost_on_panic, Win32OsSource};
 use shimeji::win::window::{MoveBatch, SingleInstance, SingleInstanceError};
@@ -309,17 +309,10 @@ impl App {
         };
         let menu_items = self.manager.behavior_menu_items(&set_name);
         let is_paused = self.manager.is_paused_at(index).unwrap_or(false);
-        // 色 UI はその個体の色を set のパレットへ写せるときだけ出す（パレットが無い set では出さない）
-        let can_allow_color = self.manager.color_id_at(index).is_some();
         let model = TrayMenuModel::build_popup(
             index,
-            &MenuInputs::new(
-                &self.dirs.tray_context.image_sets,
-                self.manager.palettes(),
-                &self.settings.tint.sets,
-            ),
+            &MenuInputs::new(&self.dirs.tray_context.image_sets, self.manager.palettes()),
             &menu_items,
-            can_allow_color,
             is_paused,
             &self.lang,
         );
@@ -350,7 +343,6 @@ impl App {
                 self.apply_command(command);
                 // Allowed トグル適用後の UI 整合（必ず・#9c 契約）
                 self.tray_model.sync_allowed(&self.settings.allowed);
-                self.tray_model.sync_colors(&self.settings.tint.sets);
                 continue;
             }
             if let Some(position) = self
@@ -362,8 +354,6 @@ impl App {
                 if let Some(command) = popup.command_of(&id) {
                     self.apply_command(command);
                 }
-                // 右クリック「この色を出す」で許可集合が変わり得る（トレイ側の checked を合わせる）
-                self.tray_model.sync_colors(&self.settings.tint.sets);
                 continue;
             }
             log::warn!("ignoring unknown menu id: {id:?}");
@@ -374,37 +364,23 @@ impl App {
     fn apply_command(&mut self, command: TrayCommand) {
         match command {
             TrayCommand::Reload => self.reload(),
-            other => {
-                // 許可色を変えるコマンドは「呼ぶ → set → 色」の一覧を作り直す
-                // （一覧はメニュー構築時に確定するため。R19 の「一覧 = 許可色」）
-                let rebuild = matches!(
-                    other,
-                    TrayCommand::SetColorAllowed(..) | TrayCommand::AllowColorOf(..)
-                );
-                apply_tray_command(
-                    &mut self.manager,
-                    &mut self.settings,
-                    other,
-                    &self.dirs.tray_context,
-                );
-                if rebuild {
-                    self.rebuild_tray_menu();
-                }
-            }
+            other => apply_tray_command(
+                &mut self.manager,
+                &mut self.settings,
+                other,
+                &self.dirs.tray_context,
+            ),
         }
     }
 
-    /// トレイメニューを現在の許可色で作り直す（スライス 7）。
+    /// トレイメニューを set の色の宣言（`tint.xml`）で作り直す（Reload 後）。
     ///
-    /// 許可色の変更後も「呼ぶ → set → 色」の一覧が設定と一致するようにする
-    /// （muda の `Menu` は Rc 共有 Clone なので、新モデルの menu をトレイへ差し替える）。
+    /// 「呼ぶ」の色の一覧は Reload が読み直したパレットから作るため、素材を差し替えたら
+    /// メニューも作り直す（muda の `Menu` は Rc 共有 Clone なので、新モデルの menu を
+    /// トレイへ差し替える）。
     fn rebuild_tray_menu(&mut self) {
         let model = TrayMenuModel::build_tray(
-            &MenuInputs::new(
-                &self.dirs.tray_context.image_sets,
-                self.manager.palettes(),
-                &self.settings.tint.sets,
-            ),
+            &MenuInputs::new(&self.dirs.tray_context.image_sets, self.manager.palettes()),
             &self.settings.allowed,
             &self.lang,
         );
@@ -435,6 +411,8 @@ impl App {
                     )));
                 // 参照付け替え（ImageSet Arc / 行動表 / behavior 再構築）
                 self.manager.reload(materials);
+                // 「呼ぶ」の色の一覧は Reload が読み直した tint.xml に従う（スライス 11）
+                self.rebuild_tray_menu();
                 // 全 view reset（ImageKey に set 名を含まないため必須・design §1.10(c)）
                 self.views.iter_mut().for_each(MascotView::reset);
                 // 全マスコットへ再描画要求（rebind は builds needs_repaint を立てない・
@@ -731,16 +709,14 @@ fn try_main() -> anyhow::Result<()> {
     manager.set_pin_dropped_window_allowed(settings.allowed.pin_dropped_window);
     // 無効 Behavior map（Manager passthrough・全体置換）
     manager.set_disabled_behaviors(settings.disabled_behaviors.clone());
-    // 出現を許可する色（`[tint.sets.<set>] colors`・R19/R20/R21 の抽選母集団と一覧の母集団）
-    manager.set_allowed_colors(allowed_color_sets(&settings.tint.sets));
 
     // 12. 起動時 1 体
     manager.request_spawn_random(&image_sets);
 
     // 13. トレイ（アイコンは img/icon.png 優先 → 埋め込み既定・Java Main.getIcon L764-792 準拠）
-    // 色 UI はパレットを持つ set だけに出す（マスコット側 config で調整）
+    // 色の一覧は宣言（tint.xml）を持つ set だけに出す（マスコット側の conf で調整）
     let tray_model = TrayMenuModel::build_tray(
-        &MenuInputs::new(&image_sets, manager.palettes(), &settings.tint.sets),
+        &MenuInputs::new(&image_sets, manager.palettes()),
         &settings.allowed,
         &lang,
     );

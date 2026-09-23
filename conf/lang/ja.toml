@@ -25,8 +25,6 @@ SetBehaviour = "行為の設定"
 Dismiss = "消す"
 Shimeji = "しめじ"
 SpawnDefault = "（既定）"
-AllowedColors = "出現を許可する色"
-AllowThisColor = "この色を出す"
 
 # --- Behavior 名（conf/behaviors.xml） ---
 ChaseMouse = "マウスを追っかける"

@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Schema for the colour declaration of one image set (tint.xml).
+
+    The file lives in the set's own conf directory and is resolved in this order:
+    img/[image_set]/conf/tint.xml, then conf/[image_set]/tint.xml. There is no fallback to the shared conf/
+    directory (colours belong to the set that declares them), and a set without this file simply has no colours.
+
+    The application only reads this file: it never writes it. Colours are declared as hue values plus a
+    rotation speed; how the colours are used (random draw / hue rotation) and which colours may appear are
+    part of this declaration.
+-->
+<schema targetNamespace="http://www.group-finity.com/Mascot" elementFormDefault="qualified"
+        xmlns="http://www.w3.org/2001/XMLSchema" xmlns:tns="http://www.group-finity.com/Mascot">
+
+    <element name="TintPalette" type="tns:TintPalette"/>
+
+    <complexType name="TintPalette">
+        <annotation>
+            <documentation>
+                The root of the colour declaration. Its attributes are the mode and the default values that the
+                Color elements inherit; its children are the colours this image set has.
+                Omitting Mode (or "off" / "none") means no colouring at all, which keeps the set untinted while
+                the colours stay available to the "call a colour" menu.
+            </documentation>
+        </annotation>
+        <sequence>
+            <element name="Color" type="tns:Color" minOccurs="0" maxOccurs="unbounded"/>
+        </sequence>
+        <attribute name="Mode" default="off">
+            <annotation>
+                <documentation>
+                    How the colours are used. "random" picks one of the allowed colours each time a mascot appears
+                    and keeps that colour; "cycle" ("rainbow" is an alias) rotates the hue forever, which does not
+                    use the palette. Omit it, or write "off" / "none", for no colouring.
+                </documentation>
+            </annotation>
+            <simpleType>
+                <restriction base="string">
+                    <enumeration value="random"/>
+                    <enumeration value="cycle"/>
+                    <enumeration value="rainbow"/>
+                    <enumeration value="off"/>
+                    <enumeration value="none"/>
+                </restriction>
+            </simpleType>
+        </attribute>
+        <attribute name="Speed" type="double">
+            <annotation>
+                <documentation>
+                    Rotation speed in degrees per second. Defaults to 150 when Mode is "cycle" and to 0 (no
+                    rotation) otherwise, so that a random colour stays the colour it was drawn with. A negative
+                    value rotates in the opposite direction, and 0 pins the hue to Start.
+                </documentation>
+            </annotation>
+        </attribute>
+        <attribute name="Start" type="double" default="0">
+            <annotation>
+                <documentation>
+                    The initial hue in degrees (0 or greater and less than 360 after wrapping; negative values and
+                    values of 360 or more are wrapped). This is the hue of a mascot when it appears.
+                </documentation>
+            </annotation>
+        </attribute>
+        <attribute name="Sat" type="double" default="100">
+            <annotation>
+                <documentation>Saturation in percent. The default for the Color elements.</documentation>
+            </annotation>
+        </attribute>
+        <attribute name="Lum" type="double" default="62">
+            <annotation>
+                <documentation>Luminance in percent. The default for the Color elements.</documentation>
+            </annotation>
+        </attribute>
+        <attribute name="Glow" type="double" default="1.0">
+            <annotation>
+                <documentation>
+                    Glow intensity (0 does not glow). The default for the Color elements.
+                </documentation>
+            </annotation>
+        </attribute>
+    </complexType>
+
+    <complexType name="Color">
+        <annotation>
+            <documentation>
+                One colour of the palette. Attributes that are omitted inherit the values declared on the root
+                element (Hue defaults to 0), so the game only ever sees resolved colours.
+                The colours keep the order they are written in: that order is the order of the menu.
+            </documentation>
+        </annotation>
+        <attribute name="Id" use="required">
+            <annotation>
+                <documentation>
+                    The stable key of this colour (letters, digits, "_" and "-"). The Id must be unique within the
+                    palette; when it is duplicated, the first colour wins and the later one is dropped.
+                </documentation>
+            </annotation>
+            <simpleType>
+                <restriction base="string">
+                    <pattern value="[A-Za-z0-9_-]+"/>
+                </restriction>
+            </simpleType>
+        </attribute>
+        <attribute name="Name" type="string">
+            <annotation>
+                <documentation>
+                    The name shown in the menu. Defaults to the Id. This is author data: it is not translated.
+                </documentation>
+            </annotation>
+        </attribute>
+        <attribute name="Hue" type="double" default="0">
+            <annotation>
+                <documentation>
+                    The hue in degrees (negative values and values of 360 or more are wrapped).
+                </documentation>
+            </annotation>
+        </attribute>
+        <attribute name="Sat" type="double">
+            <annotation>
+                <documentation>Saturation in percent. Defaults to the root's Sat.</documentation>
+            </annotation>
+        </attribute>
+        <attribute name="Lum" type="double">
+            <annotation>
+                <documentation>Luminance in percent. Defaults to the root's Lum.</documentation>
+            </annotation>
+        </attribute>
+        <attribute name="Glow" type="double">
+            <annotation>
+                <documentation>Glow intensity while the mascot has this colour. Defaults to the root's Glow.</documentation>
+            </annotation>
+        </attribute>
+        <attribute name="Allowed" default="true">
+            <annotation>
+                <documentation>
+                    Whether this colour may appear, which defaults to true. Writing "false" keeps the colour in the
+                    palette but never spawns it: both the random draw and the "call a colour" menu only use the
+                    allowed colours.
+                </documentation>
+            </annotation>
+            <simpleType>
+                <restriction base="string">
+                    <pattern value="true|false"/>
+                </restriction>
+            </simpleType>
+        </attribute>
+    </complexType>
+</schema>

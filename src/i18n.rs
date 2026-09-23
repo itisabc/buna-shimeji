@@ -46,10 +46,6 @@ pub enum UiKey {
     Shimeji,
     /// 「呼ぶ」内で set 宣言どおりの tint で出す項目。
     SpawnDefault,
-    /// トレイの「出現を許可する色」サブメニュー。
-    AllowedColors,
-    /// 右クリックの「この色を出す」（R21）。
-    AllowThisColor,
 }
 
 impl UiKey {
@@ -77,8 +73,6 @@ impl UiKey {
         UiKey::Dismiss,
         UiKey::Shimeji,
         UiKey::SpawnDefault,
-        UiKey::AllowedColors,
-        UiKey::AllowThisColor,
     ];
 
     /// 辞書キー文字列（= Java `language.properties` のキー。Rust 独自キーは同名新規）。
@@ -106,8 +100,6 @@ impl UiKey {
             UiKey::Dismiss => "Dismiss",
             UiKey::Shimeji => "Shimeji",
             UiKey::SpawnDefault => "SpawnDefault",
-            UiKey::AllowedColors => "AllowedColors",
-            UiKey::AllowThisColor => "AllowThisColor",
         }
     }
 }
