@@ -1705,3 +1705,54 @@ fn manager_request_spawn_colored_uses_the_given_hue() {
     manager.apply_all(|m| hue = Some(m.tint_hue()));
     assert_eq!(hue, Some(210.0), "指定した色相で出る");
 }
+
+/// `color_capable_sets` は宣言 `Tint` が off 以外の set だけを返す
+/// （スライス 6c: トレイ/右クリックの色 UI を出す対象）。
+#[test]
+fn manager_color_capable_sets_lists_only_tinted_sets() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        unit_rng(),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "Plain" => Some(image_set_with("Plain", "a.png", 8, 8)),
+        "Plain2" => Some(image_set_with("Plain2", "a.png", 8, 8)),
+        "Tinted" => Some(image_set_with("Tinted", "a.png", 8, 8)),
+        _ => None,
+    });
+    manager.reload(vec![
+        material_with_tint(
+            "Plain",
+            image_set_with("Plain", "a.png", 8, 8),
+            vec![row("Walk", 100)],
+            TintStyle::default(), // 宣言なし = Off
+        ),
+        material_with_tint(
+            "Tinted",
+            image_set_with("Tinted", "a.png", 8, 8),
+            vec![row("Walk", 100)],
+            TintStyle {
+                mode: TintMode::Cycle,
+                ..Default::default()
+            },
+        ),
+        material_with_tint(
+            "Plain2",
+            image_set_with("Plain2", "a.png", 8, 8),
+            vec![row("Walk", 100)],
+            TintStyle {
+                mode: TintMode::Off,
+                ..Default::default()
+            },
+        ),
+    ]);
+
+    assert_eq!(
+        manager.color_capable_sets(),
+        ["Tinted"],
+        "Tint を宣言した set だけが色 UI の対象"
+    );
+}

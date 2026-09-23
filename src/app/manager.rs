@@ -290,6 +290,21 @@ impl Manager {
         self.allowed_colors = colors;
     }
 
+    /// 色づけ対応 set（宣言 `Tint` が `off` 以外）の名前（スライス 6c）。
+    ///
+    /// トレイ/右クリックで色 UI を出す対象。`Tint` を宣言していない set には色メニューを
+    /// 出さない（マスコット側 config で調整する）。順序は決定的にするため名前順。
+    pub fn color_capable_sets(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .set_tints
+            .iter()
+            .filter(|(_, style)| style.mode != TintMode::Off)
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Java `tick` L201-244 逐語:
     /// ①環境更新 → ②追加キュー / spawn キュー / 削除の反映 → ③全員 tick。
     /// 描画（Java は `mascot.apply()` で window 反映）は本 tick ではしない:
@@ -741,6 +756,16 @@ impl Manager {
         self.mascots
             .get(index)
             .map(|mascot| mascot.image_set_name().to_string())
+    }
+
+    /// index のマスコットの現在の色相（スライス 7・右クリック「この色を出す」用）。
+    ///
+    /// 色づけなし（[`TintMode::Off`]）の個体は色を持たないため `None`
+    /// （色相 0 を「いちごを許可」と誤解釈しないため。判定は [`Mascot::tint_rgb`] に委ねる）。
+    /// index 範囲外も None。
+    pub fn tint_hue_at(&self, index: usize) -> Option<f32> {
+        let mascot = self.mascots.get(index)?;
+        mascot.tint_rgb().map(|_| mascot.tint_hue())
     }
 
     /// index のマスコットへマウスボタン押下を転送する（#10b-2c・

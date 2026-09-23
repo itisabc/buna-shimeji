@@ -50,20 +50,33 @@
 //! pub enum SettingsError { /* ... */ }
 //!
 //! pub enum TrayCommand {
-//!     Spawn(Option<String>), FollowCursor, ReduceToOne, RestoreWindows,
-//!     SetAllowed(AllowedKind, bool), TogglePauseAll, DismissAll, Reload,
+//!     Spawn(Option<String>), SpawnColored(String, f32), FollowCursor, ReduceToOne, RestoreWindows,
+//!     SetAllowed(AllowedKind, bool), SetColorAllowed(usize, bool), AllowColorOf(usize),
+//!     TogglePauseAll, DismissAll, Reload,
 //!     SetBehaviorFor(usize, String), TogglePauseFor(usize), DismissFor(usize),
 //! }
 //!
 //! pub struct TrayContext { pub conf_dir: PathBuf, pub img_dir: PathBuf, pub image_sets: Vec<String> }
 //!
+//! // メニュー構築の入力（6c: 色 UI は color_capable の set だけに出す）
+//! pub struct MenuInputs<'a> {
+//!     pub image_sets: &'a [String],
+//!     pub color_capable: &'a [String],
+//!     pub allowed_colors: &'a ColorSet,
+//! }
+//! impl MenuInputs<'_> {
+//!     pub fn new(image_sets: &[String], color_capable: &[String], allowed_colors: &ColorSet) -> Self
+//!     pub fn is_color_capable(&self, set: &str) -> bool
+//! }
+//!
 //! pub struct TrayMenuModel { /* 非公開フィールド */ }
 //! impl TrayMenuModel {
-//!     pub fn build_tray(image_sets: &[String], allowed: &AllowedSettings, lang: &Lang) -> TrayMenuModel
-//!     pub fn build_popup(index: usize, image_sets: &[String], menu_items: &BehaviorMenu, is_paused: bool, lang: &Lang) -> TrayMenuModel
+//!     pub fn build_tray(inputs: &MenuInputs, allowed: &AllowedSettings, lang: &Lang) -> TrayMenuModel
+//!     pub fn build_popup(index: usize, inputs: &MenuInputs, menu_items: &BehaviorMenu, can_allow_color: bool, is_paused: bool, lang: &Lang) -> TrayMenuModel
 //!     pub fn menu(&self) -> &tray_icon::menu::Menu
 //!     pub fn command_of(&self, id: &MenuId) -> Option<TrayCommand>
 //!     pub fn sync_allowed(&self, allowed: &AllowedSettings)   // 全 CheckMenuItem へ set_checked
+//!     pub fn sync_colors(&self, colors: &ColorSet)            // 12 色の CheckMenuItem へ set_checked
 //! }
 //!
 //! pub fn apply_tray_command(manager: &mut Manager, settings: &mut Settings, command: TrayCommand, context: &TrayContext)
@@ -89,6 +102,14 @@
 //!     // Java popup Dismiss L562 相当（dispose・remove_pending・削除は次 tick）・
 //!     // 範囲外 → warn no-op
 //!     pub fn dismiss_at(&mut self, index: usize)
+//!     // 出現を許可する色の差し替え（R19/R20 の抽選母集団・settings.toml から注入）
+//!     pub fn set_allowed_colors(&mut self, colors: ColorSet)
+//!     // 色を指定して 1 体 spawn（R19・次 tick で宣言の sat/lum/glow/sweep のまま固定色）
+//!     pub fn request_spawn_colored(&mut self, image_set_name: &str, hue: f32)
+//!     // 宣言 Tint が off 以外の set 名（名前順）。トレイ/右クリックの色 UI の対象（6c）
+//!     pub fn color_capable_sets(&self) -> Vec<String>
+//!     // index の個体の現在色相。色づけなし（Off）と範囲外は None（R21「この色を出す」用）
+//!     pub fn tint_hue_at(&self, index: usize) -> Option<f32>
 //! }
 //!
 //! // ---- src/app/environment.rs 追加 ----
@@ -125,8 +146,8 @@ use shimeji::render::imageset::{Frame, ImageSet};
 use shimeji::tint::{ColorSet, PALETTE_LEN};
 use shimeji::tray::{
     apply_tray_command, AllowedKind, AllowedSettings, GeneralSettings, ImagesetsSettings,
-    InteractiveWindowsSettings, Settings, SettingsError, TintSettings, TrayCommand, TrayContext,
-    TrayMenuModel,
+    InteractiveWindowsSettings, MenuInputs, Settings, SettingsError, TintSettings, TrayCommand,
+    TrayContext, TrayMenuModel,
 };
 use tray_icon::menu::{CheckMenuItem, MenuId, MenuItemKind, Submenu};
 
@@ -142,6 +163,11 @@ fn ja_lang() -> Lang {
             .join("lang"),
         "ja",
     )
+}
+
+/// 全 set を色づけ対応として扱う `MenuInputs`（色 UI の有無だけを見ないテストの既定）。
+fn inputs_all<'a>(sets: &'a [String], colors: &'a ColorSet) -> MenuInputs<'a> {
+    MenuInputs::new(sets, sets, colors)
 }
 
 /// 矩形ヘルパ。
@@ -1594,15 +1620,15 @@ fn expect_separator(kind: &MenuItemKind, what: &str) {
 fn tray_menu_structure_and_commands_match_design_3_11() {
     let sets = vec!["Shimeji".to_string(), "Kuro".to_string()];
     let model = TrayMenuModel::build_tray(
-        &sets,
+        &inputs_all(&sets, &ColorSet::default()),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
     let items = model.menu().items();
     assert_eq!(
         items.len(),
-        10,
-        "tray は 10 項目（submenu 3 + item 5 + separator 2）"
+        11,
+        "tray は 11 項目（submenu 4 + item 5 + separator 2）"
     );
 
     let pattern: Vec<&str> = items.iter().map(kind_label).collect();
@@ -1614,23 +1640,24 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
             "item",
             "item",
             "submenu",
+            "submenu",
             "separator",
             "item",
             "item",
             "separator",
             "item",
         ],
-        "挿入順（design §3-11 の 1〜10）"
+        "挿入順（design §3-11 の 1〜10 + 出現を許可する色 6c）"
     );
 
-    // 1. 「呼ぶ」Submenu: 先頭「（ランダム）」= Spawn(None) + 各 set 名 = Spawn(Some(set))
+    // 1. 「呼ぶ」Submenu: 先頭「（ランダム）」= Spawn(None) + 各 set の Submenu（案 1）
     let spawn = expect_submenu(&items[0], "呼ぶ");
     assert_eq!(spawn.text(), "しめじを呼ぶ");
     let children = spawn.items();
     assert_eq!(
         children.len(),
         3,
-        "（ランダム）+ set 名分（tray-icon 経由の挿入順保持）"
+        "（ランダム）+ set サブメニュー分（tray-icon 経由の挿入順保持）"
     );
     assert_eq!(expect_item_text(&children[0], "ランダム"), "（ランダム）");
     assert!(
@@ -1640,21 +1667,48 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
         ),
         "「（ランダム）」→ Spawn(None)"
     );
-    assert_eq!(expect_item_text(&children[1], "set 1"), "Shimeji");
-    assert!(
-        matches!(
-            model.command_of(children[1].id()),
-            Some(TrayCommand::Spawn(Some(s))) if s == "Shimeji"
-        ),
-        "set 名項目 → Spawn(Some(set))"
+
+    // set の Submenu = 「（既定）」(Spawn(Some(set))) + separator + 許可色（全 12 色）
+    let shimeji = expect_submenu(&children[1], "Shimeji");
+    assert_eq!(shimeji.text(), "Shimeji", "set 名がそのままサブメニュー名");
+    let shimeji_items = shimeji.items();
+    assert_eq!(
+        shimeji_items.len(),
+        PALETTE_LEN + 2,
+        "「（既定）」+ separator + 許可色 12"
     );
-    assert_eq!(expect_item_text(&children[2], "set 2"), "Kuro");
+    assert_eq!(expect_item_text(&shimeji_items[0], "既定"), "（既定）");
     assert!(
         matches!(
-            model.command_of(children[2].id()),
-            Some(TrayCommand::Spawn(Some(s))) if s == "Kuro"
+            model.command_of(shimeji_items[0].id()),
+            Some(TrayCommand::Spawn(Some(ref s))) if s == "Shimeji"
         ),
-        "image_sets 順に Submenu 子が並ぶ"
+        "「（既定）」→ Spawn(Some(set))（宣言の tint のまま）"
+    );
+    expect_separator(&shimeji_items[1], "「（既定）」の後");
+    assert_eq!(expect_item_text(&shimeji_items[2], "色 1"), "いちご");
+    assert!(
+        matches!(
+            model.command_of(shimeji_items[2].id()),
+            Some(TrayCommand::SpawnColored(ref s, hue)) if s == "Shimeji" && hue == 0.0
+        ),
+        "色 → SpawnColored(set, 色相)"
+    );
+    assert_eq!(
+        expect_item_text(&shimeji_items[PALETTE_LEN + 1], "色 12"),
+        "もも",
+        "色は色相順（330° が最後）"
+    );
+
+    // set の並びは image_sets 順
+    let kuro = expect_submenu(&children[2], "Kuro");
+    assert_eq!(kuro.text(), "Kuro");
+    assert!(
+        matches!(
+            model.command_of(kuro.items()[2].id()),
+            Some(TrayCommand::SpawnColored(ref s, hue)) if s == "Kuro" && hue == 0.0
+        ),
+        "image_sets 順に set サブメニューが並ぶ"
     );
 
     // 2-4. Follow Cursor / Reduce to One / Restore Windows
@@ -1713,30 +1767,238 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
         );
     }
 
-    // 6. separator
-    expect_separator(&items[5], "許可する行為 の後");
+    // 6. 出現を許可する色 Submenu: CheckMenuItem 12 種（checked = 許可色の含有）
+    let colors_sub = expect_submenu(&items[5], "出現を許可する色");
+    assert_eq!(colors_sub.text(), "出現を許可する色");
+    let color_checks = colors_sub.items();
+    assert_eq!(color_checks.len(), PALETTE_LEN, "色トグルは 12 種");
+    assert_eq!(expect_item_text(&color_checks[0], "色 1"), "いちご");
+    assert_eq!(
+        expect_item_text(&color_checks[PALETTE_LEN - 1], "色 12"),
+        "もも"
+    );
+    for (index, item) in color_checks.iter().enumerate() {
+        let check = expect_check(item, "色トグル項目");
+        assert!(check.is_checked(), "既定（全許可）は 12 色とも checked");
+        let applied = check.is_checked();
+        assert!(
+            matches!(
+                model.command_of(check.id()),
+                Some(TrayCommand::SetColorAllowed(got, value))
+                    if got == index && value == applied
+            ),
+            "色 {} → SetColorAllowed(パレット添字, 現在の checked = 適用値)",
+            index
+        );
+    }
 
-    // 7-8. 一時停止 / Dismiss All
-    assert_eq!(expect_item_text(&items[6], "一時停止"), "一時停止");
-    assert!(matches!(
-        model.command_of(items[6].id()),
-        Some(TrayCommand::TogglePauseAll)
-    ));
-    assert_eq!(expect_item_text(&items[7], "Dismiss All"), "すべて消す");
+    // 7. separator
+    expect_separator(&items[6], "出現を許可する色 の後");
+
+    // 8-9. 一時停止 / Dismiss All
+    assert_eq!(expect_item_text(&items[7], "一時停止"), "一時停止");
     assert!(matches!(
         model.command_of(items[7].id()),
+        Some(TrayCommand::TogglePauseAll)
+    ));
+    assert_eq!(expect_item_text(&items[8], "Dismiss All"), "すべて消す");
+    assert!(matches!(
+        model.command_of(items[8].id()),
         Some(TrayCommand::DismissAll)
     ));
 
-    // 9. separator
-    expect_separator(&items[8], "Dismiss All の後");
+    // 10. separator
+    expect_separator(&items[9], "Dismiss All の後");
 
-    // 10. Reload
-    assert_eq!(expect_item_text(&items[9], "Reload"), "再読み込み");
+    // 11. Reload
+    assert_eq!(expect_item_text(&items[10], "Reload"), "再読み込み");
     assert!(matches!(
-        model.command_of(items[9].id()),
+        model.command_of(items[10].id()),
         Some(TrayCommand::Reload)
     ));
+}
+
+/// 呼ぶ → set → 色は**許可色だけ**を色相順に並べる（`[tint] colors` が一覧の母集団・R19）。
+#[test]
+fn spawn_submenu_lists_only_allowed_colours_in_palette_order() {
+    let sets = vec!["Shimeji".to_string()];
+    // 順不同・重複混じりで与える（正規化は ColorSet の責務）
+    let colors = ColorSet::from_hues([240.0, 0.0, 150.0, 150.0]);
+    let model = TrayMenuModel::build_tray(
+        &inputs_all(&sets, &colors),
+        &allowed(true, true, true, true, true, true, true),
+        &ja_lang(),
+    );
+
+    let menu_items = model.menu().items();
+    let spawn = expect_submenu(&menu_items[0], "呼ぶ");
+    let spawn_items = spawn.items();
+    let shimeji = expect_submenu(&spawn_items[1], "Shimeji");
+    let rows = shimeji.items();
+    assert_eq!(rows.len(), 3 + 2, "「（既定）」+ separator + 許可色 3");
+    let labels: Vec<String> = rows[2..]
+        .iter()
+        .map(|row| expect_item_text(row, "色"))
+        .collect();
+    assert_eq!(
+        labels,
+        ["いちご", "ミント", "ブルーベリー"],
+        "許可色のみ・色相順・辞書の色名"
+    );
+    for (position, hue) in [0.0f32, 150.0, 240.0].into_iter().enumerate() {
+        assert!(
+            matches!(
+                model.command_of(rows[position + 2].id()),
+                Some(TrayCommand::SpawnColored(ref s, got)) if s == "Shimeji" && got == hue
+            ),
+            "許可色 {hue} → SpawnColored(set, hue)"
+        );
+    }
+}
+
+/// 許可色 0 のときは「（既定）」だけを出す（色項目と separator を出さない）。
+#[test]
+fn spawn_submenu_with_no_allowed_colours_has_only_default_item() {
+    let sets = vec!["Shimeji".to_string()];
+    let model = TrayMenuModel::build_tray(
+        &inputs_all(&sets, &ColorSet::none()),
+        &allowed(true, true, true, true, true, true, true),
+        &ja_lang(),
+    );
+
+    let menu_items = model.menu().items();
+    let spawn = expect_submenu(&menu_items[0], "呼ぶ");
+    let children = spawn.items();
+    assert_eq!(
+        children.len(),
+        2,
+        "（ランダム）+ set サブメニュー（set 名は残る）"
+    );
+    let shimeji = expect_submenu(&children[1], "Shimeji");
+    assert_eq!(shimeji.items().len(), 1, "「（既定）」だけ");
+    assert!(
+        matches!(
+            model.command_of(shimeji.items()[0].id()),
+            Some(TrayCommand::Spawn(Some(ref s))) if s == "Shimeji"
+        ),
+        "「（既定）」だけが残り、従来の「set を呼ぶ」は維持される"
+    );
+}
+
+/// `Tint` を宣言していない set（色づけ非対応）には色一覧を出さない（スライス 6c）。
+#[test]
+fn spawn_submenu_hides_colours_for_sets_without_tint() {
+    let sets = vec!["Shimeji".to_string(), "Gaming".to_string()];
+    let capable = vec!["Gaming".to_string()];
+    let model = TrayMenuModel::build_tray(
+        &MenuInputs::new(&sets, &capable, &ColorSet::default()),
+        &allowed(true, true, true, true, true, true, true),
+        &ja_lang(),
+    );
+
+    let menu_items = model.menu().items();
+    let spawn = expect_submenu(&menu_items[0], "呼ぶ");
+    let children = spawn.items();
+    let plain = expect_submenu(&children[1], "Shimeji");
+    assert_eq!(
+        plain.items().len(),
+        1,
+        "色づけ非対応の set は「（既定）」だけ"
+    );
+    let gaming = expect_submenu(&children[2], "Gaming");
+    assert_eq!(
+        gaming.items().len(),
+        PALETTE_LEN + 2,
+        "色づけ対応の set だけ色一覧が出る"
+    );
+    assert_eq!(expect_item_text(&gaming.items()[2], "色 1"), "いちご");
+}
+
+/// 色づけ対応 set が 1 つも無ければ「出現を許可する色」サブメニューを出さない（スライス 6c）。
+#[test]
+fn tray_hides_allowed_colours_submenu_without_capable_sets() {
+    let sets = vec!["Shimeji".to_string(), "Kuro".to_string()];
+    let capable: Vec<String> = vec![];
+    let model = TrayMenuModel::build_tray(
+        &MenuInputs::new(&sets, &capable, &ColorSet::default()),
+        &allowed(true, true, true, true, true, true, true),
+        &ja_lang(),
+    );
+
+    let items = model.menu().items();
+    assert_eq!(
+        items.len(),
+        10,
+        "色トグルが無いぶん 1 項目減る（submenu 3 + item 5 + separator 2）"
+    );
+    expect_separator(&items[5], "許可する行為 の後");
+    let spawn = expect_submenu(&items[0], "呼ぶ");
+    for child in spawn.items()[1..].iter() {
+        let set_menu = expect_submenu(child, "set");
+        assert_eq!(
+            set_menu.items().len(),
+            1,
+            "色づけ非対応の set は「（既定）」だけ"
+        );
+    }
+}
+
+/// 出現を許可する色の CheckMenuItem は `[tint] colors` の含有を初期 checked に反映する。
+#[test]
+fn tray_colour_checks_reflect_allowed_colours() {
+    let sets = vec!["Shimeji".to_string()];
+    let colors = ColorSet::from_hues([150.0]);
+    let model = TrayMenuModel::build_tray(
+        &inputs_all(&sets, &colors),
+        &allowed(true, true, true, true, true, true, true),
+        &ja_lang(),
+    );
+
+    let menu_items = model.menu().items();
+    let colors_sub = expect_submenu(&menu_items[5], "出現を許可する色");
+    let checks = colors_sub.items();
+    assert_eq!(checks.len(), PALETTE_LEN, "パレット 12 色ぶん");
+    for (index, item) in checks.iter().enumerate() {
+        let check = expect_check(item, "色トグル");
+        assert_eq!(
+            check.is_checked(),
+            index == 5,
+            "150°（ミント）だけが許可されている"
+        );
+    }
+}
+
+/// sync_colors は全色 CheckMenuItem へ set_checked を反映し、command_of は
+/// sync 後も有効（SetColorAllowed の値は反映後の現在の checked = 適用値に更新される）。
+#[test]
+fn tray_sync_colors_updates_all_colour_checks() {
+    let sets = vec!["Shimeji".to_string()];
+    let model = TrayMenuModel::build_tray(
+        &inputs_all(&sets, &ColorSet::none()),
+        &allowed(true, true, true, true, true, true, true),
+        &ja_lang(),
+    );
+    let menu_items = model.menu().items();
+    let colors_sub = expect_submenu(&menu_items[5], "出現を許可する色");
+    for item in colors_sub.items() {
+        assert!(
+            !expect_check(&item, "色トグル").is_checked(),
+            "初期は全 off"
+        );
+    }
+
+    model.sync_colors(&ColorSet::default());
+    for (index, item) in colors_sub.items().iter().enumerate() {
+        let check = expect_check(item, "色トグル");
+        assert!(check.is_checked(), "sync 後は全 on");
+        assert!(
+            matches!(
+                model.command_of(check.id()),
+                Some(TrayCommand::SetColorAllowed(got, true)) if got == index
+            ),
+            "sync 後も SetColorAllowed(添字, 適用値) を返す"
+        );
+    }
 }
 
 /// CheckMenuItem の初期 checked = allowed の初期値（既定 true でない値を注入して pin）。
@@ -1745,7 +2007,11 @@ fn tray_menu_structure_and_commands_match_design_3_11() {
 fn tray_menu_allowed_check_items_reflect_initial_allowed_values() {
     let empty: Vec<String> = vec![];
     let initial = allowed(false, true, false, true, true, false, false);
-    let model = TrayMenuModel::build_tray(&empty, &initial, &ja_lang());
+    let model = TrayMenuModel::build_tray(
+        &inputs_all(&empty, &ColorSet::default()),
+        &initial,
+        &ja_lang(),
+    );
     let items = model.menu().items();
 
     let checks = expect_submenu(&items[4], "許可する行為").items();
@@ -1776,7 +2042,7 @@ fn tray_menu_allowed_check_items_reflect_initial_allowed_values() {
 fn tray_menu_sync_allowed_updates_all_check_items() {
     let sets = vec!["Shimeji".to_string()];
     let model = TrayMenuModel::build_tray(
-        &sets,
+        &inputs_all(&sets, &ColorSet::default()),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
@@ -1815,7 +2081,7 @@ fn tray_menu_sync_allowed_updates_all_check_items() {
 // =====================================================================
 
 /// popup: 呼ぶ（tray と同内容）/ 個別行動指定（selectable のみ・toggleable 専用は
-/// 出さない）/ separator / 一時停止 or 再開（is_paused で切替）/ 消す。
+/// 出さない）/ 「この色を出す」/ separator / 一時停止 or 再開（is_paused で切替）/ 消す。
 /// index は build_popup に渡した値が TrayCommand に載る。
 #[test]
 fn popup_menu_structure_selectable_only_and_paused_label() {
@@ -1829,33 +2095,45 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
         ],
     };
     let index = 2usize;
-    let model = TrayMenuModel::build_popup(index, &sets, &menu_items, false, &ja_lang());
+    let model = TrayMenuModel::build_popup(
+        index,
+        &inputs_all(&sets, &ColorSet::default()),
+        &menu_items,
+        true,
+        false,
+        &ja_lang(),
+    );
     let items = model.menu().items();
     assert_eq!(
         items.len(),
-        5,
-        "popup は 5 項目（submenu 2 + item 2 + separator 1）"
+        6,
+        "popup は 6 項目（submenu 2 + item 3 + separator 1）"
     );
 
     let pattern: Vec<&str> = items.iter().map(kind_label).collect();
-    assert_eq!(pattern, ["submenu", "submenu", "separator", "item", "item"]);
+    assert_eq!(
+        pattern,
+        ["submenu", "submenu", "item", "separator", "item", "item"]
+    );
 
     // 1. 「同じしめじを呼ぶ」（popup 専用キー CallAnother・tray の「しめじを呼ぶ」とは別）
     let spawn = expect_submenu(&items[0], "同じしめじを呼ぶ");
     assert_eq!(spawn.text(), "同じしめじを呼ぶ");
     let children = spawn.items();
-    assert_eq!(children.len(), 3);
+    assert_eq!(children.len(), 3, "（ランダム）+ set サブメニュー");
     assert!(matches!(
         model.command_of(children[0].id()),
         Some(TrayCommand::Spawn(None))
     ));
+    let popup_shimeji = expect_submenu(&children[1], "Shimeji");
     assert!(matches!(
-        model.command_of(children[1].id()),
-        Some(TrayCommand::Spawn(Some(s))) if s == "Shimeji"
+        model.command_of(popup_shimeji.items()[0].id()),
+        Some(TrayCommand::Spawn(Some(ref s))) if s == "Shimeji"
     ),);
+    let popup_kuro = expect_submenu(&children[2], "Kuro");
     assert!(matches!(
-        model.command_of(children[2].id()),
-        Some(TrayCommand::Spawn(Some(s))) if s == "Kuro"
+        model.command_of(popup_kuro.items()[0].id()),
+        Some(TrayCommand::Spawn(Some(ref s))) if s == "Kuro"
     ),);
 
     // 2. 「行為の設定」: selectable のみ（toggleable 専用の Spin は出ない）
@@ -1875,36 +2153,75 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
         );
     }
 
-    // 3. separator
-    expect_separator(&items[2], "行為の設定の後");
-
-    // 4-5. 一時停止（未 pause）・消す
-    assert_eq!(expect_item_text(&items[3], "一時停止"), "一時停止");
+    // 3. 「この色を出す」（R21・その個体の現在色を許可集合へ加える）
+    assert_eq!(expect_item_text(&items[2], "この色を出す"), "この色を出す");
     assert!(
-        matches!(model.command_of(items[3].id()), Some(TrayCommand::TogglePauseFor(target)) if target == index),
+        matches!(
+            model.command_of(items[2].id()),
+            Some(TrayCommand::AllowColorOf(target)) if target == index
+        ),
+        "この色を出す → AllowColorOf(index)"
+    );
+
+    // 4. separator
+    expect_separator(&items[3], "この色を出す の後");
+
+    // 5-6. 一時停止（未 pause）・消す
+    assert_eq!(expect_item_text(&items[4], "一時停止"), "一時停止");
+    assert!(
+        matches!(model.command_of(items[4].id()), Some(TrayCommand::TogglePauseFor(target)) if target == index),
         "一時停止 → TogglePauseFor(index)"
     );
-    assert_eq!(expect_item_text(&items[4], "消す"), "消す");
+    assert_eq!(expect_item_text(&items[5], "消す"), "消す");
     assert!(
-        matches!(model.command_of(items[4].id()), Some(TrayCommand::DismissFor(target)) if target == index),
+        matches!(model.command_of(items[5].id()), Some(TrayCommand::DismissFor(target)) if target == index),
         "消す → DismissFor(index)"
     );
 
     // pause 中は「再開」ラベル（command は同一）
-    let paused_model = TrayMenuModel::build_popup(index, &sets, &menu_items, true, &ja_lang());
+    let paused_model = TrayMenuModel::build_popup(
+        index,
+        &inputs_all(&sets, &ColorSet::default()),
+        &menu_items,
+        true,
+        true,
+        &ja_lang(),
+    );
     let paused_items = paused_model.menu().items();
     assert_eq!(
-        expect_item_text(&paused_items[3], "再開"),
+        expect_item_text(&paused_items[4], "再開"),
         "再開する",
         "is_paused でラベルが切替"
     );
     assert!(
-        matches!(paused_model.command_of(paused_items[3].id()), Some(TrayCommand::TogglePauseFor(target)) if target == index),
+        matches!(paused_model.command_of(paused_items[4].id()), Some(TrayCommand::TogglePauseFor(target)) if target == index),
     );
-    assert_eq!(expect_item_text(&paused_items[4], "消す"), "消す");
+    assert_eq!(expect_item_text(&paused_items[5], "消す"), "消す");
     assert!(
-        matches!(paused_model.command_of(paused_items[4].id()), Some(TrayCommand::DismissFor(target)) if target == index),
+        matches!(paused_model.command_of(paused_items[5].id()), Some(TrayCommand::DismissFor(target)) if target == index),
     );
+}
+
+/// 色を持たない個体（色づけ非対応 set）には「この色を出す」を出さない（スライス 6c）。
+#[test]
+fn popup_hides_allow_this_colour_without_colour() {
+    let sets = vec!["Shimeji".to_string()];
+    let menu_items = BehaviorMenu {
+        selectable: vec!["Walk".to_string()],
+        toggleable: vec![],
+    };
+    let model = TrayMenuModel::build_popup(
+        0,
+        &MenuInputs::new(&sets, &[], &ColorSet::default()),
+        &menu_items,
+        false,
+        false,
+        &ja_lang(),
+    );
+    let items = model.menu().items();
+    assert_eq!(items.len(), 5, "「この色を出す」が無いぶん 1 項目減る");
+    let pattern: Vec<&str> = items.iter().map(kind_label).collect();
+    assert_eq!(pattern, ["submenu", "submenu", "separator", "item", "item"]);
 }
 
 /// 未知 id / 非コマンド id → None（Option 契約の None 側）。
@@ -1912,7 +2229,7 @@ fn popup_menu_structure_selectable_only_and_paused_label() {
 fn command_of_unknown_id_returns_none() {
     let empty: Vec<String> = vec![];
     let model = TrayMenuModel::build_tray(
-        &empty,
+        &inputs_all(&empty, &ColorSet::default()),
         &allowed(true, true, true, true, true, true, true),
         &ja_lang(),
     );
@@ -2001,6 +2318,149 @@ fn apply_spawn_none_with_empty_sets_is_noop_without_rng() {
     );
     manager.tick(Instant::now());
     assert!(manager.is_empty(), "set 0 件 → no-op");
+}
+
+/// SpawnColored(set, hue) → manager.request_spawn_colored（次 tick で指定色に固定・R19）。
+#[test]
+fn apply_spawn_colored_spawns_the_set_with_the_given_hue() {
+    let home = TempHome::new("apply_spawn_colored");
+    let (env, _) = single_monitor_env();
+    let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
+    manager.set_image_set_resolver(resolver_for(&["Alpha", "Beta"]));
+    let mut settings = Settings::default();
+    let context = make_apply_context(&home, &["Alpha", "Beta"]);
+
+    apply_tray_command(
+        &mut manager,
+        &mut settings,
+        TrayCommand::SpawnColored("Beta".to_string(), 150.0),
+        &context,
+    );
+    manager.tick(Instant::now());
+
+    assert_eq!(manager.count_of("Beta"), 1, "指定 set が出る");
+    let mut state = None;
+    manager
+        .apply_all(|mascot| state = Some((mascot.image_set_name().to_string(), mascot.tint_hue())));
+    assert_eq!(
+        state,
+        Some(("Beta".to_string(), 150.0)),
+        "指定色の固定色で出る（宣言が rainbow でも回らない・6a）"
+    );
+}
+
+/// SetColorAllowed(添字, false) → `[tint] colors` から外れて settings.toml へ永続化される（R21）。
+#[test]
+fn apply_set_color_allowed_updates_settings_and_persists() {
+    let home = TempHome::new("apply_set_color_allowed");
+    let (env, _) = single_monitor_env();
+    let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
+    let mut settings = Settings::default(); // colors = 全 12 色
+    let context = make_apply_context(&home, &["Alpha"]);
+
+    apply_tray_command(
+        &mut manager,
+        &mut settings,
+        TrayCommand::SetColorAllowed(5, false), // 150°（ミント）を外す
+        &context,
+    );
+
+    assert!(!settings.tint.colors.contains(5), "集合から外れる");
+    assert!(settings.tint.colors.contains(0), "他の色は残る");
+    let saved = Settings::load(&home.root.join("settings.toml"))
+        .expect("保存された settings.toml を読める");
+    assert!(
+        !saved.tint.colors.contains(5),
+        "settings.toml へ永続化される"
+    );
+    assert_eq!(saved.tint.colors.len(), PALETTE_LEN - 1);
+}
+
+/// AllowColorOf(index) → その個体の現在色を許可集合へ加えて永続化する（R21）。
+#[test]
+fn apply_allow_color_of_adds_the_mascot_hue() {
+    let home = TempHome::new("apply_allow_color_of");
+    let (env, _) = single_monitor_env();
+    let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
+    manager.set_image_set_resolver(resolver_for(&["Alpha"]));
+    let mut settings = Settings::default();
+    settings.tint.colors = ColorSet::none(); // 1 色も許可していない状態から
+    let context = make_apply_context(&home, &["Alpha"]);
+
+    manager.request_spawn_colored("Alpha", 240.0);
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 1);
+
+    apply_tray_command(
+        &mut manager,
+        &mut settings,
+        TrayCommand::AllowColorOf(0),
+        &context,
+    );
+
+    assert!(
+        settings.tint.colors.contains(8),
+        "240°（ブルーベリー）が加わる"
+    );
+    assert_eq!(settings.tint.colors.len(), 1, "絞った集合に戻す操作");
+    let saved = Settings::load(&home.root.join("settings.toml"))
+        .expect("保存された settings.toml を読める");
+    assert!(
+        saved.tint.colors.contains(8),
+        "settings.toml へ永続化される"
+    );
+}
+
+/// 色づけなし（TintMode::Off）の個体は色相 0 を「いちご」と誤解釈しない（何も加えない）。
+#[test]
+fn apply_allow_color_of_ignores_mascot_without_tint() {
+    let home = TempHome::new("apply_allow_color_of_off");
+    let (env, _) = single_monitor_env();
+    let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
+    manager.set_image_set_resolver(resolver_for(&["Alpha"]));
+    let mut settings = Settings::default();
+    settings.tint.colors = ColorSet::none();
+    let context = make_apply_context(&home, &["Alpha"]);
+
+    manager.request_spawn("Alpha"); // 宣言 tint なし（既定 Off）
+    manager.tick(Instant::now());
+    assert_eq!(manager.count(), 1);
+
+    apply_tray_command(
+        &mut manager,
+        &mut settings,
+        TrayCommand::AllowColorOf(0),
+        &context,
+    );
+
+    assert!(
+        settings.tint.colors.is_empty(),
+        "色を持たない個体は許可集合を変えない"
+    );
+}
+
+/// 範囲外 index の AllowColorOf は no-op（既存の個別コマンドと同じ契約）。
+#[test]
+fn apply_allow_color_of_out_of_range_index_is_noop() {
+    let home = TempHome::new("apply_allow_color_of_range");
+    let (env, _) = single_monitor_env();
+    let mut manager = make_manager(env, table(vec![row("Walk", 100)]), ScriptedFactory::new());
+    manager.set_image_set_resolver(resolver_for(&["Alpha"]));
+    let mut settings = Settings::default();
+    let expected = settings.tint.colors.clone();
+    let context = make_apply_context(&home, &["Alpha"]);
+
+    apply_tray_command(
+        &mut manager,
+        &mut settings,
+        TrayCommand::AllowColorOf(7), // 個体 0 体
+        &context,
+    );
+
+    assert_eq!(
+        settings.tint.colors, expected,
+        "個体が居なければ許可集合を変えない"
+    );
 }
 
 /// FollowCursor → manager.set_behavior_all("ChaseMouse")（全員）。

@@ -24,6 +24,23 @@ CallAnother = "Call Another"
 SetBehaviour = "Set Behaviour"
 Dismiss = "Dismiss"
 Shimeji = "Shimeji"
+SpawnDefault = "(default)"
+AllowedColors = "Allowed Colours"
+AllowThisColor = "Allow This Colour"
+
+# --- Tint palette colour names (tint::PALETTE_HUES order) ---
+TintStrawberry = "Strawberry"
+TintTangerine = "Tangerine"
+TintLemon = "Lemon"
+TintMelon = "Melon"
+TintMuscat = "Muscat"
+TintMint = "Mint"
+TintSoda = "Soda"
+TintSkyBlue = "Sky blue"
+TintBlueberry = "Blueberry"
+TintGrape = "Grape"
+TintCassis = "Cassis"
+TintPeach = "Peach"
 
 # --- Behavior names (conf/behaviors.xml) ---
 ChaseMouse = "Chase Mouse"

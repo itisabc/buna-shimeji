@@ -259,6 +259,37 @@ fn color_set_from_hues_normalizes() {
     assert!(!set.contains(2), "許可していない色は contains が false");
 }
 
+/// `set_index` は許可の on/off を切り替え、昇順・重複なしを保つ（パレット外は無視）。
+#[test]
+fn color_set_set_index_toggles_without_breaking_order() {
+    let mut set = ColorSet::none();
+    set.set_index(5, true);
+    set.set_index(0, true);
+    set.set_index(11, true);
+    assert_eq!(set.indices(), [0, 5, 11], "昇順に保たれる");
+    set.set_index(0, true);
+    assert_eq!(set.indices(), [0, 5, 11], "既に許可済みでも重複しない");
+    set.set_index(5, false);
+    assert_eq!(set.indices(), [0, 11], "off で外れる");
+    set.set_index(5, false);
+    assert_eq!(set.indices(), [0, 11], "既に不許可でも壊れない");
+
+    let mut all = ColorSet::default();
+    all.set_index(PALETTE_LEN, false);
+    all.set_index(usize::MAX, true);
+    assert_eq!(all, ColorSet::default(), "パレット外の添字は無視する");
+}
+
+/// `insert_hue` は色相を最も近い色として加える（R21 の「この色を出す」）。
+#[test]
+fn color_set_insert_hue_rounds_and_keeps_sorted() {
+    let mut set = ColorSet::from_hues([240.0]);
+    set.insert_hue(150.0);
+    set.insert_hue(29.0); // 30° へ丸まる
+    set.insert_hue(240.0); // 既にある → 重複しない
+    assert_eq!(set.indices(), [1, 5, 8], "30/150/240 の 3 色");
+}
+
 // =====================================================================
 // 出現時の色を固定する（R19/R20 の個体）
 // =====================================================================

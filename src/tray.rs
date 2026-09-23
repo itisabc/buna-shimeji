@@ -45,7 +45,7 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem,
 use crate::app::manager::{BehaviorMenu, Manager};
 use crate::app::reload::load_materials;
 use crate::i18n::{Lang, UiKey, DEFAULT_LANGUAGE};
-use crate::tint::ColorSet;
+use crate::tint::{ColorSet, PALETTE_HUES, PALETTE_LEN};
 
 // =====================================================================
 // トレイアイコン: Java Main.getIcon()（.tmp/java-ref/Main.java L764-792）
@@ -497,6 +497,9 @@ const ALLOWED_MENU_ITEMS: [(AllowedKind, UiKey); 7] = [
 pub enum TrayCommand {
     /// 呼ぶ。`None` = set ランダム選択（「（ランダム）」）/ `Some(set)` = set 指定。
     Spawn(Option<String>),
+    /// 色を指定して呼ぶ（R19）。`hue` はパレットの色相（度・30° 刻み）。
+    /// 指定色の個体は set 宣言の sat / lum / glow / sweep を保ったまま固定色になる。
+    SpawnColored(String, f32),
     /// Follow Cursor（全員に ChaseMouse 指示）。
     FollowCursor,
     /// Reduce to One（先頭 1 体を残す）。
@@ -511,6 +514,13 @@ pub enum TrayCommand {
     /// そのまま返す（否定しない）・トグル適用後の整合は
     /// [`TrayMenuModel::sync_allowed`] が担う。
     SetAllowed(AllowedKind, bool),
+    /// 「出現を許可する色」トグル（スライス 7・R21）。bool は**適用値** =
+    /// MenuEvent 受信時の checked（[`TrayCommand::SetAllowed`] と同じ扱い。
+    /// muda の自動トグル後の値をそのまま使う）。`usize` はパレット添字。
+    SetColorAllowed(usize, bool),
+    /// 右クリック「この色を出す」（スライス 7・R21）。`usize` はマスコット index。
+    /// その個体の現在色を許可集合へ加える（色づけなしの個体は何もしない）。
+    AllowColorOf(usize),
     /// 一時停止 / 再開（全員）。
     TogglePauseAll,
     /// Dismiss All（全員消去・exit は次 tick の [`Manager::should_exit`] 経由）。
@@ -547,14 +557,74 @@ pub struct TrayMenuModel {
     /// Allowed Behaviours の 6 CheckMenuItem（`command_of` の動的変換と
     /// [`TrayMenuModel::sync_allowed`] 用。CheckMenuItem は Rc 共有 Clone）。
     allowed_checks: Vec<(AllowedKind, CheckMenuItem)>,
+    /// 「出現を許可する色」の 12 CheckMenuItem（`command_of` の動的変換と
+    /// [`TrayMenuModel::sync_colors`] 用）。値はパレット添字。
+    color_checks: Vec<(usize, CheckMenuItem)>,
 }
 
-/// 「呼ぶ」サブメニュー（design §3-11 の先頭・tray / popup 共通構成）:
-/// 先頭 [`UiKey::SpawnRandom`] = [`TrayCommand::Spawn`]`(None)` + 各 set 名 =
-/// `Spawn(Some(set))`（`image_sets` の順で並べる）。サブメニュー名は `label`
-///（tray = `CallShimeji` / popup = `CallAnother`）を辞書で解決する。
+/// パレット添字 → 色名の辞書キー。並びは [`PALETTE_HUES`]（色相 30° 刻み）と一致させる。
+const TINT_COLOR_KEYS: [UiKey; PALETTE_LEN] = [
+    UiKey::TintStrawberry,
+    UiKey::TintTangerine,
+    UiKey::TintLemon,
+    UiKey::TintMelon,
+    UiKey::TintMuscat,
+    UiKey::TintMint,
+    UiKey::TintSoda,
+    UiKey::TintSkyBlue,
+    UiKey::TintBlueberry,
+    UiKey::TintGrape,
+    UiKey::TintCassis,
+    UiKey::TintPeach,
+];
+
+/// パレット添字の色名キー。`index` は [`ColorSet::indices`] の値（常に範囲内）。
+fn color_ui_key(index: usize) -> UiKey {
+    debug_assert!(index < PALETTE_LEN, "palette index out of range: {index}");
+    TINT_COLOR_KEYS[index]
+}
+
+/// トレイ / 右クリック メニューの構築に渡す set と色の情報（両構築で共用）。
+pub struct MenuInputs<'a> {
+    /// 「呼ぶ」に並べる set（辞書順）。
+    pub image_sets: &'a [String],
+    /// 色づけ対応 set（宣言 `Tint` が `off` 以外）。ここだけ色 UI を出す（スライス 6c）。
+    pub color_capable: &'a [String],
+    /// 出現を許可する色（`settings.toml` の `[tint] colors`）。
+    pub allowed_colors: &'a ColorSet,
+}
+
+impl<'a> MenuInputs<'a> {
+    /// 3 つの入力をまとめる。
+    pub fn new(
+        image_sets: &'a [String],
+        color_capable: &'a [String],
+        allowed_colors: &'a ColorSet,
+    ) -> Self {
+        MenuInputs {
+            image_sets,
+            color_capable,
+            allowed_colors,
+        }
+    }
+
+    /// この set が色づけ対応か（色 UI を出すか）。
+    pub fn is_color_capable(&self, set: &str) -> bool {
+        self.color_capable.iter().any(|name| name == set)
+    }
+}
+
+/// 「呼ぶ」サブメニュー（tray / popup 共通構成・案 1）:
+/// 先頭 [`UiKey::SpawnRandom`] = [`TrayCommand::Spawn`]`(None)` + 各 set のサブメニュー。
+/// set のサブメニューは [`UiKey::SpawnDefault`]（宣言の tint のまま =
+/// [`TrayCommand::Spawn`]`(Some(set))`）に続けて、許可色を色相順に並べる
+/// （[`TrayCommand::SpawnColored`]）。
+///
+/// **色一覧はその set が色づけ対応（[`MenuInputs::is_color_capable`]）で、許可色が 1 つ以上
+/// あるときだけ出す**（宣言 `Tint` の無い set は「（既定）」のみ・スライス 6c）。
+/// サブメニュー名は `label`（tray = `CallShimeji` / popup = `CallAnother`）を辞書で解決する。
 fn build_spawn_submenu(
-    image_sets: &[String],
+    inputs: &MenuInputs,
     commands: &mut HashMap<MenuId, TrayCommand>,
     lang: &Lang,
     label: UiKey,
@@ -565,21 +635,40 @@ fn build_spawn_submenu(
     submenu
         .append(&random)
         .expect("failed to append the (random) menu item");
-    for image_set in image_sets {
-        let item = MenuItem::new(image_set, true, None);
+    for image_set in inputs.image_sets {
+        let set_menu = Submenu::new(image_set, true);
+        let default = MenuItem::new(lang.text(UiKey::SpawnDefault), true, None);
         commands.insert(
-            item.id().clone(),
+            default.id().clone(),
             TrayCommand::Spawn(Some(image_set.clone())),
         );
+        set_menu
+            .append(&default)
+            .expect("failed to append the (default) menu item");
+        if inputs.is_color_capable(image_set) && !inputs.allowed_colors.is_empty() {
+            set_menu
+                .append(&PredefinedMenuItem::separator())
+                .expect("failed to append the colour separator");
+            for &index in inputs.allowed_colors.indices() {
+                let item = MenuItem::new(lang.text(color_ui_key(index)), true, None);
+                commands.insert(
+                    item.id().clone(),
+                    TrayCommand::SpawnColored(image_set.clone(), PALETTE_HUES[index] as f32),
+                );
+                set_menu
+                    .append(&item)
+                    .expect("failed to append a colour menu item");
+            }
+        }
         submenu
-            .append(&item)
-            .expect("failed to append a call set menu item");
+            .append(&set_menu)
+            .expect("failed to append a call set submenu");
     }
     submenu
 }
 
 impl TrayMenuModel {
-    /// トレイメニューを構築する（design §3-11 の 1〜10 の挿入順）:
+    /// トレイメニューを構築する（design §3-11 の 1〜10 + 色づけのスライス 7 の挿入順）:
     ///
     /// 1. Submenu「呼ぶ」
     /// 2. Follow Cursor
@@ -587,13 +676,14 @@ impl TrayMenuModel {
     /// 4. Restore Windows
     /// 5. Submenu「Allowed Behaviours」（6 CheckMenuItem・ラベル順
     ///    [`ALLOWED_MENU_ITEMS`]・checked = `allowed` の対応値）
-    /// 6. separator
-    /// 7. 一時停止
-    /// 8. Dismiss All
-    /// 9. separator
-    /// 10. Reload
+    /// 6. Submenu「出現を許可する色」（12 CheckMenuItem・checked = `colors` の含有）
+    /// 7. separator
+    /// 8. 一時停止
+    /// 9. Dismiss All
+    /// 10. separator
+    /// 11. Reload
     pub fn build_tray(
-        image_sets: &[String],
+        inputs: &MenuInputs,
         allowed: &AllowedSettings,
         lang: &Lang,
     ) -> TrayMenuModel {
@@ -601,7 +691,7 @@ impl TrayMenuModel {
         let mut commands = HashMap::new();
 
         // 1. 呼ぶ
-        let spawn = build_spawn_submenu(image_sets, &mut commands, lang, UiKey::CallShimeji);
+        let spawn = build_spawn_submenu(inputs, &mut commands, lang, UiKey::CallShimeji);
         // 2-4. Follow Cursor / Reduce to One / Restore Windows
         let follow = MenuItem::new(lang.text(UiKey::FollowCursor), true, None);
         commands.insert(follow.id().clone(), TrayCommand::FollowCursor);
@@ -620,50 +710,70 @@ impl TrayMenuModel {
                 .append(&check)
                 .expect("failed to append a toggle menu item");
         }
-        // 6 / 9. separator
+        // 6. 出現を許可する色（12 CheckMenuItem・checked = 許可色の含有）。
+        //    色づけ対応 set が 1 つも無ければ色機能自体をメニューに出さない（スライス 6c）
+        let mut color_checks = Vec::new();
+        let colors_menu = if inputs.color_capable.is_empty() {
+            None
+        } else {
+            let colors_menu = Submenu::new(lang.text(UiKey::AllowedColors), true);
+            color_checks.reserve(PALETTE_LEN);
+            for index in 0..PALETTE_LEN {
+                let check = CheckMenuItem::new(
+                    lang.text(color_ui_key(index)),
+                    true,
+                    inputs.allowed_colors.contains(index),
+                    None,
+                );
+                color_checks.push((index, check.clone()));
+                colors_menu
+                    .append(&check)
+                    .expect("failed to append a colour toggle item");
+            }
+            Some(colors_menu)
+        };
+        // 7 / 10. separator
         let separator1 = PredefinedMenuItem::separator();
         let separator2 = PredefinedMenuItem::separator();
-        // 7-8. 一時停止 / Dismiss All
+        // 8-9. 一時停止 / Dismiss All
         let pause = MenuItem::new(lang.text(UiKey::PauseAnimations), true, None);
         commands.insert(pause.id().clone(), TrayCommand::TogglePauseAll);
         let dismiss = MenuItem::new(lang.text(UiKey::DismissAll), true, None);
         commands.insert(dismiss.id().clone(), TrayCommand::DismissAll);
-        // 10. Reload
+        // 11. Reload
         let reload = MenuItem::new(lang.text(UiKey::Reload), true, None);
         commands.insert(reload.id().clone(), TrayCommand::Reload);
 
-        menu.append_items(&[
-            &spawn,
-            &follow,
-            &reduce,
-            &restore,
-            &allowed_menu,
-            &separator1,
-            &pause,
-            &dismiss,
-            &separator2,
-            &reload,
-        ])
-        .expect("failed to build the tray menu");
+        menu.append_items(&[&spawn, &follow, &reduce, &restore, &allowed_menu])
+            .expect("failed to build the tray menu (head)");
+        if let Some(colors_menu) = &colors_menu {
+            menu.append(colors_menu)
+                .expect("failed to append the allowed-colours submenu");
+        }
+        menu.append_items(&[&separator1, &pause, &dismiss, &separator2, &reload])
+            .expect("failed to build the tray menu (tail)");
 
         TrayMenuModel {
             menu,
             commands,
             allowed_checks,
+            color_checks,
         }
     }
 
     /// マスコット右クリック メニュー（design §3-11 最小セット）を構築する:
     /// ① Submenu「呼ぶ」（トレイと同構成）② Submenu「個別行動指定」
     ///（[`BehaviorMenu::selectable`] の各行動 = toggleable 専用項目は含めない・
-    /// Java popup setBehaviorMenu L517-522 相当）③ separator
-    /// ④ 一時停止 / 再開（`is_paused` 由来のラベル切替・Java popup pauseItem
-    /// L559 相当）⑤ 消す（Java popup disposeMenu L562 相当）。
+    /// Java popup setBehaviorMenu L517-522 相当）③ 「この色を出す」（R21・
+    /// `can_allow_color` が真のときだけ）④ separator ⑤ 一時停止 / 再開
+    ///（`is_paused` 由来のラベル切替・Java popup pauseItem L559 相当）
+    /// ⑥ 消す（Java popup disposeMenu L562 相当）。
     /// `selectable` が空でも「個別行動指定」サブメニュー自体は作る。
     pub fn build_popup(
         index: usize,
-        image_sets: &[String],
+        inputs: &MenuInputs,
         menu_items: &BehaviorMenu,
+        can_allow_color: bool,
         is_paused: bool,
         lang: &Lang,
     ) -> TrayMenuModel {
@@ -671,7 +781,7 @@ impl TrayMenuModel {
         let mut commands = HashMap::new();
 
         // ① 呼ぶ
-        let spawn = build_spawn_submenu(image_sets, &mut commands, lang, UiKey::CallAnother);
+        let spawn = build_spawn_submenu(inputs, &mut commands, lang, UiKey::CallAnother);
         // ② 個別行動指定（selectable のみ）
         let behavior = Submenu::new(lang.text(UiKey::SetBehaviour), true);
         for name in &menu_items.selectable {
@@ -684,9 +794,18 @@ impl TrayMenuModel {
                 .append(&item)
                 .expect("failed to append a behavior menu item");
         }
-        // ③ separator
+        // ③ この色を出す（R21・その個体の現在色を許可集合へ加える）。
+        //    その個体が色を持たない（宣言 Tint が off）ときは出さない（スライス 6c）
+        let allow_color = if can_allow_color {
+            let item = MenuItem::new(lang.text(UiKey::AllowThisColor), true, None);
+            commands.insert(item.id().clone(), TrayCommand::AllowColorOf(index));
+            Some(item)
+        } else {
+            None
+        };
+        // ④ separator
         let separator = PredefinedMenuItem::separator();
-        // ④ 一時停止 / 再開（Java L559: isPaused ? Resume : Pause のラベル切替）
+        // ⑤ 一時停止 / 再開（Java L559: isPaused ? Resume : Pause のラベル切替）
         let pause_key = if is_paused {
             UiKey::ResumeAnimations
         } else {
@@ -694,17 +813,24 @@ impl TrayMenuModel {
         };
         let pause = MenuItem::new(lang.text(pause_key), true, None);
         commands.insert(pause.id().clone(), TrayCommand::TogglePauseFor(index));
-        // ⑤ 消す
+        // ⑥ 消す
         let dismiss = MenuItem::new(lang.text(UiKey::Dismiss), true, None);
         commands.insert(dismiss.id().clone(), TrayCommand::DismissFor(index));
 
-        menu.append_items(&[&spawn, &behavior, &separator, &pause, &dismiss])
-            .expect("failed to build the popup menu");
+        menu.append_items(&[&spawn, &behavior])
+            .expect("failed to build the popup menu (head)");
+        if let Some(allow_color) = &allow_color {
+            menu.append(allow_color)
+                .expect("failed to append the allow-colour item");
+        }
+        menu.append_items(&[&separator, &pause, &dismiss])
+            .expect("failed to build the popup menu (tail)");
 
         TrayMenuModel {
             menu,
             commands,
             allowed_checks: Vec::new(),
+            color_checks: Vec::new(),
         }
     }
 
@@ -729,6 +855,11 @@ impl TrayMenuModel {
                 return Some(TrayCommand::SetAllowed(*kind, check.is_checked()));
             }
         }
+        for (index, check) in &self.color_checks {
+            if check.id() == id {
+                return Some(TrayCommand::SetColorAllowed(*index, check.is_checked()));
+            }
+        }
         self.commands.get(id).cloned()
     }
 
@@ -740,6 +871,14 @@ impl TrayMenuModel {
     pub fn sync_allowed(&self, allowed: &AllowedSettings) {
         for (kind, check) in &self.allowed_checks {
             check.set_checked(allowed_value(allowed, *kind));
+        }
+    }
+
+    /// 12 色の CheckMenuItem の checked を `colors` に同期する（[`TrayCommand::SetColorAllowed`] /
+    /// [`TrayCommand::AllowColorOf`] 適用後に #10 が呼ぶ・[`TrayMenuModel::sync_allowed`] と同型）。
+    pub fn sync_colors(&self, colors: &ColorSet) {
+        for (index, check) in &self.color_checks {
+            check.set_checked(colors.contains(*index));
         }
     }
 }
@@ -758,15 +897,28 @@ fn apply_allowed(settings: &mut Settings, kind: AllowedKind, value: bool) {
     }
 }
 
+/// `[tint] colors` の変更を settings.toml へ即時保存し、Manager の抽選母集団へ反映する
+/// （[`TrayCommand::SetColorAllowed`] / [`TrayCommand::AllowColorOf`] の共通経路）。
+/// 保存失敗でもメモリ上の適用は続行する（panic しない・[`TrayCommand::SetAllowed`] と同じ方針）。
+fn persist_allowed_colors(manager: &mut Manager, settings: &Settings, context: &TrayContext) {
+    if let Err(err) = Settings::save(&context.conf_dir.join("settings.toml"), settings) {
+        log::error!("failed to save settings.toml: {err}");
+    }
+    manager.set_allowed_colors(settings.tint.colors.clone());
+}
+
 /// トレイ / ポップアップ コマンドを適用する（#10 が MenuEvent 受信後に呼ぶ）。
 /// design §3-11 の適用先対応:
 ///
-/// - Spawn: [`Manager::request_spawn`]（`None` は [`Manager::request_spawn_random`]）
+/// - Spawn: [`Manager::request_spawn`]（`None` は [`Manager::request_spawn_random`]）/
+///   SpawnColored: [`Manager::request_spawn_colored`]（R19）
 /// - FollowCursor: 全員 ChaseMouse / ReduceToOne: [`Manager::remain_one`] /
 ///   RestoreWindows: [`Manager::restore_windows`]
 /// - SetAllowed: settings 更新 → `conf_dir/settings.toml` への**即時保存**
 ///   （Err → log で続行・panic しない）→ Environment passthrough（`Sounds` は #36 で
 ///   `Manager::set_sounds_enabled` へ実配線）
+/// - SetColorAllowed / AllowColorOf: `[tint] colors` 更新 → [`persist_allowed_colors`]
+///   （settings.toml へ保存 + 抽選母集団 `Manager::set_allowed_colors` の反映）
 /// - TogglePauseAll / DismissAll: 全員操作・exit は次 tick の
 ///   [`Manager::should_exit`] 経由（apply 内では exit 操作しない）
 /// - Reload: [`load_materials`]（scales は [`Settings::scales`] 注入）→
@@ -782,6 +934,7 @@ pub fn apply_tray_command(
     match command {
         TrayCommand::Spawn(Some(image_set)) => manager.request_spawn(&image_set),
         TrayCommand::Spawn(None) => manager.request_spawn_random(&context.image_sets),
+        TrayCommand::SpawnColored(image_set, hue) => manager.request_spawn_colored(&image_set, hue),
         TrayCommand::FollowCursor => manager.set_behavior_all("ChaseMouse"),
         TrayCommand::ReduceToOne => manager.remain_one(),
         TrayCommand::RestoreWindows => {
@@ -808,6 +961,18 @@ pub fn apply_tray_command(
                 AllowedKind::PinDroppedWindow => manager.set_pin_dropped_window_allowed(value),
             }
         }
+        TrayCommand::SetColorAllowed(index, allowed) => {
+            settings.tint.colors.set_index(index, allowed);
+            persist_allowed_colors(manager, settings, context);
+        }
+        TrayCommand::AllowColorOf(mascot_index) => match manager.tint_hue_at(mascot_index) {
+            Some(hue) => {
+                settings.tint.colors.insert_hue(hue);
+                persist_allowed_colors(manager, settings, context);
+            }
+            // 色づけなし（TintMode::Off）の個体は色を持たない（色相 0 を誤解釈しない）
+            None => log::warn!("allow colour: mascot {mascot_index} has no tint; ignoring"),
+        },
         TrayCommand::TogglePauseAll => manager.toggle_pause_all(),
         TrayCommand::DismissAll => {
             manager.dispose_all();

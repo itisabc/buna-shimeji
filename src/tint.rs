@@ -156,6 +156,32 @@ impl ColorSet {
         self.slots.binary_search(&index).is_ok()
     }
 
+    /// パレット添字の許可を切り替える（集合は昇順・重複なしを保つ）。
+    /// パレット外の添字は無視する（呼び出し側の値が壊れていても集合を壊さない）。
+    pub fn set_index(&mut self, index: usize, allowed: bool) {
+        if index >= PALETTE_LEN {
+            return;
+        }
+        match self.slots.binary_search(&index) {
+            Ok(position) => {
+                if !allowed {
+                    self.slots.remove(position);
+                }
+            }
+            Err(position) => {
+                if allowed {
+                    self.slots.insert(position, index);
+                }
+            }
+        }
+    }
+
+    /// 色相を許可集合へ加える（最も近いパレット色へ丸める）。
+    /// 右クリック「この色を出す」（R21）が、個体の現在色で呼ぶ。
+    pub fn insert_hue(&mut self, hue: f32) {
+        self.set_index(hue_to_palette_index(hue), true);
+    }
+
     /// 許可色のパレット添字（色相順）。抽選母集団と回転範囲の正本。
     pub fn indices(&self) -> &[usize] {
         &self.slots
