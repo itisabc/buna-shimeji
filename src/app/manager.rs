@@ -61,7 +61,7 @@ use crate::app::reload::ReloadMaterial;
 use crate::mascot::behavior::{BehaviorError, BehaviorFactory, BehaviorTable};
 use crate::mascot::{AffordanceArrival, EnvironmentView, Mascot, Rng, TransformRequest};
 use crate::render::imageset::ImageSet;
-use crate::tint::{Palette, PaletteColor, TintMode, TintStyle};
+use crate::tint::{Palette, PaletteColor, StartPhase, TintMode, TintStyle};
 
 mod behavior_resolver;
 mod menu;
@@ -96,6 +96,22 @@ fn draw_allowed_color<'a>(palette: &'a Palette, rng: &mut dyn Rng) -> Option<&'a
     }
     let index = (rng.unit() * population.len() as f64) as usize;
     Some(population[index])
+}
+
+/// 出現時の位相（度）を宣言から決める。
+///
+/// `Start` を書いていない set（[`StartPhase::Random`]）は**1 回だけ抽選する**（rng を消費するのは
+/// このときだけ）。色づけなし（[`TintMode::Off`]）と確定色（[`TintMode::Fixed`]）は位相が
+/// 決まっているので消費しない（spawn / Reload / Transform のいずれでも同じ規則）。
+fn start_hue(declared: TintStyle, rng: &mut dyn Rng) -> f32 {
+    match declared.mode {
+        TintMode::Off => 0.0,
+        TintMode::Fixed(hue) => hue,
+        _ => match declared.start {
+            StartPhase::Fixed(hue) => hue,
+            StartPhase::Random => (rng.unit() * 360.0) as f32,
+        },
+    }
 }
 
 /// マスコット集合の所有者（Java `Manager` 相当・スレッド/lock は排除）。
@@ -409,7 +425,7 @@ impl Manager {
             // 出現時の色を決める（未登録 set は既定 = 色づけなし）。
             // - 手動指定（`SpawnRequest::tint` = R19）→ その確定色の個体
             // - set 宣言が `Mode="random"`（R20）→ パレットの許可色から 1 色抽選してその色に固定
-            // - `Mode="cycle"` → 宣言どおり（位相の初期値は宣言の `Start`）
+            // - `Mode="cycle"` → 宣言どおり（位相の初期値は宣言の `Start`、未指定なら抽選）
             // - パレットが空なのに `Mode` を宣言している → **無効（無色）**（警告は reload が 1 回出す）
             let declared = self
                 .set_tints
@@ -441,7 +457,8 @@ impl Manager {
                     TintStyle::default()
                 }
             };
-            mascot.set_tint_style(style);
+            let start = start_hue(style, self.rng.as_mut());
+            mascot.set_tint_style(style, start);
             let table = table_for(&self.set_tables, &self.table, &request.image_set_name);
             // Java Breed.java L93 / Main.java L497: born behavior 構築（第 4 引数伝播・#8）
             let built = match &request.behavior_name {
@@ -991,8 +1008,11 @@ impl Manager {
             }
             let set_name = mascot.image_set_name().to_string();
             // 色は ImageSet ではなく set 宣言に由来するため、付け替え後 set の宣言へ
-            // tint も更新する（旧宣言のスタイルを残さない）。
-            mascot.set_tint_style(self.set_tints.get(&set_name).copied().unwrap_or_default());
+            // tint も更新する（旧宣言のスタイルを残さない。位相は宣言の初期値へ戻し、
+            // `Start` を書いていない set は抽選し直す）。
+            let declared = self.set_tints.get(&set_name).copied().unwrap_or_default();
+            let start = start_hue(declared, self.rng.as_mut());
+            mascot.set_tint_style(declared, start);
 
             // 3. behavior 再構築（判定は「付け替え後 set」の table で行う）
             let table = table_for(&self.set_tables, &self.table, &set_name);

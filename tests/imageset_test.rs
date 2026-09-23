@@ -429,10 +429,18 @@ fn enumerate_sets_lists_subdirectories_only() {
 }
 
 #[test]
-fn enumerate_sets_on_real_img_dir_finds_both_sets() {
+fn enumerate_sets_on_real_img_dir_finds_the_shipped_sets() {
     let mut sets = enumerate_sets(&assets_img()).expect("実資産 img/ を列挙できる");
     sets.sort();
-    assert_eq!(sets, vec!["KuroShimeji".to_string(), "Shimeji".to_string()]);
+    assert_eq!(
+        sets,
+        vec![
+            "GamingShimeji".to_string(),
+            "KuroShimeji".to_string(),
+            "PastelShimeji".to_string(),
+            "Shimeji".to_string(),
+        ]
+    );
 }
 
 #[test]

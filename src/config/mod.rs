@@ -18,7 +18,7 @@ use thiserror::Error;
 
 pub mod script;
 
-use crate::tint::{Palette, PaletteColor, TintMode, TintStyle};
+use crate::tint::{Palette, PaletteColor, StartPhase, TintMode, TintStyle};
 
 use script::Variable;
 
@@ -363,8 +363,29 @@ fn parse_tint_style(cx: &Cx, root: Node) -> TintStyle {
     style.sat = tint_num_attr(cx, root, "Sat", crate::tint::DEFAULT_SAT);
     style.lum = tint_num_attr(cx, root, "Lum", crate::tint::DEFAULT_LUM);
     style.glow = tint_num_attr(cx, root, "Glow", crate::tint::DEFAULT_GLOW);
-    style.start = tint_angle_attr(cx, root, "Start", 0.0);
+    style.start = tint_start_attr(cx, root, "Start");
     style
+}
+
+/// ルート属性の初期位相（`Start`）。**未指定 = 抽選**（出現のたびに位相を決める）。
+///
+/// 値は 0 以上 360 未満へ wrap する（負値と 360 以上を許す）。不正値は警告して
+/// **未指定と同じ扱い（抽選）**にする。
+fn tint_start_attr(cx: &Cx, node: Node, name: &str) -> StartPhase {
+    let Some(text) = node.attribute(name) else {
+        return StartPhase::Random;
+    };
+    match text.trim().parse::<f32>() {
+        Ok(value) if value.is_finite() => StartPhase::Fixed(value.rem_euclid(360.0)),
+        _ => {
+            log::warn!(
+                "{}:{}: invalid {name} `{text}`: drawing the phase at spawn",
+                cx.file,
+                cx.line_of(node)
+            );
+            StartPhase::Random
+        }
+    }
 }
 
 /// ルート属性の数値。未指定は `default`、パース失敗・非有限は警告 + `default`。
@@ -383,12 +404,6 @@ fn tint_num_attr(cx: &Cx, node: Node, name: &str, default: f32) -> f32 {
             default
         }
     }
-}
-
-/// ルート属性の色相（度）。[`tint_num_attr`] と同じ扱いで、値を 0 以上 360 未満へ wrap する
-/// （`Start` は負値と 360 以上を許す）。
-fn tint_angle_attr(cx: &Cx, node: Node, name: &str, default: f32) -> f32 {
-    tint_num_attr(cx, node, name, default).rem_euclid(360.0)
 }
 
 /// ルート `<TintPalette>` の `<Color>` を読む。無ければ空（= 色なし）。

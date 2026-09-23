@@ -104,7 +104,8 @@ use shimeji::mascot::behavior::{
 use shimeji::mascot::{Mascot, Rect, Rng};
 use shimeji::render::imageset::{Frame, ImageSet};
 use shimeji::tint::{
-    hsl_to_rgb, Palette, PaletteColor, TintMode, TintStyle, DEFAULT_GLOW, DEFAULT_LUM, DEFAULT_SAT,
+    hsl_to_rgb, Palette, PaletteColor, StartPhase, TintMode, TintStyle, DEFAULT_GLOW, DEFAULT_LUM,
+    DEFAULT_SAT,
 };
 
 // =====================================================================
@@ -1607,6 +1608,8 @@ fn manager_reload_injects_per_set_tint_into_spawned_mascots() {
     let cycle = TintStyle {
         mode: TintMode::Cycle,
         rotate: 150.0,
+        // 位相は宣言値で固定する（抽選の検証は別テスト・ここでは注入経路だけを見る）
+        start: StartPhase::Fixed(0.0),
         ..Default::default()
     };
     manager.reload(vec![
@@ -1750,7 +1753,7 @@ fn manager_reload_resets_the_phase_to_the_declared_start() {
             TintStyle {
                 mode: TintMode::Cycle,
                 rotate: 150.0,
-                start: 210.0,
+                start: StartPhase::Fixed(210.0),
                 ..Default::default()
             },
             palette(&[("strawberry", 0.0)]),
@@ -1898,10 +1901,11 @@ impl Rng for CountingRng {
 
 /// `Mode="random"` でも許可色 0（全色 `Allowed="false"`）のときは抽選しない
 /// = **rng を消費しない**（`Mode` を書かない set と同じ消費数）。
+/// `Mode="cycle"` で `Start` を書かない set は、出現時の位相に 1 回だけ消費する。
 #[test]
 fn manager_random_tint_without_allowed_colours_does_not_consume_rng() {
     /// 同じ table / set で 1 体 spawn し、rng の消費数を返す。
-    fn consumed_with(colours: Palette, mode: TintMode) -> usize {
+    fn consumed_with(colours: Palette, style: TintStyle) -> usize {
         let env = single_monitor_env();
         let counter = Rc::new(RefCell::new(0usize));
         let mut manager = make_manager_with_rng(
@@ -1920,10 +1924,7 @@ fn manager_random_tint_without_allowed_colours_does_not_consume_rng() {
             "SetA",
             image_set_with("SetA", "a.png", 8, 8),
             vec![row("Walk", 100)],
-            TintStyle {
-                mode,
-                ..Default::default()
-            },
+            style,
             colours,
         )]);
         manager.request_spawn("SetA");
@@ -1932,18 +1933,136 @@ fn manager_random_tint_without_allowed_colours_does_not_consume_rng() {
         consumed
     }
 
-    let none_allowed = consumed_with(palette_allowed(&[("red", 0.0, false)]), TintMode::Random);
-    let off = consumed_with(palette_allowed(&[("red", 0.0, false)]), TintMode::Off);
+    let random = |mode| TintStyle {
+        mode,
+        ..Default::default()
+    };
+    let none_allowed = consumed_with(
+        palette_allowed(&[("red", 0.0, false)]),
+        random(TintMode::Random),
+    );
+    let off = consumed_with(
+        palette_allowed(&[("red", 0.0, false)]),
+        random(TintMode::Off),
+    );
     assert_eq!(
         none_allowed, off,
         "許可 0 色では抽選しない（rng を消費しない）"
     );
 
-    let one_allowed = consumed_with(palette_allowed(&[("red", 0.0, true)]), TintMode::Random);
+    let one_allowed = consumed_with(
+        palette_allowed(&[("red", 0.0, true)]),
+        random(TintMode::Random),
+    );
     assert_eq!(
         one_allowed,
         off + 1,
         "許可色があるときの抽選は rng をちょうど 1 回消費する"
+    );
+
+    // `Start` を書かない `cycle` は、出現時の位相に 1 回消費する
+    let cycle_drawn = consumed_with(
+        palette_allowed(&[("red", 0.0, true)]),
+        random(TintMode::Cycle),
+    );
+    assert_eq!(
+        cycle_drawn,
+        off + 1,
+        "位相の抽選は rng をちょうど 1 回消費する"
+    );
+
+    // `Start` を書いた `cycle` は抽選しない
+    let cycle_fixed = consumed_with(
+        palette_allowed(&[("red", 0.0, true)]),
+        TintStyle {
+            mode: TintMode::Cycle,
+            start: StartPhase::Fixed(90.0),
+            ..Default::default()
+        },
+    );
+    assert_eq!(cycle_fixed, off, "位相を書いた set は rng を消費しない");
+}
+
+/// `Start` を書かない `cycle` の set は、出現のたびに位相を抽選する（個体ごとに違う色から回る）。
+#[test]
+fn manager_cycle_draws_the_phase_at_spawn_when_start_is_omitted() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        fixed_rng(vec![0.25; 64]),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        _ => None,
+    });
+    manager.reload(vec![material_with_palette(
+        "SetA",
+        image_set_with("SetA", "a.png", 8, 8),
+        vec![row("Walk", 100)],
+        TintStyle {
+            mode: TintMode::Cycle,
+            rotate: 0.0,
+            ..Default::default()
+        },
+        palette(&[("red", 0.0)]),
+    )]);
+
+    manager.request_spawn("SetA");
+    manager.tick(Instant::now());
+
+    let mut hue = None;
+    manager.apply_all(|m| hue = Some(m.tint_hue()));
+    assert_eq!(hue, Some(90.0), "0.25 × 360 = 90° から始まる（抽選）");
+}
+
+/// Reload は位相を宣言の初期値へ戻すが、`Start` を書いていない set は**抽選し直す**。
+#[test]
+fn manager_reload_redraws_the_random_phase() {
+    let env = single_monitor_env();
+    let mut manager = make_manager_with_rng(
+        env,
+        table(vec![row("Walk", 100)]),
+        ScriptedFactory::new(),
+        fixed_rng(vec![0.25; 64]),
+    );
+    manager.set_image_set_resolver(|name| match name {
+        "SetA" => Some(image_set_with("SetA", "a.png", 8, 8)),
+        _ => None,
+    });
+    let material = || {
+        material_with_palette(
+            "SetA",
+            image_set_with("SetA", "a.png", 8, 8),
+            vec![row("Walk", 100)],
+            TintStyle {
+                mode: TintMode::Cycle,
+                rotate: 150.0,
+                ..Default::default()
+            },
+            palette(&[("red", 0.0)]),
+        )
+    };
+    manager.reload(vec![material()]);
+    manager.request_spawn("SetA");
+    manager.tick(Instant::now());
+
+    let mut before = None;
+    manager.apply_all(|m| before = Some(m.tint_hue()));
+    assert_eq!(
+        before,
+        Some(96.0),
+        "出現時に 90° を引き、同一 tick で 150°/s × 0.04s = 6° 進む"
+    );
+
+    manager.reload(vec![material()]);
+    let mut after = None;
+    manager.apply_all(|m| after = Some(m.tint_hue()));
+    assert_eq!(
+        after,
+        Some(90.0),
+        "Reload で抽選し直す（宣言値 0° でも現在値 96° でもない）"
     );
 }
 
@@ -2028,7 +2147,7 @@ fn manager_cycle_with_zero_speed_pins_the_start_hue() {
         TintStyle {
             mode: TintMode::Cycle,
             rotate: 0.0,
-            start: 210.0,
+            start: StartPhase::Fixed(210.0),
             ..Default::default()
         },
         palette(&[("strawberry", 0.0)]),

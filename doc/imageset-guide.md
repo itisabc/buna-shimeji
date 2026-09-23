@@ -237,7 +237,7 @@ A: 単一起動制限（ユーザーセッション内で 1 プロセス）で�
   <TintPalette xmlns="http://www.group-finity.com/Mascot"
                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                xsi:schemaLocation="http://www.group-finity.com/Mascot TintPalette.xsd"
-               Mode="random" Sat="100" Lum="62" Glow="1.4" Start="0">
+               Mode="random" Sat="100" Lum="62" Glow="1.4">
     <Color Id="strawberry" Name="いちご" Hue="0"/>
     <Color Id="white"      Name="白"   Sat="0" Lum="100" Glow="0"/>
     <Color Id="black"      Name="黒"   Sat="0" Lum="0"   Glow="0" Allowed="false"/>
@@ -252,7 +252,9 @@ A: 単一起動制限（ユーザーセッション内で 1 プロセス）で�
   なめらかに回す（`rainbow` も同じ）。**省略（または `off` / `none`）は色づけなし**です。
 - `Speed`: 回転速度（°/秒）。既定は `cycle` のとき 150、それ以外は 0。負値で逆回転。
   `0` にすると位相が止まり、`Start` の色相で固定されます。
-- `Start`: 出現時の色相（度・既定 0）。負値と 360 以上は wrap します。
+- `Start`: 出現時の色相（度・0 以上 360 未満。負値と 360 以上は wrap）。**省略すると出現のたびに
+  抽選**され、個体ごとに違う色から始まります（揃って回らせたいときは `Start="0"` のように明示）。
+  Reload / 変身（Transform）のあとも抽選し直します。
 - `Sat` / `Lum` / `Glow`: 彩度・明度（%）と、グローの強さ（0 で光らない）。
   `<Color>` で省略した値の既定になります。
 - `<Color>`: その set が持つ色（**宣言順がメニューの並び**）。`Id` が必須（英数字と `_` `-`。

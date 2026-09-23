@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use shimeji::config::{parse_actions, parse_tint};
-use shimeji::tint::{hsl_to_rgb, Palette, PaletteColor, TintMode, TintStyle};
+use shimeji::tint::{hsl_to_rgb, Palette, PaletteColor, StartPhase, TintMode, TintStyle};
 
 /// 一時 tint.xml を書く（`attrs` = ルート属性・`body` = `<Color>` 群）。
 fn temp_tint(tag: &str, attrs: &str, body: &str) -> PathBuf {
@@ -54,7 +54,7 @@ fn full_declaration_is_parsed() {
     assert_eq!(tint.sat, 35.0);
     assert_eq!(tint.lum, 78.0);
     assert_eq!(tint.glow, 0.5);
-    assert_eq!(tint.start, 180.0);
+    assert_eq!(tint.start, StartPhase::Fixed(180.0));
 }
 
 /// `Mode="cycle"` で速度未指定なら既定 150°/s（`rainbow` は別名）。
@@ -108,25 +108,32 @@ fn invalid_numbers_fall_back_to_defaults() {
     assert_eq!(tint.sat, 100.0, "NaN は既定");
 }
 
-/// `Start` は初期色相（既定 0）。負値と 360 以上は wrap する。
+/// `Start` は出現時の初期色相。**省略すると出現のたびに抽選**し、書けば 0 以上 360 未満へ wrap する。
 #[test]
-fn start_defaults_to_zero_and_wraps() {
-    assert_eq!(tint_of("start-default", " Mode=\"cycle\"").start, 0.0);
-    assert_eq!(tint_of("start", " Mode=\"cycle\" Start=\"90\"").start, 90.0);
+fn start_is_drawn_when_omitted_and_wraps_when_written() {
+    assert_eq!(
+        tint_of("start-default", " Mode=\"cycle\"").start,
+        StartPhase::Random,
+        "省略 = 個体ごとに抽選"
+    );
+    assert_eq!(
+        tint_of("start", " Mode=\"cycle\" Start=\"90\"").start,
+        StartPhase::Fixed(90.0)
+    );
     assert_eq!(
         tint_of("start-neg", " Mode=\"cycle\" Start=\"-30\"").start,
-        330.0,
+        StartPhase::Fixed(330.0),
         "負の色相は wrap する"
     );
     assert_eq!(
         tint_of("start-wrap", " Mode=\"cycle\" Start=\"450\"").start,
-        90.0,
+        StartPhase::Fixed(90.0),
         "360 以上は wrap する"
     );
     assert_eq!(
         tint_of("start-bad", " Mode=\"cycle\" Start=\"soon\"").start,
-        0.0,
-        "不正値は既定"
+        StartPhase::Random,
+        "不正値は省略と同じ扱い（警告 + 抽選）"
     );
 }
 
@@ -267,7 +274,7 @@ fn with_color_pins_the_palette_colour() {
         sat: 35.0,
         lum: 78.0,
         glow: 0.5,
-        start: 0.0,
+        start: StartPhase::Fixed(0.0),
     };
     let colour = PaletteColor {
         id: "white".to_string(),
@@ -288,7 +295,7 @@ fn with_color_pins_the_palette_colour() {
         fixed.glow, 0.0,
         "グローも色の値（白・黒は宣言値で光らない）"
     );
-    assert_eq!(fixed.start, 0.0, "初期位相もその色");
+    assert_eq!(fixed.start, StartPhase::Fixed(0.0), "初期位相もその色");
 }
 
 /// パレットの色は宣言順に列挙でき、`iter` がメニューの並びの正本になる。

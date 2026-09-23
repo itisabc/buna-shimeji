@@ -7,6 +7,9 @@
 //! <TintPalette Mode="cycle" Speed="150" Start="0" Sat="100" Lum="62" Glow="1.4">
 //! ```
 //!
+//! `Start` は出現時の位相（色相）で、**書かなければ出現のたびに抽選**する（個体ごとに違う色から
+//! 始まる）。`Start="0"` のように書けば全個体が同じ色から始まる。
+//!
 //! 存在する色は同じファイルの `<Color>` が持つ（本体は色を知らない）:
 //!
 //! ```xml
@@ -38,6 +41,16 @@ pub enum TintMode {
     Fixed(f32),
 }
 
+/// 出現時の位相の初期値（`Start` 属性）。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum StartPhase {
+    /// 宣言の色相（度・0 以上 360 未満）から始める（`Start="90"` など）。
+    Fixed(f32),
+    /// 出現のたびに抽選する（**`Start` を書かない既定**。個体ごとに違う色から始まる）。
+    #[default]
+    Random,
+}
+
 /// set ごとの見せ方。宣言で決まり、個体では変わらない。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TintStyle {
@@ -51,8 +64,8 @@ pub struct TintStyle {
     pub lum: f32,
     /// グロー強度（0 で光らない）。
     pub glow: f32,
-    /// 出現時の位相の初期値（色相・度・0 以上 360 未満）。`Speed="0"` と組めば固定色。
-    pub start: f32,
+    /// 出現時の位相（色相・度）の決め方。`Speed="0"` と `Fixed` を組めば固定色。
+    pub start: StartPhase,
 }
 
 /// 既定の彩度（%）。ゲーミングの値。
@@ -138,7 +151,7 @@ impl Default for TintStyle {
             sat: DEFAULT_SAT,
             lum: DEFAULT_LUM,
             glow: DEFAULT_GLOW,
-            start: 0.0,
+            start: StartPhase::Random,
         }
     }
 }
@@ -169,7 +182,7 @@ impl TintStyle {
             sat: color.sat,
             lum: color.lum,
             glow: color.glow,
-            start: color.hue,
+            start: StartPhase::Fixed(color.hue),
         }
     }
 }

@@ -102,7 +102,7 @@ use shimeji::mascot::behavior::{
 };
 use shimeji::mascot::{EnvironmentView, Mascot, Rect, Rng};
 use shimeji::render::imageset::ImageSet;
-use shimeji::tint::{TintMode, TintStyle};
+use shimeji::tint::{StartPhase, TintMode, TintStyle};
 
 // =====================================================================
 // 合成データヘルパ（自己完結）
@@ -1175,12 +1175,15 @@ fn manager_transform_clears_the_colour_when_the_target_set_has_no_palette() {
         .set_behavior(Some(runner), &env, &base, &mut factory, &mut *rng)
         .unwrap();
     // 色づけした個体を用意する（spawn / Reload が注入するのと同じ経路）
-    mascot.set_tint_style(TintStyle {
-        mode: TintMode::Cycle,
-        rotate: 150.0,
-        start: 210.0,
-        ..Default::default()
-    });
+    mascot.set_tint_style(
+        TintStyle {
+            mode: TintMode::Cycle,
+            rotate: 150.0,
+            start: StartPhase::Fixed(210.0),
+            ..Default::default()
+        },
+        210.0,
+    );
 
     let mut manager = Manager::new(env, base, Box::new(factory), rng);
     manager.set_exit_on_last_removed(false);

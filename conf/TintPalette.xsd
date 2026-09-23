@@ -54,11 +54,13 @@
                 </documentation>
             </annotation>
         </attribute>
-        <attribute name="Start" type="double" default="0">
+        <attribute name="Start" type="double">
             <annotation>
                 <documentation>
                     The initial hue in degrees (0 or greater and less than 360 after wrapping; negative values and
-                    values of 360 or more are wrapped). This is the hue of a mascot when it appears.
+                    values of 360 or more are wrapped). Omitting it draws the phase for every mascot when it
+                    appears, so each individual starts at a random hue; write a value (0 for example) to make them
+                    all start at the same hue.
                 </documentation>
             </annotation>
         </attribute>

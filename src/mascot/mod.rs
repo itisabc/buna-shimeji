@@ -764,14 +764,11 @@ impl Mascot {
         self.needs_repaint = needs_repaint;
     }
 
-    /// set の宣言（または出現時に確定した色）の見せ方を設定する（Manager が spawn / Reload /
-    /// Transform 時に注入）。位相は**宣言の初期値へ戻す**（確定色なら その色相 /
-    /// `cycle` なら `Start`）。
-    pub fn set_tint_style(&mut self, tint: TintStyle) {
-        self.tint_hue = match tint.mode {
-            TintMode::Fixed(hue) => hue,
-            _ => tint.start,
-        };
+    /// set の宣言（または出現時に確定した色）の見せ方と、出現時の位相を設定する
+    /// （Manager が spawn / Reload / Transform 時に注入）。位相は**出現時に決まる**ので、
+    /// 宣言の `Start` を書いていない set は Manager が抽選した値を渡す。
+    pub fn set_tint_style(&mut self, tint: TintStyle, start_hue: f32) {
+        self.tint_hue = start_hue.rem_euclid(360.0);
         self.tint = tint;
     }
 

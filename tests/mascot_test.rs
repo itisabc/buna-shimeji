@@ -1826,11 +1826,14 @@ fn off_tint_yields_no_color_and_fixed_uses_its_hue() {
         "既定（Off）は色づけなし = 描画は従来とバイト同一"
     );
 
-    m.set_tint_style(TintStyle {
-        mode: TintMode::Fixed(120.0),
-        rotate: 0.0,
-        ..Default::default()
-    });
+    m.set_tint_style(
+        TintStyle {
+            mode: TintMode::Fixed(120.0),
+            rotate: 0.0,
+            ..Default::default()
+        },
+        120.0,
+    );
     assert_eq!(m.tint_hue(), 120.0, "固定色は宣言した色相をそのまま使う");
     assert_eq!(
         m.tint_rgb(),
@@ -1847,11 +1850,14 @@ fn cycle_tint_phase_advances_linearly_with_ticks() {
     let mut factory = MockFactory::new(&log);
     let mut m = mascot_at((500, 500));
     m.set_image(Some(on_screen_image()));
-    m.set_tint_style(TintStyle {
-        mode: TintMode::Cycle,
-        rotate: 150.0,
-        ..Default::default()
-    });
+    m.set_tint_style(
+        TintStyle {
+            mode: TintMode::Cycle,
+            rotate: 150.0,
+            ..Default::default()
+        },
+        0.0,
+    );
 
     let t = table(vec![single("Walk", 100)]);
     let mut rng = FakeRng::new(&[]);
@@ -1893,11 +1899,14 @@ fn cycle_tint_phase_wraps_at_360() {
     let mut m = mascot_at((500, 500));
     m.set_image(Some(on_screen_image()));
     // 7500°/s × 0.04s = 300°/tick
-    m.set_tint_style(TintStyle {
-        mode: TintMode::Cycle,
-        rotate: 7500.0,
-        ..Default::default()
-    });
+    m.set_tint_style(
+        TintStyle {
+            mode: TintMode::Cycle,
+            rotate: 7500.0,
+            ..Default::default()
+        },
+        0.0,
+    );
 
     let t = table(vec![single("Walk", 100)]);
     let mut rng = FakeRng::new(&[]);
@@ -1936,18 +1945,24 @@ fn tint_glow_is_zero_without_color_and_follows_declaration() {
     let mut m = mascot_at((500, 500));
     assert_eq!(m.tint_glow(), 0, "既定（Off）はグローなし");
 
-    m.set_tint_style(TintStyle {
-        mode: TintMode::Cycle,
-        glow: 1.4,
-        ..Default::default()
-    });
+    m.set_tint_style(
+        TintStyle {
+            mode: TintMode::Cycle,
+            glow: 1.4,
+            ..Default::default()
+        },
+        0.0,
+    );
     assert_eq!(m.tint_glow(), 143, "宣言値 × gain の α 倍率");
 
-    m.set_tint_style(TintStyle {
-        mode: TintMode::Off,
-        glow: 1.4,
-        ..Default::default()
-    });
+    m.set_tint_style(
+        TintStyle {
+            mode: TintMode::Off,
+            glow: 1.4,
+            ..Default::default()
+        },
+        0.0,
+    );
     assert_eq!(m.tint_glow(), 0, "Off は色が無いので光らせない");
 }
 
