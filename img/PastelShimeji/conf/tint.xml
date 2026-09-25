@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<TintPalette xmlns="http://www.group-finity.com/Mascot" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xsi:schemaLocation="http://www.group-finity.com/Mascot TintPalette.xsd"
+             Mode="cycle" Speed="5" Sat="35" Lum="78" Glow="0.5">
+
+    <!-- 色づけの宣言（Rust 版独自）。<Color> の宣言順がメニューの並びになる。
+
+         ルート属性（この set の見せ方）:
+           Mode  : 色の出し方。random = 出現のたびに許可色から 1 色抽選して固定 /
+                   cycle = 色相を回し続ける（rainbow も同じ）。省略 = 色づけなし
+           Speed : 回転速度（°/秒）。既定は cycle のとき 150、それ以外は 0。
+                   負値で逆回転、0 で位相が止まり Start の色相で固定される
+           Start : 出現時の色相（度）。**省略 = 出現のたびに抽選**（個体ごとに違う色から回る）。
+                   Start="0" を書くと全個体が同じ色から始まる
+           Sat   : 彩度（%・既定 100）。<Color> で省略したときの既定になる
+           Lum   : 明度（%・既定 62）。同上
+           Glow  : グローの強さ（既定 1.0・0 で光らない）。同上
+
+         <Color>（この set が持つ色・宣言順がメニューの並び）:
+           Id      : 必須。英数字と _ - のみ（set 内で一意。重複したら先に書いた色が残る）
+           Name    : メニューに出る表示名。省略すると Id。作者データで辞書を通さない
+                     （多言語にしたいときは Name を書き換えた set を用意する）
+           Hue     : 色相（度・既定 0）。負値と 360 以上は wrap する
+           Sat / Lum / Glow : ルート属性の値を継承する（その色だけ上書きできる）
+           Allowed : "false" にすると出さない（省略 = 出す）。抽選と「呼ぶ → 色」の
+                     一覧の両方がこの許可色だけを使う
+
+         6 色（60° 刻み・パステル調）。値を変えるときはこの属性だけを直す。
+         書式の正本は conf/TintPalette.xsd と doc/imageset-guide.md §12。
+         ファイルを消すと色なし（無色）に戻る。 -->
+    <Color Id="strawberry" Name="いちご"       Hue="0"/>
+    <Color Id="lemon"      Name="レモン"       Hue="60"/>
+    <Color Id="muscat"     Name="マスカット"   Hue="120"/>
+    <Color Id="soda"       Name="ソーダ"       Hue="180"/>
+    <Color Id="blueberry"  Name="ブルーベリー" Hue="240"/>
+    <Color Id="cassis"     Name="カシス"       Hue="300"/>
+</TintPalette>
