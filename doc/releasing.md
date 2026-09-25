@@ -5,7 +5,7 @@
 ## 1. 配布物（zip）の構成
 
 ```
-buna-shimeji-v0.1.2-win64/
+buna-shimeji-v0.1.3-win64/
 ├─ shimeji.exe
 ├─ conf/
 │   ├─ actions.xml
@@ -15,8 +15,10 @@ buna-shimeji-v0.1.2-win64/
 │   ├─ lang/            (en.toml, ja.toml)
 │   └─ settings.toml    ← conf/settings.default.toml をリネームして同封
 ├─ img/
-│   ├─ Shimeji/
-│   └─ KuroShimeji/
+│   ├─ GamingShimeji/   (色づけの見本・conf/tint.xml 付き)
+│   ├─ KuroShimeji/
+│   ├─ PastelShimeji/   (色づけの見本・conf/tint.xml 付き)
+│   └─ Shimeji/
 ├─ README.md
 └─ LICENSE
 ```
@@ -36,7 +38,7 @@ cargo build --release
 ## 3. パッケージ（zip 作成）
 
 ```powershell
-$ver   = "0.1.2"   # Cargo.toml の version に合わせる
+$ver   = "0.1.3"   # Cargo.toml の version に合わせる
 $stage = "target/package/buna-shimeji-v$ver-win64"
 $zip   = "target/package/buna-shimeji-v$ver-win64.zip"
 
@@ -65,8 +67,8 @@ Compress-Archive -Path $stage -DestinationPath $zip -Force
 ## 5. GitHub Release の手順
 
 1. リポジトリ → **Releases** → 「Draft a new release」
-2. **Tag**: `v0.1.2`（`Cargo.toml` の `version` と一致させる）
-3. **Title**: `v0.1.2`
+2. **Tag**: `v0.1.3`（`Cargo.toml` の `version` と一致させる）
+3. **Title**: `v0.1.3`
 4. **説明欄**: 下のテンプレートを貼る（`<SHA256>` を実際の値に置換）
 5. zip を「Attach binaries」で添付 → **Publish release**
 
@@ -77,7 +79,7 @@ Windows 用デスクトップマスコット「しめじ」の Rust 実装です
 
 ## ダウンロード
 
-下の `buna-shimeji-v0.1.2-win64.zip` をダウンロードして展開してください。
+下の `buna-shimeji-v0.1.3-win64.zip` をダウンロードして展開してください。
 
 ## 使い方
 
